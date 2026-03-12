@@ -5,8 +5,9 @@
 #
 # Usage:
 #   python3 pcie_squirrel.py --build
-#   python3 pcie_squirrel.py --build --load    # JTAG
-#   python3 pcie_squirrel.py --build --flash   # SPI flash
+#   python3 pcie_squirrel.py --build --load         # JTAG
+#   python3 pcie_squirrel.py --build --flash        # SPI flash
+#   python3 pcie_squirrel.py --build --with-analyzer
 
 import os
 import argparse
@@ -24,14 +25,13 @@ from litex.soc.cores.usb_fifo import phy_description
 
 from litepcie.phy.s7pciephy import S7PCIEPHY
 
-# Import gateware from pcie_screamer repo
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../pcie_screamer"))
 from gateware.usb import USBCore
 from gateware.etherbone import Etherbone
 from gateware.tlp import TLP
 from gateware.msi import MSI
 from gateware.ft601 import FT601Sync
+
+from litescope import LiteScopeAnalyzer
 
 from pcie_squirrel_platform import Platform
 
@@ -63,51 +63,55 @@ class PCIeSquirrel(SoCMini):
         "tlp":      1,
     }
 
-    def __init__(self, platform, with_loopback=False):
+    def __init__(self, platform, with_analyzer=False, with_loopback=False):
         sys_clk_freq = int(100e6)
 
         SoCMini.__init__(self, platform, sys_clk_freq,
                          ident="PCIe Screamer Squirrel", ident_version=True)
 
-        # CRG
+        # CRG --------------------------------------------------------------------------------------
         self.submodules.crg = _CRG(platform, sys_clk_freq)
 
-        # PCIe PHY
-        self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
-                                              data_width=64, bar0_size=0x40000)
+        # Serial Wishbone Bridge -------------------------------------------------------------------
+        self.submodules.bridge = UARTWishboneBridge(
+            platform.request("serial"), sys_clk_freq, baudrate=3e6)
+        self.bus.add_master(master=self.bridge.wishbone)
+
+        # PCIe PHY ---------------------------------------------------------------------------------
+        self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"))
         self.add_csr("pcie_phy")
 
-        # USB FT601 PHY
+        # USB FT601 PHY ----------------------------------------------------------------------------
         self.submodules.usb_phy = FT601Sync(platform.request("usb_fifo"), dw=32, timeout=1024)
 
+        # USB Loopback -----------------------------------------------------------------------------
         if with_loopback:
-            # USB loopback for testing
             self.submodules.usb_loopback_fifo = stream.SyncFIFO(phy_description(32), 2048)
             self.comb += [
                 self.usb_phy.source.connect(self.usb_loopback_fifo.sink),
                 self.usb_loopback_fifo.source.connect(self.usb_phy.sink),
             ]
+        # USB Core ---------------------------------------------------------------------------------
         else:
-            # USB Core
             self.submodules.usb_core = USBCore(self.usb_phy, sys_clk_freq)
 
-            # USB <--> Wishbone
+            # USB <--> Wishbone --------------------------------------------------------------------
             self.submodules.etherbone = Etherbone(self.usb_core, self.usb_map["wishbone"])
             self.bus.add_master(master=self.etherbone.master.bus)
 
-            # USB <--> TLP
+            # USB <--> TLP -------------------------------------------------------------------------
             self.submodules.tlp = TLP(self.usb_core, self.usb_map["tlp"])
             self.comb += [
                 self.pcie_phy.source.connect(self.tlp.sender.sink),
                 self.tlp.receiver.source.connect(self.pcie_phy.sink),
             ]
 
-        # MSI
+        # Wishbone --> MSI -------------------------------------------------------------------------
         self.submodules.msi = MSI()
         self.comb += self.msi.source.connect(self.pcie_phy.msi)
         self.add_csr("msi")
 
-        # LEDs
+        # LEDs -------------------------------------------------------------------------------------
         usb_counter = Signal(32)
         self.sync.usb += usb_counter.eq(usb_counter + 1)
         self.comb += platform.request("user_led", 0).eq(usb_counter[26])
@@ -116,10 +120,21 @@ class PCIeSquirrel(SoCMini):
         self.sync.pcie += pcie_counter.eq(pcie_counter + 1)
         self.comb += platform.request("user_led", 1).eq(pcie_counter[26])
 
+        # Analyzer ---------------------------------------------------------------------------------
+        if with_analyzer:
+            analyzer_signals = [
+                self.pcie_phy.sink,
+                self.pcie_phy.source,
+            ]
+            self.submodules.analyzer = LiteScopeAnalyzer(
+                analyzer_signals, 1024, csr_csv="test/analyzer.csv")
+            self.add_csr("analyzer")
+
 # Build --------------------------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="PCIe Screamer Squirrel Gateware")
+    parser.add_argument("--with-analyzer", action="store_true", help="Enable LiteScope analyzer")
     parser.add_argument("--with-loopback", action="store_true", help="Enable USB loopback")
     parser.add_argument("--build",         action="store_true", help="Build bitstream")
     parser.add_argument("--load",          action="store_true", help="Load via JTAG")
@@ -127,7 +142,9 @@ def main():
     args = parser.parse_args()
 
     platform = Platform()
-    soc      = PCIeSquirrel(platform, with_loopback=args.with_loopback)
+    soc      = PCIeSquirrel(platform,
+                            with_analyzer=args.with_analyzer,
+                            with_loopback=args.with_loopback)
     builder  = Builder(soc, csr_csv="test/csr.csv")
     builder.build(run=args.build)
 

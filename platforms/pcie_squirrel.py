@@ -14,6 +14,17 @@ _io = [
     ("user_led", 0, Pins("Y6"),  IOStandard("LVCMOS33")),
     ("user_led", 1, Pins("AB5"), IOStandard("LVCMOS33")),
 
+    # Buttons (active-low)
+    ("user_btn", 0, Pins("AB3"), IOStandard("LVCMOS33")),
+    ("user_btn", 1, Pins("AA5"), IOStandard("LVCMOS33")),
+
+    # Serial (undocumented but present)
+    ("serial", 0,
+        Subsignal("tx", Pins("T1")),
+        Subsignal("rx", Pins("U1")),
+        IOStandard("LVCMOS33"),
+    ),
+
     # PCIe x1
     ("pcie_x1", 0,
         Subsignal("rst_n", Pins("B13"), IOStandard("LVCMOS33")),
