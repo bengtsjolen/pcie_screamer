@@ -33,7 +33,8 @@ from gateware.ft601 import FT601Sync
 
 from litescope import LiteScopeAnalyzer
 
-from pcie_squirrel_platform import Platform
+from platforms.pcie_squirrel import Platform
+
 
 # CRG ----------------------------------------------------------------------------------------------
 
