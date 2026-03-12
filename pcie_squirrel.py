@@ -35,7 +35,6 @@ from litescope import LiteScopeAnalyzer
 
 from platforms.pcie_squirrel import Platform
 
-
 # CRG ----------------------------------------------------------------------------------------------
 
 class _CRG(Module):
@@ -54,7 +53,13 @@ class _CRG(Module):
         usb_clk100 = platform.request("usb_fifo_clock")
         platform.add_period_constraint(usb_clk100, 1e9/100e6)
         self.comb += self.cd_usb.clk.eq(usb_clk100)
-        self.specials += AsyncResetSynchronizer(self.cd_usb, ResetSignal("pcie"))
+        # PCIe screamer used pcie reset for ft601 meaning if pcie is bad, ft601 never comes up
+        # optionally we could use sys domain for reset or simply just keep the ft601 out of reset.
+        #self.specials += AsyncResetSynchronizer(self.cd_usb, ResetSignal("pcie"))
+        #self.specials += AsyncResetSynchronizer(self.cd_usb, ResetSignal("sys"))
+        self.comb += self.cd_usb.rst.eq(0)
+        
+        
 
 # PCIeSquirrel -------------------------------------------------------------------------------------
 
@@ -78,8 +83,11 @@ class PCIeSquirrel(SoCMini):
             platform.request("serial"), sys_clk_freq, baudrate=3e6)
         self.bus.add_master(master=self.bridge.wishbone)
 
-        # PCIe PHY ---------------------------------------------------------------------------------
-        self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"))
+        # PCIe PHY ------------------------------------------------------
+        ---------------------------
+        self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
+                                             data_width=64, bar0_size=0x40000)
+        
         self.add_csr("pcie_phy")
 
         # USB FT601 PHY ----------------------------------------------------------------------------
@@ -149,6 +157,7 @@ def main():
     builder  = Builder(soc, csr_csv="test/csr.csv")
     builder.build(run=args.build)
 
+    
     if args.load:
         prog = platform.create_programmer()
         prog.load_bitstream(os.path.join(builder.gateware_dir, soc.build_name + ".bit"))

@@ -4,7 +4,8 @@
 
 from migen import *
 from litex.build.generic_platform import *
-from litex.build.xilinx import XilinxPlatform
+from litex.build.xilinx import Xilinx7SeriesPlatform
+from litex.build.openocd import OpenOCD
 
 _io = [
     # 100 MHz system clock
@@ -58,12 +59,12 @@ _io = [
     ),
 ]
 
-class Platform(XilinxPlatform):
+class Platform(Xilinx7SeriesPlatform):
     default_clk_name   = "clk100"
     default_clk_period = 1e9/100e6
 
     def __init__(self):
-        XilinxPlatform.__init__(self, "xc7a35t-fgg484-2", _io, toolchain="vivado")
+        Xilinx7SeriesPlatform.__init__(self, "xc7a35t-fgg484-2", _io, toolchain="vivado")
         self.toolchain.bitstream_commands = [
             "set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4 [current_design]",
             "set_property BITSTREAM.CONFIG.CONFIGRATE 40 [current_design]",
@@ -73,3 +74,12 @@ class Platform(XilinxPlatform):
             "write_cfgmem -force -format bin -interface spix4 -size 16 "
             "-loadbit \"up 0x0 {build_name}.bit\" -file {build_name}.bin"
         ]
+
+
+    def create_programmer(self):
+        return OpenOCD("openocd_xc7_ft4232.cfg", "bscan_spi_xc7a35t.bit")
+
+
+    def do_finalize(self, fragment):
+        Xilinx7SeriesPlatform.do_finalize(self, fragment)
+        self.add_period_constraint(self.lookup_request("clk100", loose=True), 1e9/100e6)    
