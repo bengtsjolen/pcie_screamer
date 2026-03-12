@@ -83,8 +83,7 @@ class PCIeSquirrel(SoCMini):
             platform.request("serial"), sys_clk_freq, baudrate=3e6)
         self.bus.add_master(master=self.bridge.wishbone)
 
-        # PCIe PHY ------------------------------------------------------
-        ---------------------------
+        # PCIe PHY ---------------------------------------------------------------------------------
         self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
                                              data_width=64, bar0_size=0x40000)
         
