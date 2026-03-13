@@ -214,6 +214,7 @@ class MuxSerializer(Module):
 
         buf   = Signal(256)
         count = Signal(3)   # remaining words to send (0 = done)
+        rsync = Signal(3)   # resync words remaining
 
         self.submodules.fsm = fsm = FSM(reset_state="IDLE")
 
@@ -222,7 +223,19 @@ class MuxSerializer(Module):
             If(self.sink.valid,
                 NextValue(buf,   self.sink.data),
                 NextValue(count, 7),
-                NextState("SEND"),
+                NextValue(rsync, 4),   # will send rsync+1 = 5 resync words
+                NextState("RESYNC"),
+            )
+        )
+        fsm.act("RESYNC",
+            self.source.valid.eq(1),
+            self.source.data.eq(0x66665555),
+            If(self.source.ready,
+                If(rsync == 0,
+                    NextState("SEND"),
+                ).Else(
+                    NextValue(rsync, rsync - 1),
+                )
             )
         )
         fsm.act("SEND",
@@ -411,31 +424,19 @@ class PCILeechFIFO(Module):
         # All addresses are byte-addressed; we respond with a 16-bit value per read.
         # Byte offset → bits in ro[]:
         #   0x000A: ro[85:80] = pl_ltssm_state[5:0]
-        #   0x000C: ro[97:96] = pl_sel_lnk_width[1:0]
+        #   0x000C: ro[97:96] = pl_sel_lnk_width[1:0]  (LiteX: 0b00=x1,0b01=x2 matches LINK_WIDTH[4]={1,2,4,8})
+        #           ro[98]    = pl_phy_lnk_up           (bit[2] of byte 0x0C)
         #           ro[102]   = pl_sel_lnk_rate
-        #           ro[101]   = pl_link_upcfg_cap    (0 — Open() in LiteX)
-        #           ro[100]   = pl_link_partner_gen2_supported (0)
-        #           ro[99]    = pl_link_gen2_cap      (0)
         # Word index = byte_offset >> 1
         cfg_word_index  = Signal(8)
         cfg_ro_readback = Signal(16)
         self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
-        # LiteX s7pciephy _link_status.fields.width encoding:
-        #   0b00 = x1,  0b01 = x2,  0b10 = x4,  0b11 = x8
-        # Xilinx PCIe IP pl_sel_lnk_width (what pcileech expects):
-        #   0b01 = x1,  0b10 = x2,  0b100 = x4 (but field is 2-bit so x4=0b00 unused here)
-        # Translate: litex_width + 1 for x1/x2/x4 cases
-        phy_lnk_width_xlat = Signal(2)
-        self.comb += Case(self.phy_lnk_width, {
-            0b00: phy_lnk_width_xlat.eq(0b01),   # x1
-            0b01: phy_lnk_width_xlat.eq(0b10),   # x2
-            0b10: phy_lnk_width_xlat.eq(0b11),   # x4 (truncated, rarely used)
-            "default": phy_lnk_width_xlat.eq(0b01),
-        })
         self.comb += Case(cfg_word_index, {
             5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A: ro[85:80]=ltssm
-            6:  cfg_ro_readback.eq(Cat(phy_lnk_width_xlat,             # byte 0x0C: ro[97:96]=width
-                                       Signal(4),                        #            ro[101:98]=0
+            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,              # byte 0x0C: ro[97:96]=width
+                                       Signal(0),                        #            (no gap - lnk_up next)
+                                       self.phy_lnk_up,                 #            ro[98]=pl_phy_lnk_up
+                                       Signal(3),                        #            ro[101:99]=0
                                        self.phy_lnk_rate,               #            ro[102]=rate
                                        Signal(9))),                      #            ro[111:103]=0
             "default": cfg_ro_readback.eq(0),
