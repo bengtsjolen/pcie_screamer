@@ -420,9 +420,21 @@ class PCILeechFIFO(Module):
         cfg_word_index  = Signal(8)
         cfg_ro_readback = Signal(16)
         self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
+        # LiteX s7pciephy _link_status.fields.width encoding:
+        #   0b00 = x1,  0b01 = x2,  0b10 = x4,  0b11 = x8
+        # Xilinx PCIe IP pl_sel_lnk_width (what pcileech expects):
+        #   0b01 = x1,  0b10 = x2,  0b100 = x4 (but field is 2-bit so x4=0b00 unused here)
+        # Translate: litex_width + 1 for x1/x2/x4 cases
+        phy_lnk_width_xlat = Signal(2)
+        self.comb += Case(self.phy_lnk_width, {
+            0b00: phy_lnk_width_xlat.eq(0b01),   # x1
+            0b01: phy_lnk_width_xlat.eq(0b10),   # x2
+            0b10: phy_lnk_width_xlat.eq(0b11),   # x4 (truncated, rarely used)
+            "default": phy_lnk_width_xlat.eq(0b01),
+        })
         self.comb += Case(cfg_word_index, {
             5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A: ro[85:80]=ltssm
-            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,             # byte 0x0C: ro[97:96]=width
+            6:  cfg_ro_readback.eq(Cat(phy_lnk_width_xlat,             # byte 0x0C: ro[97:96]=width
                                        Signal(4),                        #            ro[101:98]=0
                                        self.phy_lnk_rate,               #            ro[102]=rate
                                        Signal(9))),                      #            ro[111:103]=0
