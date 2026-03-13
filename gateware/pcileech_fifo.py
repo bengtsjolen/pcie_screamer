@@ -134,37 +134,40 @@ class PCILeechMux(Module):
             ctx_reg[0],  ctx_reg[1],                       # bits 255:248
         ))
 
+        # Output hold register — latches completed frame until serializer takes it.
+        # frame_valid stays high until rd_en (serializer ready) clears it.
+        frame_valid = Signal()
+        frame_data  = Signal(256)
+
         self.comb += [
-            self.valid.eq(self.rd_en & (dout_buf_valid | dout_valid)),
-            self.dout .eq(Mux(dout_buf_valid, dout_buf_data, dout_data)),
+            self.valid.eq(frame_valid),
+            self.dout .eq(frame_data),
         ]
 
+        # frame_ready: serializer consumed the frame this cycle
+        frame_consumed = Signal()
+        self.comb += frame_consumed.eq(frame_valid & self.rd_en)
+
         # -------------------------------------------------------------------
-        # Sequential logic — mirrors SV always block
+        # Sequential logic
         # -------------------------------------------------------------------
         self.sync += [
             If(ResetSignal(),
                 idx_base.eq(0),
                 idle_count.eq(0),
-                dout_valid.eq(0),
-                dout_buf_valid.eq(0),
+                frame_valid.eq(0),
             ).Else(
-                # Output buffer: captures frame when rd_en drops
-                If(en,
-                    dout_buf_valid.eq(0),
-                ).Elif(dout_valid,
-                    dout_buf_data .eq(dout_data),
-                    dout_buf_valid.eq(1),
+                # Clear frame_valid when serializer consumes it
+                If(frame_consumed,
+                    frame_valid.eq(0),
                 ),
 
-                # Assert dout_valid when we have a full 7-word frame
-                dout_valid.eq(en & (idx_max >= 7)),
-
-                If(en,
+                # Run mux advance logic every cycle (en always high after reset)
+                If(en & ~frame_valid,
                     # Advance base index, wrapping after frame emit
                     idx_base.eq(idx_max - Mux(idx_max >= 7, 7, 0)),
 
-                    # Idle counter — increments when no input arrives
+                    # Idle counter — increments when no input arrives this cycle
                     If((idx_base > 0) & (idx_base == idle_idx),
                         idle_count.eq(idle_count + 1),
                     ).Else(
@@ -182,14 +185,12 @@ class PCILeechMux(Module):
                         data_reg[idle_idx].eq(0xFFFFFFFF),
                         ctx_reg [idle_idx].eq(0b1111),
                     ),
-                ),
 
-                # After frame emit: shift overflow words (index >= 7) down
-                If(dout_valid,
-                    *[If(idx_base > i,
-                        data_reg[i].eq(data_reg[7 + i]),
-                        ctx_reg [i].eq(ctx_reg [7 + i]),
-                      ) for i in range(7)],
+                    # Latch completed frame into hold register
+                    If(idx_max >= 7,
+                        frame_valid.eq(1),
+                        frame_data .eq(dout_data),
+                    ),
                 ),
             )
         ]
