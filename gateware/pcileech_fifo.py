@@ -281,17 +281,27 @@ class PCILeechFIFO(Module):
         # Always consume USB RX — we can't apply backpressure here
         self.comb += self.usb_rx.ready.eq(1)
 
+        # FT601 byte-swaps each 32-bit word on the bus (see pcileech_ft601.sv lines 42-45).
+        # FT601Sync passes data through unmodified, so we must reverse the swap here.
+        rx_word = Signal(32)
+        self.comb += rx_word.eq(Cat(
+            self.usb_rx.data[24:32],
+            self.usb_rx.data[16:24],
+            self.usb_rx.data[ 8:16],
+            self.usb_rx.data[ 0: 8],
+        ))
+
         self.sync += [
             rx64_valid.eq(0),
             If(self.usb_rx.valid,
                 # Resync pattern — reset alignment
-                If(self.usb_rx.data == 0x66665555,
+                If(rx_word == 0x66665555,
                     rx_phase.eq(0),
                 ).Elif(rx_phase == 0,
-                    rx_lo  .eq(self.usb_rx.data),
+                    rx_lo  .eq(rx_word),
                     rx_phase.eq(1),
                 ).Else(
-                    rx64  .eq(Cat(rx_lo, self.usb_rx.data)),
+                    rx64  .eq(Cat(rx_lo, rx_word)),
                     rx64_valid.eq(1),
                     rx_phase.eq(0),
                 )
@@ -569,8 +579,21 @@ class PCILeechFIFO(Module):
             serializer.sink.data .eq(mux.dout),
         ]
 
-        # Connect serializer output to USB TX
-        self.comb += serializer.source.connect(self.usb_tx)
+        # Connect serializer output to USB TX with byte-swap.
+        # FT601 swaps bytes on TX (pcileech_ft601.sv line 36), so we pre-swap
+        # to cancel it out and deliver correct byte order to the host.
+        tx_swapped = Signal(32)
+        self.comb += tx_swapped.eq(Cat(
+            serializer.source.data[24:32],
+            serializer.source.data[16:24],
+            serializer.source.data[ 8:16],
+            serializer.source.data[ 0: 8],
+        ))
+        self.comb += [
+            self.usb_tx.valid.eq(serializer.source.valid),
+            self.usb_tx.data .eq(tx_swapped),
+            serializer.source.ready.eq(self.usb_tx.ready),
+        ]
 
         # -------------------------------------------------------------------
         # Mux port wiring (priority matches pcileech_fifo.sv / pcileech_mux.sv)
