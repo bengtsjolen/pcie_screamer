@@ -555,11 +555,14 @@ class PCILeechFIFO(Module):
             readback.eq(ro_readback)
         )
 
+        # CMD TX response format (matches pcileech_fifo.sv lines 361-365):
+        #   [31:16] = in_cmd_address_byte  (echoed back)
+        #   [15:0]  = {data_in[7:0], data_in[15:8]}  (byte-swapped 16-bit value)
         self.comb += [
             cmd_tx_fifo.sink.valid.eq(in_cmd_read),
             cmd_tx_fifo.sink.data .eq(Cat(
-                Cat(readback[8:16], readback[0:8]),  # byte-swap
-                in_addr_byte,
+                Cat(readback[8:16], readback[0:8]),  # [15:0]  byte-swapped value
+                in_addr_byte,                         # [31:16] echoed address
             )),
             cmd_tx_fifo.sink.last.eq(1),
         ]
@@ -596,51 +599,52 @@ class PCILeechFIFO(Module):
         ]
 
         # -------------------------------------------------------------------
-        # Mux port wiring (priority matches pcileech_fifo.sv / pcileech_mux.sv)
+        # Mux port wiring — matches pcileech_fifo.sv port priority exactly:
         #
-        # p0: LOOPBACK   tag=10, ctx=last<<1|first
-        # p1: CMD resp   tag=11, ctx=last<<1
-        # p2: CFG resp   tag=01, ctx=00         (stub — not yet implemented)
-        # p3: TLP RX     tag=00, ctx=last<<1|first
-        # p4-p6: (stub)
-        # p7: (stub)
+        # p0: TLP RX     (PCIe→host, highest priority)  bottom bits=0b00
+        # p1: CFG resp   (stub)                          bottom bits=0b01
+        # p2: Loopback                                   bottom bits=0b10
+        # p3: CMD resp   ctx=2'b00                       bottom bits=0b11
+        # p4-p7: stubs
+        #
+        # Status nibble per slot = (ctx[1:0] << 2) | port_index[1:0]
+        # Host filter: (nibble & 0x0f) == (flags & 0x03)
+        #   FPGA_REG_CORE=0x03 → matches p3 (CMD)
+        #   FPGA_REG_PCIE=0x01 → matches p1 (CFG)
         # -------------------------------------------------------------------
 
-        # p0: loopback
+        # p0: TLP RX (PCIe → host)
         self.comb += [
-            mux.p_din[0].eq(loop_fifo.source.data),
-            mux.p_ctx[0].eq(Cat(Signal(2, reset=TYPE_LOOP),
-                                Cat(loop_fifo.source.last, Signal()))),
-            mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
-            loop_fifo.source.ready.eq(mux.p_req[0]),
+            mux.p_din[0].eq(tlp_rx_fifo.source.dat),
+            mux.p_ctx[0].eq(Cat(Signal(2), Cat(tlp_rx_fifo.source.last, Signal()))),
+            mux.p_wr [0].eq(tlp_rx_fifo.source.valid & mux.p_req[0]),
+            tlp_rx_fifo.source.ready.eq(mux.p_req[0]),
         ]
 
-        # p1: CMD response
+        # p1: CFG (stub)
         self.comb += [
-            mux.p_din[1].eq(cmd_tx_fifo.source.data),
-            mux.p_ctx[1].eq(Cat(Signal(2, reset=TYPE_CMD),
-                                Cat(cmd_tx_fifo.source.last, Signal()))),
-            mux.p_wr [1].eq(cmd_tx_fifo.source.valid & mux.p_req[1]),
-            cmd_tx_fifo.source.ready.eq(mux.p_req[1]),
+            mux.p_din[1].eq(0),
+            mux.p_ctx[1].eq(0),
+            mux.p_wr [1].eq(0),
         ]
 
-        # p2: CFG (stub)
+        # p2: loopback
         self.comb += [
-            mux.p_din[2].eq(0),
-            mux.p_ctx[2].eq(Cat(Signal(2, reset=TYPE_CFG), Signal(2))),
-            mux.p_wr [2].eq(0),
+            mux.p_din[2].eq(loop_fifo.source.data),
+            mux.p_ctx[2].eq(Cat(Signal(2), Cat(loop_fifo.source.last, Signal()))),
+            mux.p_wr [2].eq(loop_fifo.source.valid & mux.p_req[2]),
+            loop_fifo.source.ready.eq(mux.p_req[2]),
         ]
 
-        # p3: TLP RX (PCIe → host)
+        # p3: CMD response — ctx=2'b00 (matches SV _cmd_tx_din[33:32] default 0)
         self.comb += [
-            mux.p_din[3].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[3].eq(Cat(Signal(2, reset=TYPE_TLP),
-                                Cat(tlp_rx_fifo.source.last, Signal()))),
-            mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
-            tlp_rx_fifo.source.ready.eq(mux.p_req[3]),
+            mux.p_din[3].eq(cmd_tx_fifo.source.data),
+            mux.p_ctx[3].eq(Cat(Signal(2), Cat(cmd_tx_fifo.source.last, Signal()))),
+            mux.p_wr [3].eq(cmd_tx_fifo.source.valid & mux.p_req[3]),
+            cmd_tx_fifo.source.ready.eq(mux.p_req[3]),
         ]
 
-        # p4-p7: stubs (additional TLP streams, not needed for x1)
+        # p4-p7: stubs
         for i in range(4, 8):
             self.comb += [
                 mux.p_din[i].eq(0),
