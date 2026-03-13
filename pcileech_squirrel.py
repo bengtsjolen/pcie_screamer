@@ -131,7 +131,11 @@ class PCIeSquirrel(SoCMini):
             # PCIe reset driven by CMD register file.
             # rw[200] starts at 1 (core held in reset at startup).
             # Host clears it via CMD write to bring PCIe core online.
-            self.comb += self.pcie_phy.cd_pcie.rst.eq(pcileech_fifo.pcie_rst_core)
+            # Hold PCIe core in reset until host clears rw[200] via CMD write.
+            # pcie_phy.pcie_rst_n feeds i_sys_rst_n on the IP — active low.
+            self.comb += If(pcileech_fifo.pcie_rst_core,
+                            self.pcie_phy.pcie_rst_n.eq(0)
+                            )
 
         # MSI --------------------------------------------------------------------------------------
         self.submodules.msi = MSI()
