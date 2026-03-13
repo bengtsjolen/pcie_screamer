@@ -544,16 +544,13 @@ class PCILeechFIFO(Module):
             readback.eq(ro_readback)
         )
 
-        self.sync += [
-            cmd_tx_fifo.sink.valid.eq(0),
-            If(in_cmd_read,
-                cmd_tx_fifo.sink.valid.eq(1),
-                cmd_tx_fifo.sink.data .eq(Cat(
-                    Cat(readback[8:16], readback[0:8]),  # byte-swap
-                    in_addr_byte,
-                )),
-                cmd_tx_fifo.sink.last.eq(1),
-            )
+        self.comb += [
+            cmd_tx_fifo.sink.valid.eq(in_cmd_read),
+            cmd_tx_fifo.sink.data .eq(Cat(
+                Cat(readback[8:16], readback[0:8]),  # byte-swap
+                in_addr_byte,
+            )),
+            cmd_tx_fifo.sink.last.eq(1),
         ]
 
         # ===================================================================
