@@ -82,12 +82,12 @@ class PCILeechMux(Module):
 
         idx_base    = Signal(4, reset=0)
         idle_count  = Signal(4, reset=0)
-        en          = Signal()          # rd_en delayed 1 clk (matches SV)
+        en          = Signal()          # always 1 after reset - mux runs freely
         dout_valid  = Signal()
         dout_buf_valid = Signal()
         dout_buf_data  = Signal(256)
 
-        self.sync += en.eq(self.rd_en & ~ResetSignal())
+        self.sync += en.eq(~ResetSignal())
 
         # -------------------------------------------------------------------
         # Priority-index chain (combinational)
@@ -110,8 +110,11 @@ class PCILeechMux(Module):
         self.comb += idx_max.eq(idle_idx + idle_wr)
 
         # All ports: req = rd_en (mirrors SV assign p_req_data = rd_en)
+        # All ports: req always high - ports write freely, backpressure via FIFOs
         for i in range(nports):
-            self.comb += self.p_req[i].eq(self.rd_en)
+            self.comb += self.p_req[i].eq(1)
+
+
 
         # -------------------------------------------------------------------
         # Output frame assembly — must mirror SV dout_data exactly
