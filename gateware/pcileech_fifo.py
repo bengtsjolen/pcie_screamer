@@ -421,9 +421,11 @@ class PCILeechFIFO(Module):
         cfg_ro_readback = Signal(16)
         self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
         self.comb += Case(cfg_word_index, {
-            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A/0x0B
-            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width, Signal(5),   # byte 0x0C/0x0D
-                                       self.phy_lnk_rate,  Signal(8))),
+            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A: ro[85:80]=ltssm
+            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,             # byte 0x0C: ro[97:96]=width
+                                       Signal(4),                        #            ro[101:98]=0
+                                       self.phy_lnk_rate,               #            ro[102]=rate
+                                       Signal(9))),                      #            ro[111:103]=0
             "default": cfg_ro_readback.eq(0),
         })
 
