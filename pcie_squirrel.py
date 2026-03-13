@@ -84,8 +84,11 @@ class PCIeSquirrel(SoCMini):
         self.bus.add_master(master=self.bridge.wishbone)
 
         # PCIe PHY ---------------------------------------------------------------------------------
-        self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
+        pcie_phy = self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
                                              data_width=64, bar0_size=0x40000)
+        pcie_phy.config["Device_ID"] = "0666"
+        pcie_phy.config["Class_Code_Base"] = "02"
+        pcie_phy.config["Class_Code_Sub"] = "00"
         
         # vivado places ip at GTPE2_CHANNEL_X0Y3 for some reason so need to force it like this:
         platform.toolchain.pre_optimize_commands.append("set_property LOC GTPE2_CHANNEL_X0Y2 [get_cells {{pcie_s7/inst/inst/gt_top_i/pipe_wrapper_i/pipe_lane[0].gt_wrapper_i/gtp_channel.gtpe2_channel_i}}]")
