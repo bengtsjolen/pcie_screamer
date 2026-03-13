@@ -78,6 +78,8 @@ class PCIeSquirrel(SoCMini):
             ".gt_wrapper_i/gtp_channel.gtpe2_channel_i}}]"
         )
 
+        #platform.add_platform_command("set_false_path -from [get_clocks main_s7pciephy_clkout*] -to [get_clocks main_clkout]")
+
         self.add_csr("pcie_phy")
 
         # USB FT601 PHY ----------------------------------------------------------------------------
