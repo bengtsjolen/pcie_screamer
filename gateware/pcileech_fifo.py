@@ -303,7 +303,8 @@ class PCILeechFIFO(Module):
                     rx_lo  .eq(rx_word),
                     rx_phase.eq(1),
                 ).Else(
-                    rx64  .eq(Cat(rx_lo, rx_word)),
+                    # SV: com_rx_data64 = (prev << 32) | new  → new word in [31:0], prev in [63:32]
+                    rx64  .eq(Cat(rx_word, rx_lo)),
                     rx64_valid.eq(1),
                     rx_phase.eq(0),
                 )
