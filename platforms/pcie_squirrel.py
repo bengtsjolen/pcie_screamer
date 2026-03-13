@@ -55,6 +55,8 @@ _io = [
         Subsignal("wr_n",  Pins("AB7")),
         Subsignal("oe_n",  Pins("AB6")),
         Subsignal("siwua", Pins("Y8")),
+        Subsignal("present", Pins("A13")),
+        Subsignal("wake", Pins("A14")),
         IOStandard("LVCMOS33"), Misc("SLEW=FAST"),
     ),
 ]
