@@ -87,6 +87,9 @@ class PCIeSquirrel(SoCMini):
         self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
                                              data_width=64, bar0_size=0x40000)
         
+        # vivado places ip at GTPE2_CHANNEL_X0Y3 for some reason so need to force it like this:
+        platform.toolchain.pre_optimize_commands.append("set_property LOC GTPE2_CHANNEL_X0Y2 [get_cells {{pcie_s7/inst/inst/gt_top_i/pipe_wrapper_i/pipe_lane[0].gt_wrapper_i/gtp_channel.gtpe2_channel_i}}]")
+
         self.add_csr("pcie_phy")
 
         # USB FT601 PHY ----------------------------------------------------------------------------
