@@ -617,32 +617,35 @@ class PCILeechFIFO(Module):
         # -------------------------------------------------------------------
 
         # p0: TLP RX (PCIe → host)
+        # nibble = (p0_ctx << 2) | 0b00  — p0_ctx = {last, 0}
         self.comb += [
             mux.p_din[0].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[0].eq(Cat(Signal(2), Cat(tlp_rx_fifo.source.last, Signal()))),
+            mux.p_ctx[0].eq(Cat(Signal(2, reset=0b00),
+                                Cat(Signal(), tlp_rx_fifo.source.last))),
             mux.p_wr [0].eq(tlp_rx_fifo.source.valid & mux.p_req[0]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[0]),
         ]
 
-        # p1: CFG (stub)
+        # p1: CFG (stub) — nibble = (0 << 2) | 0b01 = 0x1
         self.comb += [
             mux.p_din[1].eq(0),
-            mux.p_ctx[1].eq(0),
+            mux.p_ctx[1].eq(0b0001),
             mux.p_wr [1].eq(0),
         ]
 
-        # p2: loopback
+        # p2: loopback — nibble = (p2_ctx << 2) | 0b10
         self.comb += [
             mux.p_din[2].eq(loop_fifo.source.data),
-            mux.p_ctx[2].eq(Cat(Signal(2), Cat(loop_fifo.source.last, Signal()))),
+            mux.p_ctx[2].eq(Cat(Signal(2, reset=0b10),
+                                Cat(Signal(), loop_fifo.source.last))),
             mux.p_wr [2].eq(loop_fifo.source.valid & mux.p_req[2]),
             loop_fifo.source.ready.eq(mux.p_req[2]),
         ]
 
-        # p3: CMD response — ctx=2'b00 (matches SV _cmd_tx_din[33:32] default 0)
+        # p3: CMD response — nibble = (0b00 << 2) | 0b11 = 0x3  (FPGA_REG_CORE match)
         self.comb += [
             mux.p_din[3].eq(cmd_tx_fifo.source.data),
-            mux.p_ctx[3].eq(Cat(Signal(2), Cat(cmd_tx_fifo.source.last, Signal()))),
+            mux.p_ctx[3].eq(0b0011),
             mux.p_wr [3].eq(cmd_tx_fifo.source.valid & mux.p_req[3]),
             cmd_tx_fifo.source.ready.eq(mux.p_req[3]),
         ]
