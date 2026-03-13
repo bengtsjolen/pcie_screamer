@@ -4,10 +4,10 @@
 # Adapted for Screamer PCIe Squirrel (XC7A35T-FGG484)
 #
 # Usage:
-#   python3 pcie_squirrel.py --build
-#   python3 pcie_squirrel.py --build --load         # JTAG
-#   python3 pcie_squirrel.py --build --flash        # SPI flash
-#   python3 pcie_squirrel.py --build --with-analyzer
+#   python3 pcileech_squirrel.py --build
+#   python3 pcileech_squirrel.py --build --load         # JTAG
+#   python3 pcileech_squirrel.py --build --flash        # SPI flash
+#   python3 pcileech_squirrel.py --build --with-analyzer
 
 import os
 import argparse
