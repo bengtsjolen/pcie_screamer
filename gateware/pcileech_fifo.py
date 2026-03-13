@@ -137,7 +137,9 @@ class PCILeechMux(Module):
 
         # Output hold register — latches completed frame until serializer takes it.
         # frame_valid stays high until rd_en (serializer ready) clears it.
+        # Exposed as self.frame_valid so port ready signals can gate on it.
         frame_valid = Signal()
+        self.frame_valid = frame_valid
         frame_data  = Signal(256)
 
         self.comb += [
@@ -684,7 +686,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[0].eq(Cat(Signal(2, reset=0b00),
                                 Cat(Signal(), tlp_rx_fifo.source.last))),
             mux.p_wr [0].eq(tlp_rx_fifo.source.valid & mux.p_req[0]),
-            tlp_rx_fifo.source.ready.eq(mux.p_req[0]),
+            tlp_rx_fifo.source.ready.eq(mux.p_req[0] & ~mux.frame_valid),
         ]
 
         # p1: CFG response — nibble = (0b00 << 2) | 0b01 = 0x1  (FPGA_REG_PCIE match)
@@ -692,7 +694,7 @@ class PCILeechFIFO(Module):
             mux.p_din[1].eq(cfg_tx_fifo.source.data),
             mux.p_ctx[1].eq(0b0001),
             mux.p_wr [1].eq(cfg_tx_fifo.source.valid & mux.p_req[1]),
-            cfg_tx_fifo.source.ready.eq(mux.p_req[1]),
+            cfg_tx_fifo.source.ready.eq(mux.p_req[1] & ~mux.frame_valid),
         ]
 
         # p2: loopback — nibble = (p2_ctx << 2) | 0b10
@@ -701,7 +703,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[2].eq(Cat(Signal(2, reset=0b10),
                                 Cat(Signal(), loop_fifo.source.last))),
             mux.p_wr [2].eq(loop_fifo.source.valid & mux.p_req[2]),
-            loop_fifo.source.ready.eq(mux.p_req[2]),
+            loop_fifo.source.ready.eq(mux.p_req[2] & ~mux.frame_valid),
         ]
 
         # p3: CMD response — nibble = (0b00 << 2) | 0b11 = 0x3  (FPGA_REG_CORE match)
@@ -709,7 +711,7 @@ class PCILeechFIFO(Module):
             mux.p_din[3].eq(cmd_tx_fifo.source.data),
             mux.p_ctx[3].eq(0b0011),
             mux.p_wr [3].eq(cmd_tx_fifo.source.valid & mux.p_req[3]),
-            cmd_tx_fifo.source.ready.eq(mux.p_req[3]),
+            cmd_tx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
         ]
 
         # p4-p7: stubs
