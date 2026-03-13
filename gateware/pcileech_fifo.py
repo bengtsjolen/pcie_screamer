@@ -271,6 +271,13 @@ class PCILeechFIFO(Module):
         self.pcie_rst_core   = Signal(reset=1)
         self.pcie_rst_subsys = Signal(reset=0)
 
+        # PCIe PHY status inputs (from pcie_phy._link_status.fields.*)
+        # Wire these from the caller for correct PHY register responses.
+        self.phy_lnk_up    = Signal()   # user_lnk_up
+        self.phy_ltssm     = Signal(6)  # pl_ltssm_state
+        self.phy_lnk_rate  = Signal()   # pl_sel_lnk_rate  (0=Gen1, 1=Gen2)
+        self.phy_lnk_width = Signal(2)  # pl_sel_lnk_width (0b01=x1)
+
         # ===================================================================
         # RX PATH: USB → dispatch
         # Step 1: pack two consecutive 32-bit words into one 64-bit frame
@@ -396,9 +403,35 @@ class PCILeechFIFO(Module):
             cfg_addr_byte.eq(cfg_cmd[16:32]),
             cfg_cmd_read .eq(cfg_cmd_valid & cfg_cmd[12]),
             cfg_rx_fifo.source.ready.eq(1),
-            # Return zero data, echo address back (same format as CMD response)
+        ]
+
+        # CFG ro[] register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
+        # All addresses are byte-addressed; we respond with a 16-bit value per read.
+        # Byte offset → bits in ro[]:
+        #   0x000A: ro[85:80] = pl_ltssm_state[5:0]
+        #   0x000C: ro[97:96] = pl_sel_lnk_width[1:0]
+        #           ro[102]   = pl_sel_lnk_rate
+        #           ro[101]   = pl_link_upcfg_cap    (0 — Open() in LiteX)
+        #           ro[100]   = pl_link_partner_gen2_supported (0)
+        #           ro[99]    = pl_link_gen2_cap      (0)
+        # Word index = byte_offset >> 1
+        cfg_word_index  = Signal(8)
+        cfg_ro_readback = Signal(16)
+        self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
+        self.comb += Case(cfg_word_index, {
+            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A/0x0B
+            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width, Signal(5),   # byte 0x0C/0x0D
+                                       self.phy_lnk_rate,  Signal(8))),
+            "default": cfg_ro_readback.eq(0),
+        })
+
+        self.comb += [
+            # Response format: [31:16]=addr_byte echo, [15:0]={val[7:0],val[15:8]}
             cfg_tx_fifo.sink.valid.eq(cfg_cmd_read),
-            cfg_tx_fifo.sink.data .eq(Cat(Signal(16), cfg_addr_byte)),
+            cfg_tx_fifo.sink.data .eq(Cat(
+                Cat(cfg_ro_readback[8:16], cfg_ro_readback[0:8]),  # byte-swap
+                cfg_addr_byte,
+            )),
             cfg_tx_fifo.sink.last .eq(1),
         ]
 

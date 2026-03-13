@@ -138,9 +138,15 @@ class PCIeSquirrel(SoCMini):
             # Host clears it via CMD write to bring PCIe core online.
             # Hold PCIe core in reset until host clears rw[200] via CMD write.
             # pcie_phy.pcie_rst_n feeds i_sys_rst_n on the IP — active low.
-            self.comb += If(pcileech_fifo.pcie_rst_core,
-                            self.pcie_phy.pcie_rst_n.eq(0)
-                            )
+            self.comb += If(pcileech_fifo.pcie_rst_core,self.pcie_phy.pcie_rst_n.eq(0))
+            
+            # Wire PCIe PHY status signals for PCIE register space responses
+            self.comb += [
+                pcileech_fifo.phy_lnk_up   .eq(self.pcie_phy._link_status.fields.status),
+                pcileech_fifo.phy_ltssm    .eq(self.pcie_phy._link_status.fields.ltssm),
+                pcileech_fifo.phy_lnk_rate .eq(self.pcie_phy._link_status.fields.rate),
+                pcileech_fifo.phy_lnk_width.eq(self.pcie_phy._link_status.fields.width),
+            ]
 
         # MSI --------------------------------------------------------------------------------------
         self.submodules.msi = MSI()
