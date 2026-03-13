@@ -19,7 +19,7 @@ _io = [
     ("user_btn", 0, Pins("AB3"), IOStandard("LVCMOS33")),
     ("user_btn", 1, Pins("AA5"), IOStandard("LVCMOS33")),
 
-    # Serial (undocumented but present)
+    # Serial (undocumented but present?)
     ("serial", 0,
         Subsignal("tx", Pins("T1")),
         Subsignal("rx", Pins("U1")),
