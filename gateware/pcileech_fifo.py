@@ -373,8 +373,36 @@ class PCILeechFIFO(Module):
         ]
 
         # ===================================================================
-        # CMD register file (rw[239:0], mirrors pcileech_fifo.sv)
+        # CFG register file: TYPE_CFG frames (flag bits 0x01 = FPGA_REG_PCIE)
+        # Responds on mux port 1 (nibble 0x1) with zeros for all PCIe reads.
+        # This is sufficient for pcileech to complete init and proceed.
         # ===================================================================
+        self.submodules.cfg_rx_fifo = cfg_rx_fifo = SyncFIFO(
+            [("data", 64)], 64
+        )
+        self.submodules.cfg_tx_fifo = cfg_tx_fifo = SyncFIFO(
+            [("data", 32)], 64
+        )
+        self.comb += [
+            cfg_rx_fifo.sink.valid.eq(rx_is_cfg),
+            cfg_rx_fifo.sink.data .eq(rx64),
+        ]
+
+        cfg_cmd       = cfg_rx_fifo.source.data
+        cfg_cmd_valid = cfg_rx_fifo.source.valid
+        cfg_addr_byte = Signal(16)
+        cfg_cmd_read  = Signal()
+        self.comb += [
+            cfg_addr_byte.eq(cfg_cmd[16:32]),
+            cfg_cmd_read .eq(cfg_cmd_valid & cfg_cmd[12]),
+            cfg_rx_fifo.source.ready.eq(1),
+            # Return zero data, echo address back (same format as CMD response)
+            cfg_tx_fifo.sink.valid.eq(cfg_cmd_read),
+            cfg_tx_fifo.sink.data .eq(Cat(Signal(16), cfg_addr_byte)),
+            cfg_tx_fifo.sink.last .eq(1),
+        ]
+
+
         rw = Signal(240)
 
         # Named aliases for important bits
@@ -626,11 +654,12 @@ class PCILeechFIFO(Module):
             tlp_rx_fifo.source.ready.eq(mux.p_req[0]),
         ]
 
-        # p1: CFG (stub) — nibble = (0 << 2) | 0b01 = 0x1
+        # p1: CFG response — nibble = (0b00 << 2) | 0b01 = 0x1  (FPGA_REG_PCIE match)
         self.comb += [
-            mux.p_din[1].eq(0),
+            mux.p_din[1].eq(cfg_tx_fifo.source.data),
             mux.p_ctx[1].eq(0b0001),
-            mux.p_wr [1].eq(0),
+            mux.p_wr [1].eq(cfg_tx_fifo.source.valid & mux.p_req[1]),
+            cfg_tx_fifo.source.ready.eq(mux.p_req[1]),
         ]
 
         # p2: loopback — nibble = (p2_ctx << 2) | 0b10
