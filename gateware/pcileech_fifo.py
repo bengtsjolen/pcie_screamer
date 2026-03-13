@@ -347,7 +347,7 @@ class PCILeechFIFO(Module):
         # LOOPBACK FIFO: host→host echo  (64 deep, 32+1 bit)
         # ===================================================================
         self.submodules.loop_fifo = loop_fifo = SyncFIFO(
-            [("data", 32), ("last", 1)], 64
+            [("data", 32)], 64
         )
         self.comb += [
             loop_fifo.sink.valid.eq(rx_is_loop),
@@ -381,7 +381,7 @@ class PCILeechFIFO(Module):
 
         # CMD TX FIFO — buffers CMD responses going back to host (32-bit)
         self.submodules.cmd_tx_fifo = cmd_tx_fifo = SyncFIFO(
-            [("data", 32), ("last", 1)], 64
+            [("data", 32)], 64
         )
 
         # CMD register file decode
