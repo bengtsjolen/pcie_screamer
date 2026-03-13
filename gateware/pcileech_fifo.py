@@ -492,24 +492,61 @@ class PCILeechFIFO(Module):
         # Response format (matches pcileech_fifo.sv):
         #   [31:16] = in_addr_byte (echoed address)
         #   [15: 0] = {data[7:0], data[15:8]}  (byte-swapped 16-bit value)
-        # We read from rw[] at in_addr_bit (combinational mux over rw slices)
-        ro_zeros = Signal(16)  # placeholder for ro[] reads (not yet implemented)
-        rw_readback = Signal(16)
+        #
+        # Two register spaces selected by f_rw (addr bit15):
+        #   f_rw=0 → ro[] read-only registers
+        #   f_rw=1 → rw[] read-write registers
+        #
+        # ro[] layout (matches pcileech_fifo.sv):
+        #   ro[ 0: 16] = 0xab89          byte offset 0x00  MAGIC
+        #   ro[16: 32] = 0x0000          byte offset 0x02  (reserved)
+        #   ro[32: 48] = 0x0000          byte offset 0x04  (reserved)
+        #   ro[48: 64] = 0x0000          byte offset 0x06  (reserved)
+        #   ro[64: 72] = VERSION_MAJOR   byte offset 0x08
+        #   ro[72: 80] = VERSION_MINOR   byte offset 0x09
+        #   ro[80: 88] = DEVICE_ID       byte offset 0x0A
+        #   ro[88: 96] = 0x00            byte offset 0x0B
+        #   (remaining ro[] = 0)
 
-        # Combinational readback — mux over 16-bit word slots in rw[]
-        # Same word_index = in_addr_byte[1:8] as write path
+        VERSION_MAJOR = 0x04   # match pcileech-fpga PCIeSquirrel major version
+        VERSION_MINOR = 0x09   # match pcileech-fpga PCIeSquirrel minor version
+        DEVICE_ID     = 0x04   # PCIeSquirrel device ID
+
+        rw_readback = Signal(16)
+        ro_readback = Signal(16)
+        readback    = Signal(16)
+
+        # rw[] combinational readback
         rw_rb_cases = {}
         for word_idx in range(15):
             bit_base = word_idx * 16
             rw_rb_cases[word_idx] = rw_readback.eq(rw[bit_base:bit_base+16])
         self.comb += Case(in_addr_byte[1:8], rw_rb_cases)
 
+        # ro[] combinational readback — word_index = byte_offset >> 1
+        # byte offset 0x00 → word_index 0 → magic 0xab89
+        # byte offset 0x08 → word_index 4 → {VERSION_MINOR, VERSION_MAJOR}
+        # byte offset 0x0A → word_index 5 → {0x00, DEVICE_ID}
+        self.comb += Case(in_addr_byte[1:8], {
+            0: ro_readback.eq(0xab89),
+            4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MAJOR),
+                                  Signal(8, reset=VERSION_MINOR))),
+            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),
+        })
+
+        # Select ro[] or rw[] based on f_rw flag
+        self.comb += If(f_rw,
+            readback.eq(rw_readback)
+        ).Else(
+            readback.eq(ro_readback)
+        )
+
         self.sync += [
             cmd_tx_fifo.sink.valid.eq(0),
             If(in_cmd_read,
                 cmd_tx_fifo.sink.valid.eq(1),
                 cmd_tx_fifo.sink.data .eq(Cat(
-                    Cat(rw_readback[8:16], rw_readback[0:8]),  # byte-swap
+                    Cat(readback[8:16], readback[0:8]),  # byte-swap
                     in_addr_byte,
                 )),
                 cmd_tx_fifo.sink.last.eq(1),
