@@ -68,8 +68,11 @@ class PCIeSquirrel(SoCMini):
         self.submodules.crg = _CRG(platform, sys_clk_freq)
 
         # PCIe PHY ---------------------------------------------------------------------------------
-        self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
+        pcie_phy = self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
                                              data_width=64, bar0_size=0x40000)
+        pcie_phy.config["Device_ID"] = "0666"
+        pcie_phy.config["Class_Code_Base"] = "02"
+        pcie_phy.config["Class_Code_Sub"] = "00"
 
         # Force GTP placement to X0Y2 (Vivado defaults to X0Y3 for this package)
         platform.toolchain.pre_optimize_commands.append(
