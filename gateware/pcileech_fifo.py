@@ -77,8 +77,8 @@ class PCILeechMux(Module):
         # Internal state — 15 slots (SV uses data_reg[14], indices 0..13)
         # -------------------------------------------------------------------
         DEPTH    = 15
-        data_reg = [Signal(32, name=f"dr{i}") for i in range(DEPTH)]
-        ctx_reg  = [Signal(4,  name=f"cr{i}") for i in range(DEPTH)]
+        data_reg = Array([Signal(32, name=f"dr{i}") for i in range(DEPTH)])
+        ctx_reg  = Array([Signal(4,  name=f"cr{i}") for i in range(DEPTH)])
 
         idx_base    = Signal(4, reset=0)
         idle_count  = Signal(4, reset=0)
