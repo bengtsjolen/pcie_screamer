@@ -98,13 +98,14 @@ class PCILeechMux(Module):
         for i in range(nports):
             self.comb += p_idx[i+1].eq(p_idx[i] + self.p_wr[i])
 
-        # Idle port (p8 in SV) — pads frame with 0xFFFFFFFF when stalled
+        # Idle port (p8 in SV) — pads frame with 0xFFFFFFFF when stalled.
+        # Fires whenever idle_count > 7 and there's a free slot (idle_idx < 7).
+        # No idx_base > 0 guard — padding must also fill completely empty frames.
         idle_idx = Signal(4)
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            idle_wr .eq(en & (idx_base > 0) & (idle_count > 7)
-                           & (idx_base == idle_idx)),
+            idle_wr .eq(en & (idle_count > 7) & (idle_idx < 7)),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
@@ -167,8 +168,9 @@ class PCILeechMux(Module):
                     # Advance base index, wrapping after frame emit
                     idx_base.eq(idx_max - Mux(idx_max >= 7, 7, 0)),
 
-                    # Idle counter — increments when no input arrives this cycle
-                    If((idx_base > 0) & (idx_base == idle_idx),
+                    # Idle counter: increment every cycle no real data arrives,
+                    # reset when any port writes data this cycle.
+                    If(idle_idx == p_idx[0],   # no port wrote anything
                         idle_count.eq(idle_count + 1),
                     ).Else(
                         idle_count.eq(0),
