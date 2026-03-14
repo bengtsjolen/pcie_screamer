@@ -452,6 +452,11 @@ class PCILeechFIFO(Module):
         cfg_word_index  = Signal(8)
         cfg_ro_readback = Signal(16)
         self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
+
+        # Latch phy_id — holds last non-zero value so BDF remains valid
+        # even if pcie_phy.id momentarily reads 0 (e.g. during link retraining).
+        phy_id_latched = Signal(16)
+        self.sync += If(self.phy_id, phy_id_latched.eq(self.phy_id))
         self.comb += Case(cfg_word_index, {
             5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A: ro[85:80]=ltssm
             6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,              # byte 0x0C: ro[97:96]=width
@@ -460,7 +465,7 @@ class PCILeechFIFO(Module):
                                        self.phy_lnk_rate,               #            ro[102]=rate
                                        Signal(9))),                      #            ro[111:103]=0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
-            16: cfg_ro_readback.eq(Mux(self.phy_id, self.phy_id, 0x1600)),  # byte 0x20: PCIe BDF; fallback 0x1600 (bus=0x16,dev=0,fn=0)
+            16: cfg_ro_readback.eq(phy_id_latched),                     # byte 0x20: ro[271:256] PCIe BDF (wbsDeviceId)
             "default": cfg_ro_readback.eq(0),
         })
 
