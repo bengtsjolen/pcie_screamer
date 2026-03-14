@@ -730,7 +730,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[0].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
             mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
             loop_fifo.source.ready.eq(mux.p_req[0] & ~mux.frame_valid),
-            mux.p_pending[0].eq(loop_fifo.source.valid),
+            mux.p_pending[0].eq(loop_fifo.source.valid & ~mux.frame_valid),
         ]
 
         # p1: CMD response — tag=0b11, ctx=0b00
@@ -739,7 +739,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[1].eq(0b0011),
             mux.p_wr [1].eq(cmd_tx_fifo.source.valid & mux.p_req[1]),
             cmd_tx_fifo.source.ready.eq(mux.p_req[1] & ~mux.frame_valid),
-            mux.p_pending[1].eq(cmd_tx_fifo.source.valid),
+            mux.p_pending[1].eq(cmd_tx_fifo.source.valid & ~mux.frame_valid),
         ]
 
         # p2: CFG response — tag=0b01, ctx=0b00
@@ -748,7 +748,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[2].eq(0b0001),
             mux.p_wr [2].eq(cfg_tx_fifo.source.valid & mux.p_req[2]),
             cfg_tx_fifo.source.ready.eq(mux.p_req[2] & ~mux.frame_valid),
-            mux.p_pending[2].eq(cfg_tx_fifo.source.valid),
+            mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.frame_valid),
         ]
 
         # p3: TLP RX (PCIe → host) — tag=0b00, ctx={first,last} from phy
@@ -758,7 +758,7 @@ class PCILeechFIFO(Module):
                                 Cat(tlp_rx_fifo.source.last, Signal()))),
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
-            mux.p_pending[3].eq(tlp_rx_fifo.source.valid),
+            mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),
         ]
 
         # p4-p7: stubs
