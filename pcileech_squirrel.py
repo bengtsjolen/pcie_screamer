@@ -146,6 +146,7 @@ class PCIeSquirrel(SoCMini):
                 pcileech_fifo.phy_ltssm    .eq(self.pcie_phy._link_status.fields.ltssm),
                 pcileech_fifo.phy_lnk_rate .eq(self.pcie_phy._link_status.fields.rate),
                 pcileech_fifo.phy_lnk_width.eq(self.pcie_phy._link_status.fields.width),
+                pcileech_fifo.phy_id       .eq(self.pcie_phy.id),
             ]
 
         # MSI --------------------------------------------------------------------------------------

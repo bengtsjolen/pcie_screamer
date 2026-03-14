@@ -301,7 +301,8 @@ class PCILeechFIFO(Module):
         self.phy_lnk_up    = Signal()   # user_lnk_up
         self.phy_ltssm     = Signal(6)  # pl_ltssm_state
         self.phy_lnk_rate  = Signal()   # pl_sel_lnk_rate  (0=Gen1, 1=Gen2)
-        self.phy_lnk_width = Signal(2)  # pl_sel_lnk_width (0b01=x1)
+        self.phy_lnk_width = Signal(2)  # pl_sel_lnk_width (0b00=x1)
+        self.phy_id        = Signal(16) # PCIe BDF: {bus[7:0], dev[4:0], fn[2:0]}
 
         # ===================================================================
         # RX PATH: USB → dispatch
@@ -459,6 +460,7 @@ class PCILeechFIFO(Module):
                                        self.phy_lnk_rate,               #            ro[102]=rate
                                        Signal(9))),                      #            ro[111:103]=0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
+            16: cfg_ro_readback.eq(self.phy_id),                        # byte 0x20: ro[271:256] PCIe BDF (wbsDeviceId)
             "default": cfg_ro_readback.eq(0),
         })
 
