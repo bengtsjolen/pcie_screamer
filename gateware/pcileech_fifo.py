@@ -105,7 +105,9 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            idle_wr .eq(en & (idle_count > 200) & (idle_idx < 7) & (idle_idx > 0)),
+            # Emit frame when idle AND no response data pending in any FIFO.
+            # 'pending' prevents splitting back-to-back responses across frames.
+            idle_wr .eq(en & (idle_count > 16) & (idle_idx < 7) & (idle_idx > 0)),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
