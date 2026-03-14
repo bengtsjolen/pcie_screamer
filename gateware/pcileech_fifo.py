@@ -283,7 +283,7 @@ class PCILeechFIFO(Module):
         self.tlp_tx = stream.Endpoint(phy_layout(32))  # to PCIe TX
 
         # Control outputs driven by CMD register file
-        self.pcie_rst_core   = Signal(reset=1)
+        self.pcie_rst_core   = Signal(reset=0)
         self.pcie_rst_subsys = Signal(reset=0)
 
         # PCIe PHY status inputs (from pcie_phy._link_status.fields.*)
@@ -383,15 +383,19 @@ class PCILeechFIFO(Module):
         self.comb += self.tlp_rx.connect(tlp_rx_fifo.sink)
 
         # ===================================================================
-        # LOOPBACK FIFO: host→host echo  (64 deep, 32+1 bit)
+        # LOOPBACK FIFO: host→host echo  (64 deep, 34 bit)
+        # SV: din = {com_dout[11:10], com_dout[63:32]}
+        #   = {rx64[11:10], rx64[63:32]}  (ctx bits + upper payload word)
+        # p0_ctx = loop_dout[33:32], p0_tag = 2'b10
+        # nibble = (ctx<<2)|0b10
         # ===================================================================
         self.submodules.loop_fifo = loop_fifo = SyncFIFO(
-            [("data", 32)], 64
+            [("data", 32), ("ctx", 2)], 64
         )
         self.comb += [
             loop_fifo.sink.valid.eq(rx_is_loop),
-            loop_fifo.sink.data .eq(pkt_data),
-            loop_fifo.sink.last .eq(pkt_last),
+            loop_fifo.sink.data .eq(rx64[32:64]),   # upper word = com_dout[63:32]
+            loop_fifo.sink.ctx  .eq(rx64[10:12]),   # bits[11:10] = com_dout[11:10]
         ]
 
         # ===================================================================
@@ -682,51 +686,51 @@ class PCILeechFIFO(Module):
         # -------------------------------------------------------------------
         # Mux port wiring — matches pcileech_fifo.sv port priority exactly:
         #
-        # p0: TLP RX     (PCIe→host, highest priority)  bottom bits=0b00
-        # p1: CFG resp   (stub)                          bottom bits=0b01
-        # p2: Loopback                                   bottom bits=0b10
-        # p3: CMD resp   ctx=2'b00                       bottom bits=0b11
-        # p4-p7: stubs
+        # SV:  p0=loopback(tag=10), p1=CMD(tag=11), p2=CFG(tag=01), p3-p6=TLP(tag=00)
         #
-        # Status nibble per slot = (ctx[1:0] << 2) | port_index[1:0]
-        # Host filter: (nibble & 0x0f) == (flags & 0x03)
-        #   FPGA_REG_CORE=0x03 → matches p3 (CMD)
-        #   FPGA_REG_PCIE=0x01 → matches p1 (CFG)
+        # nibble = (p_ctx[1:0] << 2) | p_tag[1:0]
+        # Host filter: (nibble & 0x03) == (flags & 0x03)
+        #   TYPE_LOOP=0x02 → tag=0b10 → matches p0 nibble & 0x03 = 0x2
+        #   TYPE_CMD =0x03 → tag=0b11 → matches p1 nibble & 0x03 = 0x3
+        #   TYPE_CFG =0x01 → tag=0b01 → matches p2 nibble & 0x03 = 0x1
+        #   TYPE_TLP =0x00 → tag=0b00 → matches p3 nibble & 0x03 = 0x0
         # -------------------------------------------------------------------
 
-        # p0: TLP RX (PCIe → host)
-        # nibble = (p0_ctx << 2) | 0b00  — p0_ctx = {last, 0}
+        # p0: loopback — tag=0b10, ctx from stored loop_fifo.ctx
+        # nibble = (loop_ctx << 2) | 0b10
         self.comb += [
-            mux.p_din[0].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[0].eq(Cat(Signal(2, reset=0b00),
-                                Cat(Signal(), tlp_rx_fifo.source.last))),
-            mux.p_wr [0].eq(tlp_rx_fifo.source.valid & mux.p_req[0]),
-            tlp_rx_fifo.source.ready.eq(mux.p_req[0] & ~mux.frame_valid),
+            mux.p_din[0].eq(loop_fifo.source.data),
+            mux.p_ctx[0].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
+            mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
+            loop_fifo.source.ready.eq(mux.p_req[0] & ~mux.frame_valid),
         ]
 
-        # p1: CFG response — nibble = (0b00 << 2) | 0b01 = 0x1  (FPGA_REG_PCIE match)
+        # p1: CMD response — tag=0b11, ctx=0b00
+        # nibble = (0b00 << 2) | 0b11 = 0x3  (FPGA_REG_CORE match)
         self.comb += [
-            mux.p_din[1].eq(cfg_tx_fifo.source.data),
-            mux.p_ctx[1].eq(0b0001),
-            mux.p_wr [1].eq(cfg_tx_fifo.source.valid & mux.p_req[1]),
-            cfg_tx_fifo.source.ready.eq(mux.p_req[1] & ~mux.frame_valid),
+            mux.p_din[1].eq(cmd_tx_fifo.source.data),
+            mux.p_ctx[1].eq(0b0011),
+            mux.p_wr [1].eq(cmd_tx_fifo.source.valid & mux.p_req[1]),
+            cmd_tx_fifo.source.ready.eq(mux.p_req[1] & ~mux.frame_valid),
         ]
 
-        # p2: loopback — nibble = (p2_ctx << 2) | 0b10
+        # p2: CFG response — tag=0b01, ctx=0b00
+        # nibble = (0b00 << 2) | 0b01 = 0x1  (FPGA_REG_PCIE match)
         self.comb += [
-            mux.p_din[2].eq(loop_fifo.source.data),
-            mux.p_ctx[2].eq(Cat(Signal(2, reset=0b10),
-                                Cat(Signal(), loop_fifo.source.last))),
-            mux.p_wr [2].eq(loop_fifo.source.valid & mux.p_req[2]),
-            loop_fifo.source.ready.eq(mux.p_req[2] & ~mux.frame_valid),
+            mux.p_din[2].eq(cfg_tx_fifo.source.data),
+            mux.p_ctx[2].eq(0b0001),
+            mux.p_wr [2].eq(cfg_tx_fifo.source.valid & mux.p_req[2]),
+            cfg_tx_fifo.source.ready.eq(mux.p_req[2] & ~mux.frame_valid),
         ]
 
-        # p3: CMD response — nibble = (0b00 << 2) | 0b11 = 0x3  (FPGA_REG_CORE match)
+        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={first,last} from phy
+        # nibble = (ctx << 2) | 0b00
         self.comb += [
-            mux.p_din[3].eq(cmd_tx_fifo.source.data),
-            mux.p_ctx[3].eq(0b0011),
-            mux.p_wr [3].eq(cmd_tx_fifo.source.valid & mux.p_req[3]),
-            cmd_tx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
+            mux.p_din[3].eq(tlp_rx_fifo.source.dat),
+            mux.p_ctx[3].eq(Cat(Signal(2, reset=0b00),
+                                Cat(tlp_rx_fifo.source.last, Signal()))),
+            mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
+            tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
         ]
 
         # p4-p7: stubs
