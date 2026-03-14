@@ -460,7 +460,7 @@ class PCILeechFIFO(Module):
                                        self.phy_lnk_rate,               #            ro[102]=rate
                                        Signal(9))),                      #            ro[111:103]=0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
-            16: cfg_ro_readback.eq(self.phy_id),                        # byte 0x20: ro[271:256] PCIe BDF (wbsDeviceId)
+            16: cfg_ro_readback.eq(Mux(self.phy_id, self.phy_id, 0x0100)),  # byte 0x20: PCIe BDF; fallback 0x0100 if phy_id not yet valid
             "default": cfg_ro_readback.eq(0),
         })
 
