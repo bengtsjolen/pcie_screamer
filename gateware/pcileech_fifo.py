@@ -409,6 +409,12 @@ class PCILeechFIFO(Module):
         ]
 
         # ===================================================================
+        # rw[] register file — defined early so both CFG and CMD decoders
+        # can reference it. Named aliases follow below CMD section.
+        # ===================================================================
+        rw = Signal(240)
+
+        # ===================================================================
         # CFG register file: TYPE_CFG frames (flag bits 0x01 = FPGA_REG_PCIE)
         # Responds on mux port 1 (nibble 0x1) with zeros for all PCIe reads.
         # This is sufficient for pcileech to complete init and proceed.
@@ -448,7 +454,6 @@ class PCILeechFIFO(Module):
         self.comb += Case(cfg_word_index, {
             5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A: ro[85:80]=ltssm
             6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,              # byte 0x0C: ro[97:96]=width
-                                       Signal(0),
                                        self.phy_lnk_up,                 #            ro[98]=pl_phy_lnk_up
                                        Signal(3),                        #            ro[101:99]=0
                                        self.phy_lnk_rate,               #            ro[102]=rate
@@ -468,9 +473,7 @@ class PCILeechFIFO(Module):
         ]
 
 
-        rw = Signal(240)
-
-        # Named aliases for important bits
+        # Named aliases for important rw bits
         rw_pcie_rst_core   = rw[200]
         rw_pcie_rst_subsys = rw[201]
         rw_cfgtlp_en       = rw[202]
