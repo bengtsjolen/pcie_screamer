@@ -455,7 +455,9 @@ class PCILeechFIFO(Module):
 
         # Latch phy_id — holds last non-zero value so BDF remains valid
         # even if pcie_phy.id momentarily reads 0 (e.g. during link retraining).
-        phy_id_latched = Signal(16)
+        # Fallback 0x0c00: _byteswap_ushort(0x0c00)=0x000c=DEVICE_ID_PCIESQUIRREL
+        # so wDeviceId is always non-zero even before enumeration completes.
+        phy_id_latched = Signal(16, reset=0x0c00)
         self.sync += If(self.phy_id, phy_id_latched.eq(self.phy_id))
         self.comb += Case(cfg_word_index, {
             5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A: ro[85:80]=ltssm
