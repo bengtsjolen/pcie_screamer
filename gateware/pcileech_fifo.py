@@ -434,13 +434,13 @@ class PCILeechFIFO(Module):
             cfg_rx_fifo.source.ready.eq(1),
         ]
 
-        # CFG ro[] register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
+        # CFG register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
+        # Handles both ro[] (READONLY) and rw[] (READWRITE) reads.
         # All addresses are byte-addressed; we respond with a 16-bit value per read.
-        # Byte offset → bits in ro[]:
-        #   0x000A: ro[85:80] = pl_ltssm_state[5:0]
-        #   0x000C: ro[97:96] = pl_sel_lnk_width[1:0]  (LiteX: 0b00=x1,0b01=x2 matches LINK_WIDTH[4]={1,2,4,8})
-        #           ro[98]    = pl_phy_lnk_up           (bit[2] of byte 0x0C)
-        #           ro[102]   = pl_sel_lnk_rate
+        # Byte offset → bits:
+        #   0x000A: ro[85:80]  = pl_ltssm_state[5:0]
+        #   0x000C: ro[97:96]  = pl_sel_lnk_width, ro[98]=pl_phy_lnk_up, ro[102]=pl_sel_lnk_rate
+        #   0x0016: rw[191:176]= pl_directed_link_* + pl_transmit_hot_rst (read back rw value)
         # Word index = byte_offset >> 1
         cfg_word_index  = Signal(8)
         cfg_ro_readback = Signal(16)
@@ -448,11 +448,12 @@ class PCILeechFIFO(Module):
         self.comb += Case(cfg_word_index, {
             5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A: ro[85:80]=ltssm
             6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,              # byte 0x0C: ro[97:96]=width
-                                       Signal(0),                        #            (no gap - lnk_up next)
+                                       Signal(0),
                                        self.phy_lnk_up,                 #            ro[98]=pl_phy_lnk_up
                                        Signal(3),                        #            ro[101:99]=0
                                        self.phy_lnk_rate,               #            ro[102]=rate
                                        Signal(9))),                      #            ro[111:103]=0
+            11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
             "default": cfg_ro_readback.eq(0),
         })
 
