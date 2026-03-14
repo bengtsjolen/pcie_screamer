@@ -32,6 +32,7 @@ from migen import *
 from litex.soc.interconnect import stream
 from litex.soc.interconnect.stream import SyncFIFO
 from litepcie.common import phy_layout
+from functools import reduce
 
 # ---------------------------------------------------------------------------
 # Wire-protocol constants
@@ -98,6 +99,13 @@ class PCILeechMux(Module):
         for i in range(nports):
             self.comb += p_idx[i+1].eq(p_idx[i] + self.p_wr[i])
 
+        # Per-port pending signals — caller sets high when FIFO has data not yet
+        # in a mux slot. Idle counter is suppressed while any port is pending,
+        # preventing premature frame emission before all responses accumulate.
+        self.p_pending = [Signal(name=f"p{i}_pending") for i in range(nports)]
+        any_pending = Signal()
+        self.comb += any_pending.eq(reduce(lambda a, b: a | b, self.p_pending))
+
         # Idle port (p8 in SV) — pads frame with 0xFFFFFFFF when stalled.
         # Fires whenever idle_count > 7 and there's a free slot (idle_idx < 7).
         # No idx_base > 0 guard — padding must also fill completely empty frames.
@@ -105,9 +113,9 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            # Emit frame when idle AND no response data pending in any FIFO.
-            # 'pending' prevents splitting back-to-back responses across frames.
-            idle_wr .eq(en & (idle_count > 16) & (idle_idx < 7) & (idle_idx > 0)),
+            # Emit frame only when idle AND no response data pending in any FIFO.
+            idle_wr .eq(en & (idle_count > 16) & (idle_idx < 7) & (idle_idx > 0)
+                        & ~any_pending),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
@@ -705,6 +713,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[0].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
             mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
             loop_fifo.source.ready.eq(mux.p_req[0] & ~mux.frame_valid),
+            mux.p_pending[0].eq(loop_fifo.source.valid),
         ]
 
         # p1: CMD response — tag=0b11, ctx=0b00
@@ -714,6 +723,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[1].eq(0b0011),
             mux.p_wr [1].eq(cmd_tx_fifo.source.valid & mux.p_req[1]),
             cmd_tx_fifo.source.ready.eq(mux.p_req[1] & ~mux.frame_valid),
+            mux.p_pending[1].eq(cmd_tx_fifo.source.valid),
         ]
 
         # p2: CFG response — tag=0b01, ctx=0b00
@@ -723,6 +733,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[2].eq(0b0001),
             mux.p_wr [2].eq(cfg_tx_fifo.source.valid & mux.p_req[2]),
             cfg_tx_fifo.source.ready.eq(mux.p_req[2] & ~mux.frame_valid),
+            mux.p_pending[2].eq(cfg_tx_fifo.source.valid),
         ]
 
         # p3: TLP RX (PCIe → host) — tag=0b00, ctx={first,last} from phy
@@ -733,6 +744,7 @@ class PCILeechFIFO(Module):
                                 Cat(tlp_rx_fifo.source.last, Signal()))),
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
+            mux.p_pending[3].eq(tlp_rx_fifo.source.valid),
         ]
 
         # p4-p7: stubs
@@ -741,4 +753,5 @@ class PCILeechFIFO(Module):
                 mux.p_din[i].eq(0),
                 mux.p_ctx[i].eq(0),
                 mux.p_wr [i].eq(0),
+                mux.p_pending[i].eq(0),
             ]
