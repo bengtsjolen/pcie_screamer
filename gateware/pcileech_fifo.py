@@ -723,7 +723,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[0].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
             mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
             loop_fifo.source.ready.eq(mux.p_req[0] & ~mux.frame_valid),
-            mux.p_pending[0].eq(loop_fifo.source.valid & ~mux.frame_valid),
+            mux.p_pending[0].eq(0),  # loopback does not suppress idle
         ]
 
         # p1: CMD response — tag=0b11, ctx=0b00
@@ -751,7 +751,7 @@ class PCILeechFIFO(Module):
                                 Cat(tlp_rx_fifo.source.last, Signal()))),
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
-            mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),
+            mux.p_pending[3].eq(0),  # TLP RX does not suppress idle - it fills slots opportunistically
         ]
 
         # p4-p7: stubs
