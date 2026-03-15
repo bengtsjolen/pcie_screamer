@@ -113,8 +113,7 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            idle_wr .eq(en & (idle_count > 10000) & (idle_idx < 7)
-                        & ~any_pending),
+            idle_wr .eq(en & (idle_count > 10000) & (idle_idx < 7)),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
