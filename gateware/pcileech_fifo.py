@@ -452,7 +452,7 @@ class PCILeechFIFO(Module):
         cfg_ro_readback = Signal(16)
         self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
 
-        # phy_id_latched: holds PCIe BDF. INIT=0x0c00 (DEVICE_ID_PCIESQUIRREL
+        # phy_id_latched: holds PCIe BDF. INIT=0x0c00; fallback=0x0016 for 16:00.0
         # sentinel) so wDeviceId is non-zero even before enumeration.
         # Latches real BDF once pcie_phy.id becomes valid after link trains.
         phy_id_latched = Signal(16, reset=0x0c00)
@@ -465,7 +465,7 @@ class PCILeechFIFO(Module):
                                        self.phy_lnk_rate,               #            ro[102]=rate
                                        Signal(9))),                      #            ro[111:103]=0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
-            4:  cfg_ro_readback.eq(Mux(phy_id_latched, phy_id_latched, 0x0c00)),  # byte 0x08: PCIe BDF
+            4:  cfg_ro_readback.eq(Mux(phy_id_latched, phy_id_latched, 0x0016)),  # byte 0x08: PCIe BDF
             "default": cfg_ro_readback.eq(0),
         })
 
