@@ -473,7 +473,7 @@ class PCILeechFIFO(Module):
                                        self.phy_lnk_rate,               #            ro[102]=rate
                                        Signal(9))),                      #            ro[111:103]=0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
-            4:  cfg_ro_readback.eq(Mux(phy_id_latched, phy_id_latched, 0x1600)),          # byte 0x08: PCIe BDF {bus,dev,fn} — outer swap gives 0x0016 → wDeviceId=0x1600
+            4:  cfg_ro_readback.eq(0x1600),                                               # byte 0x08: PCIe BDF hardcoded 16:00.0 — TODO: use phy_id_latched after fix
             "default": cfg_ro_readback.eq(0),
         })
 
