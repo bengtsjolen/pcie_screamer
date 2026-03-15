@@ -351,16 +351,19 @@ class PCILeechFIFO(Module):
             )
         ]
 
-        # Step 2: decode magic + type
+        # Magic check: CMD/CFG/LOOP frames have 0x77 at rx64[7:0] (byte-built frames)
+        # TLP frames (DeviceFPGA_TxTlp) have 0x77 at rx64[31:24] (DWORD-written flags)
         magic_ok  = Signal()
         pkt_type  = Signal(2)
         pkt_last  = Signal()
         pkt_data  = Signal(32)
 
         self.comb += [
-            magic_ok .eq(rx64[0:8]  == MAGIC),
-            pkt_type .eq(rx64[8:10]),
-            pkt_last .eq(rx64[10]),
+            magic_ok .eq((rx64[0:8] == MAGIC) | (rx64[24:32] == MAGIC)),
+            # For CMD/CFG/LOOP (magic at [7:0]): type at bits[9:8], last at bit[10]
+            # For TLP/LOOP2 (magic at [31:24]): type at bits[17:16], last at bit[18]
+            pkt_type .eq(Mux(rx64[24:32] == MAGIC, rx64[16:18], rx64[8:10])),
+            pkt_last .eq(Mux(rx64[24:32] == MAGIC, rx64[18], rx64[10])),
             pkt_data .eq(rx64[32:64]),
         ]
 
@@ -378,13 +381,24 @@ class PCILeechFIFO(Module):
 
         # ===================================================================
         # TLP TX FIFO: host→PCIe  (256 deep, 32+1 bit)
-        # Receives TLP words from USB, outputs to pcie_phy TX
+        # Receives TLP words from USB, outputs to pcie_phy TX.
+        # tlp_tx_suppress: after pkt_last=1, suppress further writes until next
+        # TLP frame arrives (handles padding DWORDs that pcileech appends).
         # ===================================================================
         self.submodules.tlp_tx_fifo = tlp_tx_fifo = SyncFIFO(
             phy_layout(32), 256
         )
+        tlp_tx_suppress = Signal()
+        self.sync += [
+            If(rx_is_tlp & pkt_last,
+                tlp_tx_suppress.eq(1),
+            ).Elif(rx_is_tlp & ~pkt_last & tlp_tx_suppress,
+                # Next TLP started — the padding DW was suppressed, clear now
+                tlp_tx_suppress.eq(0),
+            )
+        ]
         self.comb += [
-            tlp_tx_fifo.sink.valid.eq(rx_is_tlp),
+            tlp_tx_fifo.sink.valid.eq(rx_is_tlp & ~tlp_tx_suppress),
             tlp_tx_fifo.sink.dat  .eq(pkt_data),
             tlp_tx_fifo.sink.be   .eq(0xf),
             tlp_tx_fifo.sink.last .eq(pkt_last),
