@@ -82,7 +82,7 @@ class PCILeechMux(Module):
         ctx_reg  = Array([Signal(4,  name=f"cr{i}") for i in range(DEPTH)])
 
         idx_base    = Signal(4, reset=0)
-        idle_count  = Signal(20, reset=0)
+        idle_count  = Signal(22, reset=0)
         en          = Signal()          # always 1 after reset - mux runs freely
         dout_valid  = Signal()
         dout_buf_valid = Signal()
@@ -113,7 +113,16 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            idle_wr .eq(en & (idle_count > 1000000) & (idle_idx < 7)),
+            # Two-tier idle emission:
+            # - With data (idle_idx > 0): emit after 1000 cycles (~6.7µs)
+            #   Ensures CMD/CFG responses are delivered promptly.
+            # - Without data (idle_idx == 0): emit after 3M cycles (~20ms)
+            #   Occasional empty frame keeps FT_ReadPipe from timing out
+            #   without flooding the FT601 TX FIFO.
+            idle_wr .eq(en & (idle_idx < 7) & (
+                ((idle_count > 1000)   & (idle_idx > 0)) |
+                ((idle_count > 3000000) & (idle_idx == 0))
+            )),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
