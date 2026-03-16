@@ -665,7 +665,7 @@ class PCILeechFIFO(Module):
 
         VERSION_MAJOR = 0x04   # match pcileech-fpga PCIeSquirrel major version
         VERSION_MINOR = 0x0e   # match pcileech-fpga PCIeSquirrel v4.14 minor version
-        DEVICE_ID     = 0x04   # PCIeSquirrel device ID
+        DEVICE_ID     = 0x0c   # PCIeSquirrel device ID (DEVICE_ID_PCIESQUIRREL)
 
         rw_readback = Signal(16)
         ro_readback = Signal(16)
