@@ -458,7 +458,7 @@ class PCILeechFIFO(Module):
         cfg_cmd_read  = Signal()
         self.comb += [
             cfg_addr_byte.eq(cfg_cmd[16:32]),
-            cfg_cmd_read .eq(cfg_cmd_valid & cfg_cmd[12]),
+            cfg_cmd_read .eq(cfg_cmd_valid),   # all CFG frames get a response (always reads from pcileech)
             cfg_rx_fifo.source.ready.eq(1),
         ]
 
@@ -480,6 +480,7 @@ class PCILeechFIFO(Module):
         phy_id_latched = Signal(16, reset=0x0c00)
         self.sync += If(self.phy_id, phy_id_latched.eq(self.phy_id))
         self.comb += Case(cfg_word_index, {
+            0:  cfg_ro_readback.eq(0x6745),                                               # byte 0x00: wMagicPCIe=0x6745 (pcileech magic check)
             5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A: ro[85:80]=ltssm
             6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,              # byte 0x0C: ro[97:96]=width
                                        self.phy_lnk_up,                 #            ro[98]=pl_phy_lnk_up
