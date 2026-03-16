@@ -478,20 +478,18 @@ class PCILeechFIFO(Module):
         phy_id_latched = Signal(16, reset=0x0c00)
         self.sync += If(self.phy_id, phy_id_latched.eq(self.phy_id))
         self.comb += Case(cfg_word_index, {
-            0:  cfg_ro_readback.eq(0x4567),                                               # byte 0x00: wMagicPCIe — Cat-swap→0x6745 as pcileech expects
-            # PHY registers: response Cat-swap means readback[15:8]→pb[0], readback[7:0]→pb[1]
-            # pb[0] at 0x000a = {lnk_width[1:0], ltssm[5:0]}  → readback[15:8]
-            # pb[1] at 0x000b = {0000000, lnk_up}              → readback[7:0]
-            5:  cfg_ro_readback.eq(Cat(self.phy_lnk_up, Signal(7),      # readback[7:0]  = {0..0, lnk_up}
-                                       self.phy_ltssm,                   # readback[13:8] = ltssm[5:0]
-                                       self.phy_lnk_width)),             # readback[15:14]= lnk_width
-            # pb[0] at 0x000c = {lnk_rate, 00000, lnk_up, lnk_width[1:0]} → readback[15:8]
-            # pb[1] at 0x000d = 0                                           → readback[7:0]
-            6:  cfg_ro_readback.eq(Cat(Signal(8),                        # readback[7:0]  = 0
-                                       self.phy_lnk_width,               # readback[9:8]  = lnk_width
-                                       self.phy_lnk_up,                  # readback[10]   = lnk_up
-                                       Signal(4),                        # readback[14:11]= 0
-                                       self.phy_lnk_rate)),              # readback[15]   = lnk_rate
+            0:  cfg_ro_readback.eq(0x6745),                                               # byte 0x00: wMagicPCIe — value transmitted directly
+            # PHY registers: value[7:0]→pb[0], value[15:8]→pb[1] (natural LE mapping)
+            # pb[0] at 0x000a = {lnk_width[1:0], ltssm[5:0]}
+            # pb[1] at 0x000b = {0000000, lnk_up}
+            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,  self.phy_lnk_width,   # [7:0]  = {lnk_width,ltssm}
+                                       self.phy_lnk_up, Signal(7))),            # [15:8] = {0...,lnk_up}
+            # pb[0] at 0x000c = {lnk_rate,0,0,0,0,lnk_up,lnk_width[1:0]}
+            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,                     # [1:0]  = lnk_width
+                                       self.phy_lnk_up,                         # [2]    = lnk_up
+                                       Signal(4),                               # [6:3]  = 0
+                                       self.phy_lnk_rate,                       # [7]    = lnk_rate
+                                       Signal(8))),                             # [15:8] = 0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
             4:  cfg_ro_readback.eq(0x1600),                                               # byte 0x08: PCIe BDF hardcoded 16:00.0 — TODO: use phy_id_latched after fix
             "default": cfg_ro_readback.eq(0),
@@ -503,8 +501,8 @@ class PCILeechFIFO(Module):
             #   dwData[31:16] = value (byte-swapped per SV convention)
             cfg_tx_fifo.sink.valid.eq(cfg_cmd_read),
             cfg_tx_fifo.sink.data .eq(Cat(
-                Cat(cfg_addr_byte[8:16], cfg_addr_byte[0:8]),   # [15:0]  = byteswap(addr)
-                Cat(cfg_ro_readback[8:16], cfg_ro_readback[0:8]), # [31:16] = byteswap(value)
+                cfg_ro_readback[0:8], cfg_ro_readback[8:16],  # X[15:0]  = value (lo byte, hi byte)
+                cfg_addr_byte[0:8],   cfg_addr_byte[8:16],    # X[31:16] = addr (lo byte, hi byte)
             )),
             cfg_tx_fifo.sink.last .eq(1),
         ]
@@ -695,10 +693,14 @@ class PCILeechFIFO(Module):
         #   [31:16] = in_cmd_address_byte  (echoed back)
         #   [15:0]  = {data_in[7:0], data_in[15:8]}  (byte-swapped 16-bit value)
         self.comb += [
+            # Response format: transmitted MSB-first, host reads LE.
+            # Host needs: dwData[15:0] = byteswap(addr), dwData[23:16] = value_lo, dwData[31:24] = value_hi
+            # Since serializer transmits X[31:24] first → dwData[7:0]=X[31:24], dwData[15:8]=X[23:16], etc.
+            # So: X = Cat(value[0:8], value[8:16], addr[0:8], addr[8:16])
             cmd_tx_fifo.sink.valid.eq(in_cmd_read),
             cmd_tx_fifo.sink.data .eq(Cat(
-                Cat(in_addr_byte[8:16], in_addr_byte[0:8]),  # [15:0]  byteswap(addr)
-                Cat(readback[8:16], readback[0:8]),            # [31:16] byteswap(value)
+                readback[0:8], readback[8:16],          # X[15:0]  = value (lo byte, hi byte)
+                in_addr_byte[0:8], in_addr_byte[8:16],  # X[31:16] = addr (lo byte, hi byte)
             )),
             cmd_tx_fifo.sink.last.eq(1),
         ]
