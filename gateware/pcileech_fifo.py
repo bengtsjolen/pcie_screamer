@@ -310,6 +310,10 @@ class PCILeechFIFO(Module):
         self.phy_lnk_width = Signal(2)  # pl_sel_lnk_width (0b00=x1)
         self.phy_id        = Signal(16) # PCIe BDF: {bus[7:0], dev[4:0], fn[2:0]}
 
+        # Diagnostic output: [15:8]=rx_seen_count[7:0], [7:0]=tlp_rx_fifo.level[7:0]
+        # Read via CMD register 0x0006 (ro, word_index 3)
+        self.tlp_rx_level  = Signal(16)
+
         # ===================================================================
         # RX PATH: USB → dispatch
         # Step 1: pack two consecutive 32-bit words into one 64-bit frame
@@ -418,6 +422,16 @@ class PCILeechFIFO(Module):
             phy_layout(32), 256
         )
         self.comb += self.tlp_rx.connect(tlp_rx_fifo.sink)
+
+        # Diagnostic: expose tlp_rx_fifo level + rx_seen counter via CMD register
+        self.tlp_rx_level = Signal(16)
+        rx_seen_count = Signal(16)
+        self.sync += [
+            If(self.tlp_rx.valid & self.tlp_rx.ready,
+                rx_seen_count.eq(rx_seen_count + 1),
+            )
+        ]
+        self.comb += self.tlp_rx_level.eq(Cat(tlp_rx_fifo.level[0:8], rx_seen_count[0:8]))
 
         # ===================================================================
         # LOOPBACK FIFO: host→host echo  (64 deep, 34 bit)
@@ -684,6 +698,7 @@ class PCILeechFIFO(Module):
         # byte offset 0x0A → word_index 5 → {0x00, DEVICE_ID}
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
+            3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MAJOR),
                                   Signal(8, reset=VERSION_MINOR))),
             5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),
