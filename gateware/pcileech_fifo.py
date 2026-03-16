@@ -395,9 +395,15 @@ class PCILeechFIFO(Module):
                 tlp_tx_suppress.eq(0),
             )
         ]
+        # pkt_data is un-swapped (byte-reversed vs original). The PCIe IP needs
+        # the original byte order. Apply byte-swap to restore it.
+        pkt_data_swapped = Signal(32)
+        self.comb += pkt_data_swapped.eq(Cat(
+            pkt_data[24:32], pkt_data[16:24], pkt_data[8:16], pkt_data[0:8]
+        ))
         self.comb += [
             tlp_tx_fifo.sink.valid.eq(rx_is_tlp & ~tlp_tx_suppress),
-            tlp_tx_fifo.sink.dat  .eq(pkt_data),
+            tlp_tx_fifo.sink.dat  .eq(pkt_data_swapped),
             tlp_tx_fifo.sink.be   .eq(0xf),
             tlp_tx_fifo.sink.last .eq(pkt_last),
             tlp_tx_fifo.source.connect(self.tlp_tx),
