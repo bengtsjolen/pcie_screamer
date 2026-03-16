@@ -480,13 +480,20 @@ class PCILeechFIFO(Module):
         phy_id_latched = Signal(16, reset=0x0c00)
         self.sync += If(self.phy_id, phy_id_latched.eq(self.phy_id))
         self.comb += Case(cfg_word_index, {
-            0:  cfg_ro_readback.eq(0x6745),                                               # byte 0x00: wMagicPCIe=0x6745 (pcileech magic check)
-            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,    Signal(10))),  # byte 0x0A: ro[85:80]=ltssm
-            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,              # byte 0x0C: ro[97:96]=width
-                                       self.phy_lnk_up,                 #            ro[98]=pl_phy_lnk_up
-                                       Signal(3),                        #            ro[101:99]=0
-                                       self.phy_lnk_rate,               #            ro[102]=rate
-                                       Signal(9))),                      #            ro[111:103]=0
+            0:  cfg_ro_readback.eq(0x4567),                                               # byte 0x00: wMagicPCIe — Cat-swap→0x6745 as pcileech expects
+            # PHY registers: response Cat-swap means readback[15:8]→pb[0], readback[7:0]→pb[1]
+            # pb[0] at 0x000a = {lnk_width[1:0], ltssm[5:0]}  → readback[15:8]
+            # pb[1] at 0x000b = {0000000, lnk_up}              → readback[7:0]
+            5:  cfg_ro_readback.eq(Cat(self.phy_lnk_up, Signal(7),      # readback[7:0]  = {0..0, lnk_up}
+                                       self.phy_ltssm,                   # readback[13:8] = ltssm[5:0]
+                                       self.phy_lnk_width)),             # readback[15:14]= lnk_width
+            # pb[0] at 0x000c = {lnk_rate, 00000, lnk_up, lnk_width[1:0]} → readback[15:8]
+            # pb[1] at 0x000d = 0                                           → readback[7:0]
+            6:  cfg_ro_readback.eq(Cat(Signal(8),                        # readback[7:0]  = 0
+                                       self.phy_lnk_width,               # readback[9:8]  = lnk_width
+                                       self.phy_lnk_up,                  # readback[10]   = lnk_up
+                                       Signal(4),                        # readback[14:11]= 0
+                                       self.phy_lnk_rate)),              # readback[15]   = lnk_rate
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
             4:  cfg_ro_readback.eq(0x1600),                                               # byte 0x08: PCIe BDF hardcoded 16:00.0 — TODO: use phy_id_latched after fix
             "default": cfg_ro_readback.eq(0),
