@@ -121,7 +121,7 @@ class PCILeechMux(Module):
             #   without flooding the FT601 TX FIFO.
             idle_wr .eq(en & (idle_idx < 7) & (
                 ((idle_count > 1000)   & (idle_idx > 0)) |
-                ((idle_count > 3000000) & (idle_idx == 0))
+                ((idle_count > 100000) & (idle_idx == 0))
             )),
         ]
         idx_max = Signal(4)
