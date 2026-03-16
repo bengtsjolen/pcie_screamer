@@ -492,11 +492,13 @@ class PCILeechFIFO(Module):
         })
 
         self.comb += [
-            # Response format: [31:16]=addr_byte echo, [15:0]={val[7:0],val[15:8]}
+            # Response format per DeviceFPGA_ConfigRead parser:
+            #   dwData[15:0]  = _byteswap_ushort(wAddr | flags_C000)  → address echo
+            #   dwData[31:16] = value (byte-swapped per SV convention)
             cfg_tx_fifo.sink.valid.eq(cfg_cmd_read),
             cfg_tx_fifo.sink.data .eq(Cat(
-                Cat(cfg_ro_readback[8:16], cfg_ro_readback[0:8]),  # byte-swap
-                cfg_addr_byte,
+                Cat(cfg_addr_byte[8:16], cfg_addr_byte[0:8]),   # [15:0]  = byteswap(addr)
+                Cat(cfg_ro_readback[8:16], cfg_ro_readback[0:8]), # [31:16] = byteswap(value)
             )),
             cfg_tx_fifo.sink.last .eq(1),
         ]
@@ -689,8 +691,8 @@ class PCILeechFIFO(Module):
         self.comb += [
             cmd_tx_fifo.sink.valid.eq(in_cmd_read),
             cmd_tx_fifo.sink.data .eq(Cat(
-                Cat(readback[8:16], readback[0:8]),  # [15:0]  byte-swapped value
-                in_addr_byte,                         # [31:16] echoed address
+                Cat(in_addr_byte[8:16], in_addr_byte[0:8]),  # [15:0]  byteswap(addr)
+                Cat(readback[8:16], readback[0:8]),            # [31:16] byteswap(value)
             )),
             cmd_tx_fifo.sink.last.eq(1),
         ]
