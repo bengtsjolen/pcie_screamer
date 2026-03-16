@@ -114,14 +114,12 @@ class PCILeechMux(Module):
         self.comb += [
             idle_idx.eq(p_idx[nports]),
             # Two-tier idle emission:
-            # - With data (idle_idx > 0): emit after 1000 cycles (~6.7µs)
-            #   Ensures CMD/CFG responses are delivered promptly.
-            # - Without data (idle_idx == 0): emit after 3M cycles (~20ms)
-            #   Occasional empty frame keeps FT_ReadPipe from timing out
-            #   without flooding the FT601 TX FIFO.
+            # - With data (idle_idx > 0) and no pending responses: emit after 1000 cycles
+            # - Without data (idle_idx == 0): emit after 3M cycles (~20ms) keeps FT_ReadPipe alive
+            # any_pending gates the data-present path so response FIFOs get priority.
             idle_wr .eq(en & (idle_idx < 7) & (
-                ((idle_count > 1000)   & (idle_idx > 0)) |
-                ((idle_count > 100000) & (idle_idx == 0))
+                ((idle_count > 1000)   & (idle_idx > 0) & ~any_pending) |
+                ((idle_count > 3000000) & (idle_idx == 0))
             )),
         ]
         idx_max = Signal(4)
