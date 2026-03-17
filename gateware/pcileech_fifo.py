@@ -446,6 +446,7 @@ class PCILeechFIFO(Module):
         )
         self.comb += [
             loop_fifo.sink.valid.eq(rx_is_loop),
+            loop_fifo.sink.last .eq(1),              # each loop entry is one beat
             loop_fifo.sink.data .eq(rx64[32:64]),   # upper word = com_dout[63:32]
             loop_fifo.sink.ctx  .eq(rx64[10:12]),   # bits[11:10] = com_dout[11:10]
         ]
@@ -605,7 +606,7 @@ class PCILeechFIFO(Module):
                 rw[160:176].eq(0x10EE),    # CFG_VEND_ID
                 rw[176:192].eq(0x0666),    # CFG_DEV_ID
                 rw[192:200].eq(0x02),      # CFG_REV_ID
-                rw[200]    .eq(1),         # PCIE CORE RESET (asserted at startup)
+                rw[200]    .eq(0),         # PCIE CORE RESET (0=no reset, pcileech will set if needed)
                 rw[201]    .eq(0),         # PCIE SUBSYSTEM RESET
                 rw[202]    .eq(1),         # CFGTLP PROCESSING ENABLE
                 rw[203]    .eq(1),         # CFGTLP ZERO DATA
