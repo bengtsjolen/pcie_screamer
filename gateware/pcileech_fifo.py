@@ -805,7 +805,7 @@ class PCILeechFIFO(Module):
                                 Cat(tlp_rx_fifo.source.last, Signal()))),
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
-            mux.p_pending[3].eq(0),  # TLP RX does not suppress idle - it fills slots opportunistically
+            mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
         ]
 
         # p4-p7: stubs
