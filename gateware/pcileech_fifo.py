@@ -703,9 +703,9 @@ class PCILeechFIFO(Module):
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
-            4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
-                                  Signal(8, reset=VERSION_MAJOR))),
-            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),
+            4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MAJOR),
+                                  Signal(8, reset=VERSION_MINOR))),  # VERSION_MAJOR at [7:0] for pcileech wData&0xff
+            5: ro_readback.eq(Cat(Signal(8), Signal(8, reset=DEVICE_ID))),  # DEVICE_ID at [15:8] for pcileech wData>>8
         })
 
         # Select ro[] or rw[] based on f_rw flag
