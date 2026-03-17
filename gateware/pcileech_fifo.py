@@ -804,18 +804,12 @@ class PCILeechFIFO(Module):
             mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.frame_valid),
         ]
 
-        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={tag[1],tag[0],first,last}
-        # Reference SV p3_ctx nibble = {tag=0b00, first, last} = {0,0,first,last}
-        # LiteX Cat is LSB-first: Cat(last, first, tag[0]=0, tag[1]=0)
-        # Note: phy_layout SyncFIFO tracks last; derive first from prev_last register
-        _tlp_rx_prev_last = Signal(reset=1)  # first beat after reset
-        self.sync += If(tlp_rx_fifo.source.valid & tlp_rx_fifo.source.ready,
-            _tlp_rx_prev_last.eq(tlp_rx_fifo.source.last))
+        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={0,0,0,last}
+        # bit[0]=last so pcileech knows where each TLP ends. first not tracked.
         self.comb += [
             mux.p_din[3].eq(tlp_rx_fifo.source.dat),
             mux.p_ctx[3].eq(Cat(tlp_rx_fifo.source.last,  # bit[0] = last
-                                _tlp_rx_prev_last,          # bit[1] = first (= prev beat was last)
-                                Signal(2, reset=0b00))),   # bits[3:2] = tag=0b00
+                                Signal(3, reset=0b000))),  # bits[3:1] = tag=0b00, first=0
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
             mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
