@@ -514,6 +514,10 @@ class PCILeechFIFO(Module):
                                        Signal(8))),                             # [15:8] = 0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
             4:  cfg_ro_readback.eq(0x1600),                                               # byte 0x08: PCIe BDF hardcoded 16:00.0 — TODO: use phy_id_latched after fix
+            # byte 0x18 = word_index 12: dcommand shadow
+            # Return MaxReadReq=4096 (bits[14:12]=0b101=5), no ExtTag (bit8=0)
+            # so pcileech uses normal tags (0x00-0x1f) that all host RCs support.
+            12: cfg_ro_readback.eq(0x5030),
             "default": cfg_ro_readback.eq(0),
         })
 
