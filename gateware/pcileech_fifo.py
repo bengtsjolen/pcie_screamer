@@ -803,11 +803,14 @@ class PCILeechFIFO(Module):
             mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.frame_valid),
         ]
 
-        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={first,last} from phy
+        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={tag[1],tag[0],first,last}
+        # Reference SV p3_ctx nibble = {tag=0b00, first, last} = {0,0,first,last}
+        # LiteX Cat is LSB-first: Cat(last, first, tag[0]=0, tag[1]=0)
         self.comb += [
             mux.p_din[3].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[3].eq(Cat(Signal(2, reset=0b00),
-                                Cat(tlp_rx_fifo.source.last, Signal()))),
+            mux.p_ctx[3].eq(Cat(tlp_rx_fifo.source.last,   # bit[0] = last
+                                tlp_rx_fifo.source.first,  # bit[1] = first
+                                Signal(2, reset=0b00))),   # bits[3:2] = tag=0b00
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
             mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
