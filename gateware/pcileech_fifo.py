@@ -514,10 +514,6 @@ class PCILeechFIFO(Module):
                                        Signal(8))),                             # [15:8] = 0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
             4:  cfg_ro_readback.eq(0x1600),                                               # byte 0x08: PCIe BDF hardcoded 16:00.0 — TODO: use phy_id_latched after fix
-            # byte 0x18: dcommand shadow — MaxReadReq=512, no ExtTag, no RelaxedOrder
-            # Prevents pcileech from enabling extended tags (Tag>0x1f) which some
-            # host RCs won't complete. 0x2810 = MaxReadReq=512, no ExtTag.
-            12: cfg_ro_readback.eq(0x2810),
             "default": cfg_ro_readback.eq(0),
         })
 
@@ -605,7 +601,7 @@ class PCILeechFIFO(Module):
                 rw[160:176].eq(0x10EE),    # CFG_VEND_ID
                 rw[176:192].eq(0x0666),    # CFG_DEV_ID
                 rw[192:200].eq(0x02),      # CFG_REV_ID
-                rw[200]    .eq(0),         # PCIE CORE RESET (0=no reset, pcileech will set if needed)
+                rw[200]    .eq(1),         # PCIE CORE RESET (asserted at startup, pcileech clears)
                 rw[201]    .eq(0),         # PCIE SUBSYSTEM RESET
                 rw[202]    .eq(1),         # CFGTLP PROCESSING ENABLE
                 rw[203]    .eq(1),         # CFGTLP ZERO DATA
@@ -706,7 +702,7 @@ class PCILeechFIFO(Module):
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MAJOR),
                                   Signal(8, reset=VERSION_MINOR))),  # VERSION_MAJOR at [7:0] for pcileech wData&0xff
-            5: ro_readback.eq(Cat(Signal(8), Signal(8, reset=DEVICE_ID))),  # DEVICE_ID at [15:8] for pcileech wData>>8
+            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),  # DEVICE_ID at [7:0]
         })
 
         # Select ro[] or rw[] based on f_rw flag
