@@ -446,7 +446,6 @@ class PCILeechFIFO(Module):
         )
         self.comb += [
             loop_fifo.sink.valid.eq(rx_is_loop),
-            loop_fifo.sink.last .eq(1),              # each loop entry is one beat
             loop_fifo.sink.data .eq(rx64[32:64]),   # upper word = com_dout[63:32]
             loop_fifo.sink.ctx  .eq(rx64[10:12]),   # bits[11:10] = com_dout[11:10]
         ]
