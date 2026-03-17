@@ -206,10 +206,11 @@ class PCILeechMux(Module):
                         ctx_reg [idle_idx].eq(0b1111),
                     ),
 
-                    # Latch completed frame into hold register
+                    # Latch completed frame into hold register; reset idle_count
                     If(idx_max >= 7,
                         frame_valid.eq(1),
                         frame_data .eq(dout_data),
+                        idle_count .eq(0),   # restart idle timer after each frame commit
                     ),
                 ),
             )
