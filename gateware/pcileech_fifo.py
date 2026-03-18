@@ -113,9 +113,14 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            # Emit frame after 1000 cycles of quiet (no new data in any slot).
-            # 1000 cycles = ~6.7us — fast enough to meet pcileech DELAY_READ=300us.
-            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
+            # Two-tier idle emission:
+            # - With data (idle_idx > 0): emit after 1000 cycles (~6.7us).
+            # - All-idle keepalive after 3M cycles (~20ms): keeps FT601 USB alive.
+            #   Without this the FT601 times out and disconnects (~46s timeout).
+            idle_wr .eq(en & (idle_idx < 7) & (
+                ((idle_count > 1000)    & (idle_idx > 0)) |
+                ((idle_count > 3000000) & (idle_idx == 0))
+            )),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
@@ -805,12 +810,14 @@ class PCILeechFIFO(Module):
             mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.frame_valid),
         ]
 
-        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={0,0,0,last}
-        # bit[0]=last so pcileech knows where each TLP ends. first not tracked.
+        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={tag=0b00, first, last}
+        # Matches ufrisk SV: p3_ctx = {dtlp.rx_first[0], dtlp.rx_last[0]}
+        # nibble = {0, 0, first, last} — pcileech uses first to start new TLP buffer
         self.comb += [
             mux.p_din[3].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[3].eq(Cat(tlp_rx_fifo.source.last,  # bit[0] = last
-                                Signal(3, reset=0b000))),  # bits[3:1] = tag=0b00, first=0
+            mux.p_ctx[3].eq(Cat(tlp_rx_fifo.source.last,   # bit[0] = last
+                                tlp_rx_fifo.source.first,  # bit[1] = first
+                                Signal(2, reset=0b00))),   # bits[3:2] = tag=0b00
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
             mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
