@@ -120,7 +120,7 @@ class PCILeechMux(Module):
             # Exception: if idle_count > 50000 (~330us), commit anyway to not miss
             # pcileech DELAY_READ timeout.
             idle_wr .eq(en & (idle_idx < 7) & (idle_idx > 0) & (
-                (idle_count > 30000)  # ~200us, before 300us DELAY_READ timeout |
+                (idle_count > 30000) |
                 ((idle_count > 1000) & ~any_pending)
             )),
         ]
