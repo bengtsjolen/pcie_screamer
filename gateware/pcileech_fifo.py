@@ -537,6 +537,9 @@ class PCILeechFIFO(Module):
 
 
         # Named aliases for important rw bits
+        # Latch lnk_up: once high, stays high permanently (prevents CDC glitch resetting PCIe)
+        lnk_up_latched = Signal()
+        self.sync += If(self.phy_lnk_up, lnk_up_latched.eq(1))
         rw_pcie_rst_core   = rw[200]
         rw_pcie_rst_subsys = rw[201]
         rw_cfgtlp_en       = rw[202]
@@ -664,7 +667,8 @@ class PCILeechFIFO(Module):
         # This allows pcileech to clear rw[200] before link comes up,
         # while preventing reset from breaking an established link.
         self.comb += [
-            self.pcie_rst_core  .eq(rw_pcie_rst_core & ~self.phy_lnk_up),
+            # lnk_up_latched: once link is up, never go back to 0 (prevents glitch reset)
+            self.pcie_rst_core  .eq(rw_pcie_rst_core & ~lnk_up_latched),
             self.pcie_rst_subsys.eq(rw_pcie_rst_subsys),
         ]
 
@@ -712,7 +716,7 @@ class PCILeechFIFO(Module):
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
                                   Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
-            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),  # DEVICE_ID at [7:0] → wData&0xff=DEVICE_ID
+            5: ro_readback.eq(Cat(Signal(8), Signal(8, reset=DEVICE_ID))),  # DEVICE_ID at [15:8] → match ufrisk 000a0400
         })
 
         # Select ro[] or rw[] based on f_rw flag
