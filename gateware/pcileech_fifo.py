@@ -812,11 +812,14 @@ class PCILeechFIFO(Module):
 
         # p3: TLP RX (PCIe → host) — tag=0b00, ctx={tag=0b00, first, last}
         # Matches ufrisk SV: p3_ctx = {dtlp.rx_first[0], dtlp.rx_last[0]}
-        # nibble = {0, 0, first, last} — pcileech uses first to start new TLP buffer
+        # Derive first from registered prev_last (phy_layout SyncFIFO has no .first)
+        tlp_rx_prev_last = Signal(reset=1)  # starts 1 so first DWORD is marked first
+        self.sync += If(tlp_rx_fifo.source.valid & tlp_rx_fifo.source.ready,
+            tlp_rx_prev_last.eq(tlp_rx_fifo.source.last))
         self.comb += [
             mux.p_din[3].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[3].eq(Cat(tlp_rx_fifo.source.last,   # bit[0] = last
-                                tlp_rx_fifo.source.first,  # bit[1] = first
+            mux.p_ctx[3].eq(Cat(tlp_rx_fifo.source.last,  # bit[0] = last
+                                tlp_rx_prev_last,           # bit[1] = first
                                 Signal(2, reset=0b00))),   # bits[3:2] = tag=0b00
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
