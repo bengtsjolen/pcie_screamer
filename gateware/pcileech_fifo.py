@@ -688,7 +688,7 @@ class PCILeechFIFO(Module):
 
         VERSION_MAJOR = 0x04   # match pcileech-fpga PCIeSquirrel major version
         VERSION_MINOR = 0x0e   # match pcileech-fpga PCIeSquirrel v4.14 minor version
-        DEVICE_ID     = 0x0c   # PCIeSquirrel device ID (DEVICE_ID_PCIESQUIRREL)
+        DEVICE_ID     = 0x04   # Match ufrisk reference (DEVICE_ID=4 → small tags)
 
         rw_readback = Signal(16)
         ro_readback = Signal(16)
@@ -708,9 +708,9 @@ class PCILeechFIFO(Module):
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
-            4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MAJOR),
-                                  Signal(8, reset=VERSION_MINOR))),  # VERSION_MAJOR at [7:0] for pcileech wData&0xff
-            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),  # DEVICE_ID at [7:0]
+            4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
+                                  Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
+            5: ro_readback.eq(Cat(Signal(8), Signal(8, reset=DEVICE_ID))),  # DEVICE_ID at [15:8] → wData>>8=DEVICE_ID
         })
 
         # Select ro[] or rw[] based on f_rw flag
