@@ -113,16 +113,9 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            # Emit frame when data is in slots AND either:
-            # - 1000 cycles elapsed with no more pending data, OR
-            # - 1000 cycles elapsed and no TLP RX pending (don't wait forever for CplD)
-            # any_pending prevents committing a frame while more data is imminent.
-            # Exception: if idle_count > 50000 (~330us), commit anyway to not miss
-            # pcileech DELAY_READ timeout.
-            idle_wr .eq(en & (idle_idx < 7) & (idle_idx > 0) & (
-                (idle_count > 30000) |
-                ((idle_count > 1000) & ~any_pending)
-            )),
+            # Emit frame after 1000 cycles of quiet (no new data in any slot).
+            # 1000 cycles = ~6.7us — fast enough to meet pcileech DELAY_READ=300us.
+            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
