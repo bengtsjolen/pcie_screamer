@@ -660,7 +660,7 @@ class PCILeechFIFO(Module):
         # This allows pcileech to clear rw[200] before link comes up,
         # while preventing reset from breaking an established link.
         self.comb += [
-            self.pcie_rst_core  .eq(rw_pcie_rst_core),  # rw[200]=0 at reset → always 0
+            self.pcie_rst_core  .eq(0),  # hardwired 0 — pcie_rst_n always 1
             self.pcie_rst_subsys.eq(rw_pcie_rst_subsys),
         ]
 
