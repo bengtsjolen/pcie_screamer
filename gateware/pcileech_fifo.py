@@ -310,6 +310,7 @@ class PCILeechFIFO(Module):
         self.phy_lnk_rate  = Signal()   # pl_sel_lnk_rate  (0=Gen1, 1=Gen2)
         self.phy_lnk_width = Signal(2)  # pl_sel_lnk_width (0b00=x1)
         self.phy_id        = Signal(16) # PCIe BDF: {bus[7:0], dev[4:0], fn[2:0]}
+        self.cfg_dcommand  = Signal(16) # PCIe Device Control register (dcommand)
 
         # Diagnostic output: [15:8]=rx_seen_count[7:0], [7:0]=tlp_rx_fifo.level[7:0]
         # Read via CMD register 0x0006 (ro, word_index 3)
@@ -514,10 +515,10 @@ class PCILeechFIFO(Module):
                                        Signal(8))),                             # [15:8] = 0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
             4:  cfg_ro_readback.eq(0x1600),                                               # byte 0x08: PCIe BDF hardcoded 16:00.0 — TODO: use phy_id_latched after fix
-            # byte 0x18 = word_index 12: dcommand shadow
-            # Return MaxReadReq=4096 (bits[14:12]=0b101=5), no ExtTag (bit8=0)
-            # so pcileech uses normal tags (0x00-0x1f) that all host RCs support.
-            12: cfg_ro_readback.eq(0x5030),
+            # byte 0x18 = word_index 12: dcommand shadow from real PCIe IP
+            # Exposes cfg_dcommand so pcileech knows MaxReadReq and ExtTag settings.
+            # Caller must wire self.cfg_dcommand from pcie_phy.cfg_dcommand.
+            12: cfg_ro_readback.eq(self.cfg_dcommand),
             "default": cfg_ro_readback.eq(0),
         })
 
@@ -710,7 +711,7 @@ class PCILeechFIFO(Module):
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
                                   Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
-            5: ro_readback.eq(Cat(Signal(8), Signal(8, reset=DEVICE_ID))),  # DEVICE_ID at [15:8] → wData>>8=DEVICE_ID
+            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),  # DEVICE_ID at [7:0] → wData&0xff=DEVICE_ID
         })
 
         # Select ro[] or rw[] based on f_rw flag
