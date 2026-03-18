@@ -78,8 +78,8 @@ class PCILeechMux(Module):
         # Internal state — 15 slots (SV uses data_reg[14], indices 0..13)
         # -------------------------------------------------------------------
         DEPTH    = 15
-        data_reg = Array([Signal(32, name=f"dr{i}") for i in range(DEPTH)])
-        ctx_reg  = Array([Signal(4,  name=f"cr{i}") for i in range(DEPTH)])
+        data_reg = Array([Signal(32, reset=0xFFFFFFFF, name=f"dr{i}") for i in range(DEPTH)])
+        ctx_reg  = Array([Signal(4,  reset=0b1111,    name=f"cr{i}") for i in range(DEPTH)])
 
         idx_base    = Signal(4, reset=0)
         idle_count  = Signal(22, reset=0)
@@ -113,10 +113,16 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            # Emit frame when any port has written data and 1000 cycles have
-            # elapsed with no further data (padding idle slots then commit).
-            # No all-idle keepalive needed - FT601/pcileech don't require it.
-            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
+            # Emit frame when data is in slots AND either:
+            # - 1000 cycles elapsed with no more pending data, OR
+            # - 1000 cycles elapsed and no TLP RX pending (don't wait forever for CplD)
+            # any_pending prevents committing a frame while more data is imminent.
+            # Exception: if idle_count > 50000 (~330us), commit anyway to not miss
+            # pcileech DELAY_READ timeout.
+            idle_wr .eq(en & (idle_idx < 7) & (idle_idx > 0) & (
+                (idle_count > 30000)  # ~200us, before 300us DELAY_READ timeout |
+                ((idle_count > 1000) & ~any_pending)
+            )),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
