@@ -610,7 +610,7 @@ class PCILeechFIFO(Module):
                 rw[160:176].eq(0x10EE),    # CFG_VEND_ID
                 rw[176:192].eq(0x0666),    # CFG_DEV_ID
                 rw[192:200].eq(0x02),      # CFG_REV_ID
-                rw[200]    .eq(1),         # PCIE CORE RESET (asserted at startup, pcileech clears)
+                rw[200]    .eq(0),         # PCIE CORE RESET off — sys_rst_n=1 so user_lnk_up can assert
                 rw[201]    .eq(0),         # PCIE SUBSYSTEM RESET
                 rw[202]    .eq(1),         # CFGTLP PROCESSING ENABLE
                 rw[203]    .eq(1),         # CFGTLP ZERO DATA
@@ -667,8 +667,7 @@ class PCILeechFIFO(Module):
         # This allows pcileech to clear rw[200] before link comes up,
         # while preventing reset from breaking an established link.
         self.comb += [
-            # lnk_up_latched: once link is up, never go back to 0 (prevents glitch reset)
-            self.pcie_rst_core  .eq(rw_pcie_rst_core & ~lnk_up_latched),
+            self.pcie_rst_core  .eq(rw_pcie_rst_core),  # rw[200]=0 at reset → always 0
             self.pcie_rst_subsys.eq(rw_pcie_rst_subsys),
         ]
 
