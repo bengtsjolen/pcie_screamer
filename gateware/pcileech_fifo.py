@@ -657,8 +657,12 @@ class PCILeechFIFO(Module):
         ]
 
         # Drive control outputs from register file
+        # pcie_rst_core driven by rw[200] BUT gated: only assert reset if
+        # link is NOT up yet. Once link trains (phy_lnk_up=1), never reset.
+        # This allows pcileech to clear rw[200] before link comes up,
+        # while preventing reset from breaking an established link.
         self.comb += [
-            self.pcie_rst_core  .eq(rw_pcie_rst_core),
+            self.pcie_rst_core  .eq(rw_pcie_rst_core & ~self.phy_lnk_up),
             self.pcie_rst_subsys.eq(rw_pcie_rst_subsys),
         ]
 
