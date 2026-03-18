@@ -113,15 +113,10 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            # Two-tier idle emission:
-            # - With data (idle_idx > 0): emit after 1000 cycles (~6.7us).
-            #   Covers CMD/CFG responses AND TLP RX data (CplDs must reach host
-            #   before pcileech DELAY_READ=300us timeout).
-            # - No data (idle_idx == 0): emit after 3M cycles (~20ms) keeps FT_ReadPipe alive.
-            idle_wr .eq(en & (idle_idx < 7) & (
-                ((idle_count > 1000)    & (idle_idx > 0)) |
-                ((idle_count > 3000000) & (idle_idx == 0))
-            )),
+            # Emit frame when any port has written data and 1000 cycles have
+            # elapsed with no further data (padding idle slots then commit).
+            # No all-idle keepalive needed - FT601/pcileech don't require it.
+            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
