@@ -728,7 +728,11 @@ class PCILeechFIFO(Module):
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
                                   Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
-            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),  # DEVICE_ID at [7:0] → DWORD=000a0004
+            # DEVICE_ID response: need DWORD=000a0400 so pcileech uses small-tag profile
+            # Cat puts first arg at LSB: Cat(lo, hi) → {hi, lo} in Verilog
+            # We need readback[15:8]=DEVICE_ID so hi=DEVICE_ID → second arg has DEVICE_ID
+            # Use named signals to ensure stable Migen elaboration order
+            5: ro_readback.eq(Cat(Signal(8, name="dev_id_lo"), Signal(8, reset=DEVICE_ID, name="dev_id_hi"))),  # DWORD=000a0400
         })
 
         # Select ro[] or rw[] based on f_rw flag
