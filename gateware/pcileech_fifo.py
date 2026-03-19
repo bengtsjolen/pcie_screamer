@@ -501,7 +501,7 @@ class PCILeechFIFO(Module):
         cfg_cmd_read  = Signal()
         self.comb += [
             cfg_addr_byte.eq(cfg_cmd[16:32]),
-            cfg_cmd_read .eq(cfg_cmd_valid),   # all CFG frames get a response (always reads from pcileech)
+            cfg_cmd_read .eq(cfg_cmd_valid & ~ResetSignal()),  # gate on reset to prevent spurious boot responses
             cfg_rx_fifo.source.ready.eq(1),
         ]
 
@@ -728,7 +728,7 @@ class PCILeechFIFO(Module):
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
                                   Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
-            5: ro_readback.eq(Cat(Signal(8), Signal(8, reset=DEVICE_ID))),  # DEVICE_ID at [15:8] → DWORD=000a0400 → Tag=0x01
+            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),  # DEVICE_ID at [7:0] → DWORD=000a0004
         })
 
         # Select ro[] or rw[] based on f_rw flag
@@ -746,7 +746,7 @@ class PCILeechFIFO(Module):
             # Host needs: dwData[15:0] = byteswap(addr), dwData[23:16] = value_lo, dwData[31:24] = value_hi
             # Since serializer transmits X[31:24] first → dwData[7:0]=X[31:24], dwData[15:8]=X[23:16], etc.
             # So: X = Cat(value[0:8], value[8:16], addr[0:8], addr[8:16])
-            cmd_tx_fifo.sink.valid.eq(in_cmd_read),
+            cmd_tx_fifo.sink.valid.eq(in_cmd_read & ~ResetSignal()),
             cmd_tx_fifo.sink.data .eq(Cat(
                 readback[0:8], readback[8:16],          # X[15:0]  = value (lo byte, hi byte)
                 in_addr_byte[0:8], in_addr_byte[8:16],  # X[31:16] = addr (lo byte, hi byte)
