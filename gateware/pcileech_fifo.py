@@ -487,11 +487,6 @@ class PCILeechFIFO(Module):
         cfg_ro_readback = Signal(16)
         self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
 
-        # phy_id_latched: holds PCIe BDF. INIT=0x0c00; fallback=0x0016 for 16:00.0
-        # sentinel) so wDeviceId is non-zero even before enumeration.
-        # Latches real BDF once pcie_phy.id becomes valid after link trains.
-        phy_id_latched = Signal(16, reset=0x1600)  # default BDF 16:00.0
-        self.sync += If(self.phy_id, phy_id_latched.eq(self.phy_id))
         self.comb += Case(cfg_word_index, {
             0:  cfg_ro_readback.eq(0x6745),                                               # byte 0x00: wMagicPCIe — value transmitted directly
             # PHY registers: value[7:0]→pb[0], value[15:8]→pb[1] (natural LE mapping)
@@ -506,11 +501,9 @@ class PCILeechFIFO(Module):
                                        self.phy_lnk_rate,                       # [7]    = lnk_rate
                                        Signal(8))),                             # [15:8] = 0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
-            # byte 0x08: PCIe BDF — host computes link status addr as 0x8000|(wBDF>>8)
-            # wBDF = (byte2<<8)|byte3, byte2=readback[7:0], byte3=readback[15:8]
-            # So: readback[7:0]=bus_byte → host gets wBDF>>8=bus → 0x8000|bus=0x8016
-            # phy_id = {bus[7:0], dev[4:0], fn[2:0]}: bus is phy_id[15:8]
-            4:  cfg_ro_readback.eq(Cat(phy_id_latched[8:16], phy_id_latched[0:8])),  # {fn/dev, bus} → byte2=bus ✓
+            # byte 0x08: PCIe BDF hardcoded 16:00.0
+            # readback[7:0]=0x16 (bus) so host computes wBDF>>8=0x16 → 0x8000|0x16=0x8016
+            4:  cfg_ro_readback.eq(0x0016),
             # byte 0x18 = word_index 12: dcommand shadow from real PCIe IP
             # Exposes cfg_dcommand so pcileech knows MaxReadReq and ExtTag settings.
             # Caller must wire self.cfg_dcommand from pcie_phy.cfg_dcommand.
