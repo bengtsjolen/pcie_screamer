@@ -113,13 +113,7 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            # Two-tier idle emission:
-            # - With data (idle_idx > 0): emit after 1000 cycles (~6.7us).
-            # - All-idle keepalive after 3M cycles (~20ms): keeps FT601 USB alive.
-            idle_wr .eq(en & (idle_idx < 7) & (
-                ((idle_count > 1000)    & (idle_idx > 0)) |
-                ((idle_count > 3000000) & (idle_idx == 0))
-            )),
+            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
@@ -538,9 +532,6 @@ class PCILeechFIFO(Module):
 
 
         # Named aliases for important rw bits
-        # Latch lnk_up: once high, stays high permanently (prevents CDC glitch resetting PCIe)
-        lnk_up_latched = Signal()
-        self.sync += If(self.phy_lnk_up, lnk_up_latched.eq(1))
         rw_pcie_rst_core   = rw[200]
         rw_pcie_rst_subsys = rw[201]
         rw_cfgtlp_en       = rw[202]
