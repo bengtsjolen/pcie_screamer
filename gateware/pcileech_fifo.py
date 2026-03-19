@@ -113,13 +113,15 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            # Two-tier idle emission:
-            # - With data (idle_idx > 0): emit after 1000 cycles (~6.7us).
-            # - All-idle keepalive after 3M cycles (~20ms): keeps FT601 USB alive.
-            #   Without this the FT601 times out and disconnects (~46s timeout).
-            idle_wr .eq(en & (idle_idx < 7) & (
-                ((idle_count > 1000)    & (idle_idx > 0)) |
-                ((idle_count > 3000000) & (idle_idx == 0))
+            # Emit frame when data is in slots AND either:
+            # - 1000 cycles elapsed with no more pending data, OR
+            # - 1000 cycles elapsed and no TLP RX pending (don't wait forever for CplD)
+            # any_pending prevents committing a frame while more data is imminent.
+            # Exception: if idle_count > 30000 (~200us), commit anyway to not miss
+            # pcileech DELAY_READ timeout.
+            idle_wr .eq(en & (idle_idx < 7) & (idle_idx > 0) & (
+                (idle_count > 30000) |
+                ((idle_count > 1000) & ~any_pending)
             )),
         ]
         idx_max = Signal(4)
@@ -497,7 +499,7 @@ class PCILeechFIFO(Module):
         # phy_id_latched: holds PCIe BDF. INIT=0x0c00; fallback=0x0016 for 16:00.0
         # sentinel) so wDeviceId is non-zero even before enumeration.
         # Latches real BDF once pcie_phy.id becomes valid after link trains.
-        phy_id_latched = Signal(16, reset=0x0c00)
+        phy_id_latched = Signal(16, reset=0x1600)  # default BDF 16:00.0
         self.sync += If(self.phy_id, phy_id_latched.eq(self.phy_id))
         self.comb += Case(cfg_word_index, {
             0:  cfg_ro_readback.eq(0x6745),                                               # byte 0x00: wMagicPCIe — value transmitted directly
@@ -513,7 +515,11 @@ class PCILeechFIFO(Module):
                                        self.phy_lnk_rate,                       # [7]    = lnk_rate
                                        Signal(8))),                             # [15:8] = 0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
-            4:  cfg_ro_readback.eq(0x0016),                                               # byte 0x08: PCIe BDF — low byte=bus(0x16) so host computes 0x8000|0x16=0x8016
+            # byte 0x08: PCIe BDF — host computes link status addr as 0x8000|(wBDF>>8)
+            # wBDF = (byte2<<8)|byte3, byte2=readback[7:0], byte3=readback[15:8]
+            # So: readback[7:0]=bus_byte → host gets wBDF>>8=bus → 0x8000|bus=0x8016
+            # phy_id = {bus[7:0], dev[4:0], fn[2:0]}: bus is phy_id[15:8]
+            4:  cfg_ro_readback.eq(Cat(phy_id_latched[8:16], phy_id_latched[0:8])),  # {fn/dev, bus} → byte2=bus ✓
             # byte 0x18 = word_index 12: dcommand shadow from real PCIe IP
             # Exposes cfg_dcommand so pcileech knows MaxReadReq and ExtTag settings.
             # Caller must wire self.cfg_dcommand from pcie_phy.cfg_dcommand.
@@ -535,6 +541,9 @@ class PCILeechFIFO(Module):
 
 
         # Named aliases for important rw bits
+        # Latch lnk_up: once high, stays high permanently (prevents CDC glitch resetting PCIe)
+        lnk_up_latched = Signal()
+        self.sync += If(self.phy_lnk_up, lnk_up_latched.eq(1))
         rw_pcie_rst_core   = rw[200]
         rw_pcie_rst_subsys = rw[201]
         rw_cfgtlp_en       = rw[202]
@@ -662,7 +671,7 @@ class PCILeechFIFO(Module):
         # This allows pcileech to clear rw[200] before link comes up,
         # while preventing reset from breaking an established link.
         self.comb += [
-            self.pcie_rst_core  .eq(0),  # hardwired 0 — pcie_rst_n always 1
+            self.pcie_rst_core  .eq(rw_pcie_rst_core),  # rw[200]=0 at reset → always 0
             self.pcie_rst_subsys.eq(rw_pcie_rst_subsys),
         ]
 
