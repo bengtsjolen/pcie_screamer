@@ -113,15 +113,12 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            # Emit frame when data is in slots AND either:
-            # - 1000 cycles elapsed with no more pending data, OR
-            # - 1000 cycles elapsed and no TLP RX pending (don't wait forever for CplD)
-            # any_pending prevents committing a frame while more data is imminent.
-            # Exception: if idle_count > 30000 (~200us), commit anyway to not miss
-            # pcileech DELAY_READ timeout.
-            idle_wr .eq(en & (idle_idx < 7) & (idle_idx > 0) & (
-                (idle_count > 30000) |
-                ((idle_count > 1000) & ~any_pending)
+            # Two-tier idle emission:
+            # - With data (idle_idx > 0): emit after 1000 cycles (~6.7us).
+            # - All-idle keepalive after 3M cycles (~20ms): keeps FT601 USB alive.
+            idle_wr .eq(en & (idle_idx < 7) & (
+                ((idle_count > 1000)    & (idle_idx > 0)) |
+                ((idle_count > 3000000) & (idle_idx == 0))
             )),
         ]
         idx_max = Signal(4)
