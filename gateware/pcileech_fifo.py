@@ -810,17 +810,13 @@ class PCILeechFIFO(Module):
             mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.frame_valid),
         ]
 
-        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={tag=0b00, first, last}
-        # Matches ufrisk SV: p3_ctx = {dtlp.rx_first[0], dtlp.rx_last[0]}
-        # Derive first from registered prev_last (phy_layout SyncFIFO has no .first)
-        tlp_rx_prev_last = Signal(reset=1)  # starts 1 so first DWORD is marked first
-        self.sync += If(tlp_rx_fifo.source.valid & tlp_rx_fifo.source.ready,
-            tlp_rx_prev_last.eq(tlp_rx_fifo.source.last))
+        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={tag=0b00, first=0, last}
+        # first is not tracked (phy_layout SyncFIFO source.first causes Migen issues)
+        # pcileech host reassembles TLPs using last; first=0 is acceptable
         self.comb += [
             mux.p_din[3].eq(tlp_rx_fifo.source.dat),
             mux.p_ctx[3].eq(Cat(tlp_rx_fifo.source.last,  # bit[0] = last
-                                tlp_rx_prev_last,           # bit[1] = first
-                                Signal(2, reset=0b00))),   # bits[3:2] = tag=0b00
+                                Signal(3, reset=0b000))),  # bits[3:1] = tag+first=0
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
             mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
