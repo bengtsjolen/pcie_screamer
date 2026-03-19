@@ -700,7 +700,7 @@ class PCILeechFIFO(Module):
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
                                   Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
-            5: ro_readback.eq(Cat(Signal(8), Signal(8, reset=DEVICE_ID))),  # DEVICE_ID at [15:8] → match ufrisk 000a0400
+            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),  # DEVICE_ID at [7:0] → byte2=DEVICE_ID → 000a0400
         })
 
         # Select ro[] or rw[] based on f_rw flag
