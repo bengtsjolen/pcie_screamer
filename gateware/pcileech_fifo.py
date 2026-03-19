@@ -501,9 +501,7 @@ class PCILeechFIFO(Module):
                                        self.phy_lnk_rate,                       # [7]    = lnk_rate
                                        Signal(8))),                             # [15:8] = 0
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
-            # byte 0x08: PCIe BDF hardcoded 16:00.0
-            # readback[7:0]=0x16 (bus) so host computes wBDF>>8=0x16 → 0x8000|0x16=0x8016
-            4:  cfg_ro_readback.eq(0x0016),
+            4:  cfg_ro_readback.eq(0x1600),  # byte 0x08: PCIe BDF hardcoded 16:00.0
             # byte 0x18 = word_index 12: dcommand shadow from real PCIe IP
             # Exposes cfg_dcommand so pcileech knows MaxReadReq and ExtTag settings.
             # Caller must wire self.cfg_dcommand from pcie_phy.cfg_dcommand.
