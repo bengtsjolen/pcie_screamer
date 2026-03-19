@@ -593,7 +593,7 @@ class PCILeechFIFO(Module):
                 rw[160:176].eq(0x10EE),    # CFG_VEND_ID
                 rw[176:192].eq(0x0666),    # CFG_DEV_ID
                 rw[192:200].eq(0x02),      # CFG_REV_ID
-                rw[200]    .eq(0),         # PCIE CORE RESET off — sys_rst_n=1 so user_lnk_up can assert
+                rw[200]    .eq(1),         # PCIE CORE RESET (pcileech clears during init — gates TLP RX until connected)
                 rw[201]    .eq(0),         # PCIE SUBSYSTEM RESET
                 rw[202]    .eq(1),         # CFGTLP PROCESSING ENABLE
                 rw[203]    .eq(1),         # CFGTLP ZERO DATA
@@ -650,7 +650,7 @@ class PCILeechFIFO(Module):
         # This allows pcileech to clear rw[200] before link comes up,
         # while preventing reset from breaking an established link.
         self.comb += [
-            self.pcie_rst_core  .eq(rw_pcie_rst_core),  # rw[200]=0 at reset → always 0
+            self.pcie_rst_core  .eq(rw_pcie_rst_core & ~self.phy_lnk_up),  # clear auto when link up
             self.pcie_rst_subsys.eq(rw_pcie_rst_subsys),
         ]
 
@@ -698,7 +698,7 @@ class PCILeechFIFO(Module):
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
                                   Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
-            5: ro_readback.eq(Cat(Signal(8, reset=DEVICE_ID), Signal(8))),  # DEVICE_ID at [7:0] → byte2=DEVICE_ID → 000a0400
+            5: ro_readback.eq(Cat(Signal(8), Signal(8, reset=DEVICE_ID))),  # DEVICE_ID at [15:8] → DWORD=000a0400 → Tag=0x01
         })
 
         # Select ro[] or rw[] based on f_rw flag
@@ -802,8 +802,8 @@ class PCILeechFIFO(Module):
             mux.p_din[3].eq(tlp_rx_fifo.source.dat),
             mux.p_ctx[3].eq(Cat(tlp_rx_fifo.source.last,  # bit[0] = last
                                 Signal(3, reset=0b000))),  # bits[3:1] = tag+first=0
-            mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
-            tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
+            mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3] & ~rw_pcie_rst_core),
+            tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid & ~rw_pcie_rst_core),
             mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
         ]
 
