@@ -535,9 +535,6 @@ class PCILeechFIFO(Module):
 
 
         # Named aliases for important rw bits
-        # Latch lnk_up: once high, stays high permanently (prevents CDC glitch resetting PCIe)
-        lnk_up_latched = Signal()
-        self.sync += If(self.phy_lnk_up, lnk_up_latched.eq(1))
         rw_pcie_rst_core   = rw[200]
         rw_pcie_rst_subsys = rw[201]
         rw_cfgtlp_en       = rw[202]
