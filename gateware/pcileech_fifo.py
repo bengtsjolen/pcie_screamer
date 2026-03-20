@@ -732,8 +732,10 @@ class PCILeechFIFO(Module):
         # byte offset 0x0A → word_index 5 → {0x00, DEVICE_ID}
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
-            2: ro_readback.eq(self.tlp_tx_level),          # byte 0x04: tlp_tx DWORDs sent to PCIe IP (diagnostic)
-            3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
+            # byte 0x06 (word_index 3): diagnostic — SWAPPED to show tx_sent_count
+            # [15:8] = tx_sent_count (DWORDs accepted by PCIe IP TX)
+            # [7:0]  = rx_seen_count (DWORDs from PCIe IP RX)
+            3: ro_readback.eq(Cat(rx_seen_count[0:8], tx_sent_count[0:8])),
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
                                   Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
             # DEVICE_ID response: need DWORD=000a0400 so pcileech uses small-tag profile
