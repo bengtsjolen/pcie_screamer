@@ -450,12 +450,19 @@ class PCILeechFIFO(Module):
         # Diagnostic: expose tlp_rx_fifo level + rx_seen counter via CMD register
         self.tlp_rx_level = Signal(16)
         rx_seen_count = Signal(16)
+        tx_sent_count = Signal(16)  # counts DWORDs accepted by pcie_phy.sink (tlp_tx valid&ready)
         self.sync += [
             If(self.tlp_rx.valid & self.tlp_rx.ready,
                 rx_seen_count.eq(rx_seen_count + 1),
-            )
+            ),
+            If(self.tlp_tx.valid & self.tlp_tx.ready,
+                tx_sent_count.eq(tx_sent_count + 1),
+            ),
         ]
         self.comb += self.tlp_rx_level.eq(Cat(tlp_rx_fifo.level[0:8], rx_seen_count[0:8]))
+        # tx_sent diagnostic: read via CMD addr 0x0004 (ro word_index 2)
+        self.tlp_tx_level = Signal(16)
+        self.comb += self.tlp_tx_level.eq(tx_sent_count)
 
         # ===================================================================
         # LOOPBACK FIFO: host→host echo  (64 deep, 34 bit)
@@ -725,6 +732,7 @@ class PCILeechFIFO(Module):
         # byte offset 0x0A → word_index 5 → {0x00, DEVICE_ID}
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
+            2: ro_readback.eq(self.tlp_tx_level),          # byte 0x04: tlp_tx DWORDs sent to PCIe IP (diagnostic)
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
                                   Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
