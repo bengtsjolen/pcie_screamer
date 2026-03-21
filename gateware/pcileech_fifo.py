@@ -510,7 +510,8 @@ class PCILeechFIFO(Module):
         self.comb += [
             cfg_addr_byte.eq(cfg_cmd[16:32]),
             cfg_cmd_read .eq(cfg_cmd_valid & ~ResetSignal()),  # gate on reset to prevent spurious boot responses
-            cfg_rx_fifo.source.ready.eq(1),
+            # Only pop CFG request when tx FIFO has accepted the response
+            cfg_rx_fifo.source.ready.eq(cfg_tx_fifo.sink.ready | ~cfg_cmd_valid),
         ]
 
         # CFG register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
@@ -638,7 +639,11 @@ class PCILeechFIFO(Module):
             # bit14 of addr = shadow config space — we don't support that yet
             in_cmd_read .eq(cmd_valid & cmd[12] & ~cmd[30]),
             in_cmd_write.eq(cmd_valid & cmd[13] & ~cmd[30] & f_rw),
-            cmd_rx_fifo.source.ready.eq(1),
+            # Only pop CMD read when tx FIFO accepts; pop write/no-reply immediately
+            cmd_rx_fifo.source.ready.eq(
+                (in_cmd_read  & cmd_tx_fifo.sink.ready) |   # read: wait for tx accept
+                (cmd_valid & ~cmd[12])                       # write/nop: pop immediately
+            ),
         ]
 
         # Register file reset values (match pcileech_fifo.sv initialvalues task)
@@ -749,6 +754,9 @@ class PCILeechFIFO(Module):
         ro_readback = Signal(16)
         readback    = Signal(16)
 
+        # Explicit defaults before Case to prevent stale latch values
+        self.comb += [rw_readback.eq(0), ro_readback.eq(0)]
+
         # rw[] combinational readback
         rw_rb_cases = {}
         for word_idx in range(15):
@@ -763,8 +771,8 @@ class PCILeechFIFO(Module):
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
-            4: ro_readback.eq(Cat(Constant(VERSION_MINOR, 8),
-                                  Constant(VERSION_MAJOR, 8))),  # VERSION_MAJOR at [15:8]
+            4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
+                                  Signal(8, reset=VERSION_MAJOR))),
             # DEVICE_ID response: need DWORD=000a0400 so pcileech uses small-tag profile
             # Cat puts first arg at LSB: Cat(lo, hi) → {hi, lo} in Verilog
             # We need readback[15:8]=DEVICE_ID so hi=DEVICE_ID → second arg has DEVICE_ID
@@ -842,7 +850,7 @@ class PCILeechFIFO(Module):
         # p0: loopback — tag=0b10, ctx from stored loop_fifo.ctx
         self.comb += [
             mux.p_din[0].eq(loop_fifo.source.data),
-            mux.p_ctx[0].eq(Cat(Constant(0b10, 2), loop_fifo.source.ctx)),  # type=LOOP=0b10
+            mux.p_ctx[0].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
             mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
             loop_fifo.source.ready.eq(mux.p_req[0] & ~mux.frame_valid),
             mux.p_pending[0].eq(0),  # loopback does not suppress idle
@@ -873,8 +881,8 @@ class PCILeechFIFO(Module):
         self.comb += [
             mux.p_din[3].eq(tlp_rx_fifo.source.dat),
             mux.p_ctx[3].eq(Cat(Constant(0b00, 2),           # bits[1:0] = TYPE_TLP tag
-                                Constant(0, 1),               # bit[2] = ctx[0] = 0
-                                tlp_rx_fifo.source.last)),    # bit[3] = ctx[1] = last
+                                tlp_rx_fifo.source.last,     # bit[2] = last
+                                Constant(0, 1))),             # bit[3] = 0
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
             mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
