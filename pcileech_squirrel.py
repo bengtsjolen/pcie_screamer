@@ -142,7 +142,7 @@ class PCIeSquirrel(SoCMini):
             # pcie_phy.pcie_rst_n feeds i_sys_rst_n on the IP — active low.
 
             # FIXME: without this we cannot reset ip ?!?
-            self.comb += If(pcileech_fifo.pcie_rst_core,self.pcie_phy.pcie_rst_n.eq(0))
+            self.comb += self.pcie_phy.pcie_rst_n.eq(~pcileech_fifo.pcie_rst_core)
             
             # Wire PCIe PHY status signals for PCIE register space responses
             self.comb += [
