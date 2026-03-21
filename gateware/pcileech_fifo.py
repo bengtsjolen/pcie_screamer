@@ -440,8 +440,12 @@ class PCILeechFIFO(Module):
         # Gate TLP RX into FIFO: first beat requires Cpl/CplD, subsequent beats follow filter state
         tlp_rx_gated_valid = Signal()
         self.comb += [
+            # rw[202]=cfgtlp_filter_en: when 1 (default), only pass Cpl/CplD
+            # when 0, pass all TLPs (useful for debugging)
             tlp_rx_gated_valid.eq(self.tlp_rx.valid & 
-                Mux(tlp_filter_first, tlp_is_cpl, tlp_filter_pass)),
+                Mux(rw_cfgtlp_en,
+                    Mux(tlp_filter_first, tlp_is_cpl, tlp_filter_pass),
+                    1)),
             tlp_rx_fifo.sink.valid.eq(tlp_rx_gated_valid),
             tlp_rx_fifo.sink.dat  .eq(self.tlp_rx.dat),
             tlp_rx_fifo.sink.be   .eq(self.tlp_rx.be),
@@ -520,25 +524,53 @@ class PCILeechFIFO(Module):
         cfg_ro_readback = Signal(16)
         self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
 
+        # CFG register layout mirrors ufrisk pcileech_pcie_cfg_a7.sv ro[] exactly.
+        # ro[] is byte-addressed; pcileech reads 16 bits at a time with byteswap:
+        #   returned value = {ro[b+7:b], ro[b+15:b+8]} (lo byte first in FIFO)
+        # We build cfg_ro_readback[15:0] = ro[b+15:b] directly; the FIFO path
+        # bytswaps it correctly in cfg_tx_fifo.sink.data below.
+        #
+        # ro[85:80]  = pl_ltssm_state[5:0]      (byte 0x000a bits[5:0])
+        # ro[87:86]  = pl_rx_pm_state[1:0]       (byte 0x000a bits[7:6])
+        # ro[90:88]  = pl_tx_pm_state[2:0]       (byte 0x000b bits[2:0])
+        # ro[93:91]  = pl_initial_link_width[2:0] (byte 0x000b bits[5:3])
+        # ro[95:94]  = pl_lane_reversal[1:0]     (byte 0x000b bits[7:6])
+        # ro[97:96]  = pl_sel_lnk_width[1:0]     (byte 0x000c bits[1:0])
+        # ro[98]     = pl_phy_lnk_up              (byte 0x000c bit[2])
+        # ro[99]     = pl_link_gen2_cap           (byte 0x000c bit[3])
+        # ro[100]    = pl_link_partner_gen2_sup   (byte 0x000c bit[4])
+        # ro[101]    = pl_link_upcfg_cap          (byte 0x000c bit[5])
+        # ro[102]    = pl_sel_lnk_rate            (byte 0x000c bit[6])
+        # ro[103]    = pl_directed_change_done    (byte 0x000c bit[7])
         self.comb += Case(cfg_word_index, {
-            0:  cfg_ro_readback.eq(0x6745),                                               # byte 0x00: wMagicPCIe — value transmitted directly
-            # PHY registers: value[7:0]→pb[0], value[15:8]→pb[1] (natural LE mapping)
-            # pb[0] at 0x000a = {lnk_width[1:0], ltssm[5:0]}
-            # pb[1] at 0x000b = {0000000, lnk_up}
-            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,  self.phy_lnk_width,   # [7:0]  = {lnk_width,ltssm}
-                                       self.phy_lnk_up, Signal(7))),            # [15:8] = {0...,lnk_up}
-            # pb[0] at 0x000c = {lnk_rate,0,0,0,0,lnk_up,lnk_width[1:0]}
-            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,                     # [1:0]  = lnk_width
-                                       self.phy_lnk_up,                         # [2]    = lnk_up
-                                       Signal(4),                               # [6:3]  = 0
-                                       self.phy_lnk_rate,                       # [7]    = lnk_rate
-                                       Signal(8))),                             # [15:8] = 0
-            11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
-            4:  cfg_ro_readback.eq(0x1600),  # byte 0x08: PCIe BDF hardcoded 16:00.0
-            # byte 0x18 = word_index 12: dcommand shadow from real PCIe IP
-            # Exposes cfg_dcommand so pcileech knows MaxReadReq and ExtTag settings.
-            # Caller must wire self.cfg_dcommand from pcie_phy.cfg_dcommand.
-            12: cfg_ro_readback.eq(self.cfg_dcommand),
+            0:  cfg_ro_readback.eq(0x6745),         # byte 0x00: wMagicPCIe
+            4:  cfg_ro_readback.eq(0x1600),         # byte 0x08: BDF 16:00.0
+            # byte 0x000a: ro[87:80] = {pl_rx_pm_state[1:0], pl_ltssm[5:0]}
+            # byte 0x000b: ro[95:88] = {pl_lane_rev[1:0], pl_init_lnk_width[2:0], pl_tx_pm[2:0]}
+            # ufrisk observed: 000a1608 → value=0x1608, bytes={0x08,0x16}
+            #   byte0(0x000a)=0x16=pl_ltssm=22(L0), byte1(0x000b)=0x08=pl_init_lnk_width=1(x1)
+            5:  cfg_ro_readback.eq(Cat(
+                    self.phy_ltssm[0:6],    # ro[85:80] bits[5:0] = ltssm
+                    Constant(0, 2),         # ro[87:86] pl_rx_pm_state = 0
+                    Constant(0, 3),         # ro[90:88] pl_tx_pm_state = 0
+                    self.phy_lnk_width[0:3],# ro[93:91] pl_initial_link_width
+                    Constant(0, 2),         # ro[95:94] pl_lane_reversal = 0
+                )),
+            # byte 0x000c: ro[103:96] = {directed_done,lnk_rate,upcfg,partner_gen2,gen2_cap,lnk_up,lnk_width[1:0]}
+            # ufrisk observed: 000c7c00 → value=0x7c00, bytes={0x00,0x7c}
+            #   byte0(0x000c)=0x7c=0b01111100: lnk_width=0b00,lnk_up=1,gen2=1,partner=1,upcfg=1,rate=1,done=0
+            6:  cfg_ro_readback.eq(Cat(
+                    self.phy_lnk_width[0:2],# ro[97:96] pl_sel_lnk_width
+                    self.phy_lnk_up,        # ro[98]    pl_phy_lnk_up
+                    Constant(1, 1),         # ro[99]    pl_link_gen2_cap = 1 (we support Gen2)
+                    Constant(1, 1),         # ro[100]   pl_link_partner_gen2_supported = 1
+                    Constant(1, 1),         # ro[101]   pl_link_upcfg_cap = 1
+                    self.phy_lnk_rate,      # ro[102]   pl_sel_lnk_rate
+                    Constant(0, 1),         # ro[103]   pl_directed_change_done = 0
+                    Constant(0, 8),         # ro[111:104] = 0 (byte 0x000d)
+                )),
+            11: cfg_ro_readback.eq(rw[176:192]),    # byte 0x16: pl_directed_link_*
+            12: cfg_ro_readback.eq(self.cfg_dcommand), # byte 0x18: cfg_dcommand
             "default": cfg_ro_readback.eq(0),
         })
 
@@ -594,7 +626,7 @@ class PCILeechFIFO(Module):
         self.comb += [
             in_addr_byte.eq(cmd[16:32]),
             # bit address = byte_address[14:0] << 3
-            in_addr_bit .eq(Cat(Signal(3), cmd[16:31])),
+            in_addr_bit .eq(Cat(Constant(0, 3), cmd[16:31])),
             # SV: in_cmd_value = {cmd[48+:8], cmd[56+:8]}  (big-endian 16-bit)
             in_value    .eq(Cat(cmd[56:64], cmd[48:56])),
             # SV: in_cmd_mask  = {cmd[32+:8], cmd[40+:8]}
@@ -739,7 +771,7 @@ class PCILeechFIFO(Module):
             # Cat puts first arg at LSB: Cat(lo, hi) → {hi, lo} in Verilog
             # We need readback[15:8]=DEVICE_ID so hi=DEVICE_ID → second arg has DEVICE_ID
             # Use named signals to ensure stable Migen elaboration order
-            5: ro_readback.eq(Cat(Signal(8, name="dev_id_lo"), Signal(8, reset=DEVICE_ID, name="dev_id_hi"))),  # DWORD=000a0400
+            5: ro_readback.eq(Cat(Constant(0, 8), Constant(DEVICE_ID, 8))),  # DWORD=000a0400 → Tag=0x01 profile
         })
 
         # Select ro[] or rw[] based on f_rw flag
