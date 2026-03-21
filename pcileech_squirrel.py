@@ -82,6 +82,8 @@ class PCIeSquirrel(SoCMini):
         )
 
         platform.add_platform_command("set_false_path -from [get_clocks main_s7pciephy_clkout*] -to [get_clocks main_clkout]")
+        platform.add_platform_command("set_false_path -from [get_clocks main_clkout] -to [get_clocks main_s7pciephy_clkout*]")
+        platform.add_platform_command("set_false_path -from [get_clocks -of_objects [get_pins pcie_s7/inst/inst/pcie_top_i/pcie_7x_i/pcie_block_i/PIPECLK]] -to [get_clocks main_clkout]")
 
         self.add_csr("pcie_phy")
 
@@ -138,6 +140,8 @@ class PCIeSquirrel(SoCMini):
             # Host clears it via CMD write to bring PCIe core online.
             # Hold PCIe core in reset until host clears rw[200] via CMD write.
             # pcie_phy.pcie_rst_n feeds i_sys_rst_n on the IP — active low.
+
+            # FIXME: without this we cannot reset ip ?!?
             self.comb += If(pcileech_fifo.pcie_rst_core,self.pcie_phy.pcie_rst_n.eq(0))
             
             # Wire PCIe PHY status signals for PCIE register space responses
@@ -147,6 +151,7 @@ class PCIeSquirrel(SoCMini):
                 pcileech_fifo.phy_lnk_rate .eq(self.pcie_phy._link_status.fields.rate),
                 pcileech_fifo.phy_lnk_width.eq(self.pcie_phy._link_status.fields.width),
                 pcileech_fifo.phy_id       .eq(self.pcie_phy.id),
+                pcileech_fifo.cfg_dcommand .eq(self.pcie_phy.dcommand),
             ]
 
         # MSI --------------------------------------------------------------------------------------
@@ -155,13 +160,34 @@ class PCIeSquirrel(SoCMini):
         self.add_csr("msi")
 
         # LEDs -------------------------------------------------------------------------------------
-        usb_counter = Signal(32)
-        self.sync.usb += usb_counter.eq(usb_counter + 1)
-        self.comb += platform.request("user_led", 0).eq(usb_counter[26])
+        if 1:
+            # LED0: tx_err_drop — TLP dropped by PCIe IP (BME not set or flow control)
+            tx_err_drop_latch = Signal()
+            self.sync.pcie += If(self.pcie_phy.tx_err_drop, tx_err_drop_latch.eq(1))
+            self.comb += platform.request("user_led", 0).eq(tx_err_drop_latch)
 
-        pcie_counter = Signal(32)
-        self.sync.pcie += pcie_counter.eq(pcie_counter + 1)
-        self.comb += platform.request("user_led", 1).eq(pcie_counter[26])
+            # LED1: rx_seen — CplD received from PCIe bus (entirely in pcie domain, no CDC issue)
+            rx_seen = Signal()
+            self.sync.pcie += If(self.pcie_phy.source.valid, rx_seen.eq(1))
+            self.comb += platform.request("user_led", 1).eq(rx_seen)
+        elif 0:
+            # Sticky LEDs for tx_seen and rx_seen 
+            tx_seen = Signal()
+            self.sync.pcie += If(self.pcie_phy.sink.valid & self.pcie_phy.sink.ready, tx_seen.eq(1))
+            self.comb += platform.request("user_led", 0).eq(tx_seen)
+
+            rx_seen = Signal()
+            self.sync.sys += If(self.pcie_phy.source.valid, rx_seen.eq(1))
+            self.comb += platform.request("user_led", 1).eq(rx_seen)
+        elif 0:
+            # 7/8 LED0 lit at usb clock so verify usb clock present and polarity of driving led
+            usb_counter = Signal(32)
+            self.sync.usb += usb_counter.eq(usb_counter + 1)
+            self.comb += platform.request("user_led", 0).eq(usb_counter[26]|usb_counter[25]|usb_counter[24])
+            # Verify presence of pcie clock
+            pcie_counter = Signal(32)
+            self.sync.pcie += pcie_counter.eq(pcie_counter + 1)
+            self.comb += platform.request("user_led", 1).eq(pcie_counter[26])
 
         # Analyzer ---------------------------------------------------------------------------------
         if with_analyzer:
