@@ -420,6 +420,7 @@ class PCILeechFIFO(Module):
         self.submodules.tlp_rx_fifo = tlp_rx_fifo = SyncFIFO(
             phy_layout(32), 256
         )
+        tlp_filter_bypass = Signal()  # wired to ~rw[202] after rw is defined
         # TLP filter state: track first beat and whether current TLP passes
         tlp_filter_first  = Signal(reset=1)   # next beat is first of TLP
         tlp_filter_pass   = Signal(reset=0)   # current TLP passes filter
@@ -442,10 +443,11 @@ class PCILeechFIFO(Module):
         self.comb += [
             # rw[202]=cfgtlp_filter_en: when 1 (default), only pass Cpl/CplD
             # when 0, pass all TLPs (useful for debugging — set reset value to 0)
+            # tlp_filter_bypass=1 → pass all TLPs; =0 → only Cpl/CplD
             tlp_rx_gated_valid.eq(self.tlp_rx.valid & 
-                Mux(rw[202],
-                    Mux(tlp_filter_first, tlp_is_cpl, tlp_filter_pass),
-                    1)),
+                Mux(tlp_filter_bypass,
+                    1,
+                    Mux(tlp_filter_first, tlp_is_cpl, tlp_filter_pass))),
             tlp_rx_fifo.sink.valid.eq(tlp_rx_gated_valid),
             tlp_rx_fifo.sink.dat  .eq(self.tlp_rx.dat),
             tlp_rx_fifo.sink.be   .eq(self.tlp_rx.be),
@@ -591,6 +593,8 @@ class PCILeechFIFO(Module):
         rw_pcie_rst_core   = rw[200]
         rw_pcie_rst_subsys = rw[201]
         rw_cfgtlp_en       = rw[202]
+        # Wire filter bypass: rw[202]=1 means filter ON (normal), 0 means bypass (debug)
+        self.comb += tlp_filter_bypass.eq(~rw[202])
         rw_cfgtlp_zero     = rw[203]
         rw_cfgtlp_filter   = rw[204]
         rw_bar_en          = rw[205]
