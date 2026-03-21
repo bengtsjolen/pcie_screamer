@@ -504,7 +504,8 @@ class PCILeechFIFO(Module):
         self.comb += [
             cfg_addr_byte.eq(cfg_cmd[16:32]),
             cfg_cmd_read .eq(cfg_cmd_valid & ~ResetSignal()),  # gate on reset to prevent spurious boot responses
-            cfg_rx_fifo.source.ready.eq(1),
+            # Safe handshake: only pop request when response FIFO accepts it
+            cfg_rx_fifo.source.ready.eq(cfg_tx_fifo.sink.ready | ~cfg_cmd_valid),
         ]
 
         # CFG register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
@@ -545,7 +546,7 @@ class PCILeechFIFO(Module):
             # Response format per DeviceFPGA_ConfigRead parser:
             #   dwData[15:0]  = _byteswap_ushort(wAddr | flags_C000)  → address echo
             #   dwData[31:16] = value (byte-swapped per SV convention)
-            cfg_tx_fifo.sink.valid.eq(cfg_cmd_read),
+            cfg_tx_fifo.sink.valid.eq(cfg_cmd_read & cfg_rx_fifo.source.valid),
             cfg_tx_fifo.sink.data .eq(Cat(
                 cfg_ro_readback[0:8], cfg_ro_readback[8:16],  # X[15:0]  = value (lo byte, hi byte)
                 cfg_addr_byte[0:8],   cfg_addr_byte[8:16],    # X[31:16] = addr (lo byte, hi byte)
@@ -602,8 +603,11 @@ class PCILeechFIFO(Module):
             # bit14 of addr = shadow config space — we don't support that yet
             in_cmd_read .eq(cmd_valid & cmd[12] & ~cmd[30]),
             in_cmd_write.eq(cmd_valid & cmd[13] & ~cmd[30] & f_rw),
-            # Always consume CMD FIFO
-            cmd_rx_fifo.source.ready.eq(1),
+            # Safe handshake: reads wait for tx_fifo to accept, writes/nops pop immediately
+            cmd_rx_fifo.source.ready.eq(
+                (in_cmd_read  & cmd_tx_fifo.sink.ready) |  # read: wait for response accepted
+                (cmd_valid & ~cmd[12] & ~cmd[30])           # write/nop: pop immediately
+            ),
         ]
 
         # Register file reset values (match pcileech_fifo.sv initialvalues task)
