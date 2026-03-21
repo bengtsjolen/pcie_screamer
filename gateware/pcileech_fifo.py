@@ -441,9 +441,9 @@ class PCILeechFIFO(Module):
         tlp_rx_gated_valid = Signal()
         self.comb += [
             # rw[202]=cfgtlp_filter_en: when 1 (default), only pass Cpl/CplD
-            # when 0, pass all TLPs (useful for debugging)
+            # when 0, pass all TLPs (useful for debugging — set reset value to 0)
             tlp_rx_gated_valid.eq(self.tlp_rx.valid & 
-                Mux(rw_cfgtlp_en,
+                Mux(rw[202],
                     Mux(tlp_filter_first, tlp_is_cpl, tlp_filter_pass),
                     1)),
             tlp_rx_fifo.sink.valid.eq(tlp_rx_gated_valid),
