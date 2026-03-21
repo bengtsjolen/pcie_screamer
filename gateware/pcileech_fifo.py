@@ -831,13 +831,15 @@ class PCILeechFIFO(Module):
             mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.frame_valid),
         ]
 
-        # p3: TLP RX (PCIe → host) — tag=0b00, ctx={tag=0b00, first=0, last}
-        # first is not tracked (phy_layout SyncFIFO source.first causes Migen issues)
-        # pcileech host reassembles TLPs using last; first=0 is acceptable
+        # p3: TLP RX (PCIe → host)
+        # ctx nibble encoding: bits[1:0]=TYPE_TLP=0b00, bit[2]=last, bit[3]=0
+        # CRITICAL: bits[1:0] MUST be 0b00 (TYPE_TLP) for ALL beats including last
+        # Previously last was incorrectly placed in bit[0], corrupting the type tag
         self.comb += [
             mux.p_din[3].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[3].eq(Cat(tlp_rx_fifo.source.last,  # bit[0] = last
-                                Signal(3, reset=0b000))),  # bits[3:1] = tag+first=0
+            mux.p_ctx[3].eq(Cat(Constant(0b00, 2),           # bits[1:0] = TYPE_TLP tag
+                                tlp_rx_fifo.source.last,     # bit[2] = last
+                                Constant(0, 1))),             # bit[3] = 0
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
             mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
