@@ -113,7 +113,7 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
+            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0) & ~any_pending),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
@@ -137,7 +137,7 @@ class PCILeechMux(Module):
             data_reg[3], data_reg[2], data_reg[1],         # bits 191:96
             data_reg[0],                                    # bits 223:192
             ctx_reg[6],                                     # bits 227:224
-            Signal(4, reset=0xE),                          # bits 231:228  (4'hE)
+            Constant(0xE, 4),                              # bits 231:228  (4'hE) — must be Const not Signal
             ctx_reg[4],  ctx_reg[5],                       # bits 239:232
             ctx_reg[2],  ctx_reg[3],                       # bits 247:240
             ctx_reg[0],  ctx_reg[1],                       # bits 255:248
@@ -504,7 +504,8 @@ class PCILeechFIFO(Module):
         self.comb += [
             cfg_addr_byte.eq(cfg_cmd[16:32]),
             cfg_cmd_read .eq(cfg_cmd_valid & ~ResetSignal()),  # gate on reset to prevent spurious boot responses
-            cfg_rx_fifo.source.ready.eq(1),
+            # Only pop request when response FIFO has accepted the reply
+            cfg_rx_fifo.source.ready.eq(cfg_cmd_read & cfg_tx_fifo.sink.ready),
         ]
 
         # CFG register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
@@ -602,8 +603,12 @@ class PCILeechFIFO(Module):
             # bit14 of addr = shadow config space — we don't support that yet
             in_cmd_read .eq(cmd_valid & cmd[12] & ~cmd[30]),
             in_cmd_write.eq(cmd_valid & cmd[13] & ~cmd[30] & f_rw),
-            # Always consume CMD FIFO
-            cmd_rx_fifo.source.ready.eq(1),
+            # Pop read request only when reply accepted; pop write/nop immediately
+            cmd_rx_fifo.source.ready.eq(
+                (in_cmd_read  & cmd_tx_fifo.sink.ready) |  # read: wait for reply accepted
+                (cmd_valid & in_cmd_write) |                # write: no reply needed
+                (cmd_valid & ~cmd[12] & ~cmd[13])           # nop: no reply needed
+            ),
         ]
 
         # Register file reset values (match pcileech_fifo.sv initialvalues task)
