@@ -575,17 +575,22 @@ class PCILeechFIFO(Module):
             # byte 0x000b: ro[95:88] = {pl_lane_rev[1:0], pl_init_lnk_width[2:0], pl_tx_pm[2:0]}
             # ufrisk observed: 000a1608 → value=0x1608, bytes={0x08,0x16}
             #   byte0(0x000a)=0x16=pl_ltssm=22(L0), byte1(0x000b)=0x08=pl_init_lnk_width=1(x1)
+            # word5: ufrisk returns 0x1608: byte0=0x08=lnk_width, byte1=0x16=ltssm
+            # readback[7:0]=lnk_width byte, readback[15:8]=ltssm byte
             5:  cfg_ro_readback.eq(Cat(
-                    self.phy_ltssm[0:6],    # ro[85:80] bits[5:0] = ltssm
-                    Constant(0, 2),         # ro[87:86] pl_rx_pm_state = 0
                     Constant(0, 3),         # ro[90:88] pl_tx_pm_state = 0
                     self.phy_lnk_width[0:3],# ro[93:91] pl_initial_link_width
                     Constant(0, 2),         # ro[95:94] pl_lane_reversal = 0
+                    self.phy_ltssm[0:6],    # ro[85:80] bits[5:0] = ltssm
+                    Constant(0, 2),         # ro[87:86] pl_rx_pm_state = 0
                 )),
             # byte 0x000c: ro[103:96] = {directed_done,lnk_rate,upcfg,partner_gen2,gen2_cap,lnk_up,lnk_width[1:0]}
             # ufrisk observed: 000c7c00 → value=0x7c00, bytes={0x00,0x7c}
             #   byte0(0x000c)=0x7c=0b01111100: lnk_width=0b00,lnk_up=1,gen2=1,partner=1,upcfg=1,rate=1,done=0
+            # word6: ufrisk returns 0x7c00: byte0=0x00, byte1=0x7c=lnk_up+caps
+            # readback[7:0]=0, readback[15:8]=lnk_up/rate/caps byte
             6:  cfg_ro_readback.eq(Cat(
+                    Constant(0, 8),         # byte 0x000d = 0 (low byte)
                     self.phy_lnk_width[0:2],# ro[97:96] pl_sel_lnk_width
                     self.phy_lnk_up,        # ro[98]    pl_phy_lnk_up
                     Constant(1, 1),         # ro[99]    pl_link_gen2_cap = 1
@@ -593,7 +598,6 @@ class PCILeechFIFO(Module):
                     Constant(1, 1),         # ro[101]   pl_link_upcfg_cap = 1
                     self.phy_lnk_rate,      # ro[102]   pl_sel_lnk_rate
                     Constant(0, 1),         # ro[103]   pl_directed_change_done = 0
-                    Constant(0, 8),         # ro[111:104] = 0 (byte 0x000d)
                 )),
             11: cfg_ro_readback.eq(rw[176:192]),    # byte 0x16: pl_directed_link_*
             12: cfg_ro_readback.eq(self.cfg_dcommand), # byte 0x18: cfg_dcommand
