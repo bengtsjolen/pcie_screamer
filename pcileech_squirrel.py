@@ -120,7 +120,7 @@ class PCIeSquirrel(SoCMini):
             #
             # RX: PCIe bus → pcie_phy.source (64-bit) → conv → pcileech_fifo.tlp_rx (32-bit)
             self.submodules.tlp_rx_conv = tlp_rx_conv = StrideConverter(
-                phy_layout(64), phy_layout(32), reverse=True)
+                phy_layout(64), phy_layout(32), reverse=False)
 
             # TX: pcileech_fifo.tlp_tx (32-bit) → conv → pcie_phy.sink (64-bit) → PCIe bus
             self.submodules.tlp_tx_conv = tlp_tx_conv = StrideConverter(
