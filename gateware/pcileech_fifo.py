@@ -61,161 +61,97 @@ TYPE_CMD    = 0b11
 #
 # ctx tag per word = {ctx[1:0], type_tag[1:0]}  (4 bits)
 # ---------------------------------------------------------------------------
+
 class PCILeechMux(Module):
-    def __init__(self, nports=8):
-        # Per-port signals — caller connects these
-        self.p_din  = [Signal(32, name=f"p{i}_din")  for i in range(nports)]
-        self.p_ctx  = [Signal(4,  name=f"p{i}_ctx")  for i in range(nports)]
-        self.p_wr   = [Signal(    name=f"p{i}_wr")   for i in range(nports)]
-        self.p_req  = [Signal(    name=f"p{i}_req")  for i in range(nports)]
+    def __init__(self, nports=4):
+        assert nports >= 4
 
-        # 256-bit output frame
-        self.dout   = Signal(256)
-        self.valid  = Signal()
-        self.rd_en  = Signal()   # driven by downstream (serializer IDLE)
+        self.p_din     = [Signal(32, name=f"p{i}_din") for i in range(nports)]
+        self.p_ctx     = [Signal(2,  name=f"p{i}_ctx") for i in range(nports)]
+        self.p_wr      = [Signal(    name=f"p{i}_wr")  for i in range(nports)]
+        self.p_req     = [Signal(    name=f"p{i}_req") for i in range(nports)]
+        self.p_pending = [Signal(    name=f"p{i}_pending") for i in range(nports)]
 
-        # -------------------------------------------------------------------
-        # Internal state — 15 slots (SV uses data_reg[14], indices 0..13)
-        # -------------------------------------------------------------------
-        DEPTH    = 15
-        data_reg = Array([Signal(32, reset=0xFFFFFFFF, name=f"dr{i}") for i in range(DEPTH)])
-        ctx_reg  = Array([Signal(4,  reset=0b1111,    name=f"cr{i}") for i in range(DEPTH)])
+        self.dout  = Signal(256)
+        self.valid = Signal()
+        self.rd_en = Signal()
 
-        idx_base    = Signal(4, reset=0)
-        idle_count  = Signal(22, reset=0)
-        en          = Signal()          # always 1 after reset - mux runs freely
-        dout_valid  = Signal()
-        dout_buf_valid = Signal()
-        dout_buf_data  = Signal(256)
+        mux_valid        = Signal(reset=0)
+        mux_count        = Signal(3, reset=0)
+        mux_data         = Signal(224, reset=0)
+        mux_status       = Signal(28, reset=0x0fffffff)
+        mux_skip_counter = Signal(4, reset=0)
 
-        self.sync += en.eq(~ResetSignal())
-
-        # -------------------------------------------------------------------
-        # Priority-index chain (combinational)
-        # p_idx[i] = slot index where port i will write its word
-        # -------------------------------------------------------------------
-        p_idx = [Signal(4, name=f"pidx{i}") for i in range(nports + 1)]
-        self.comb += p_idx[0].eq(idx_base)
-        for i in range(nports):
-            self.comb += p_idx[i+1].eq(p_idx[i] + self.p_wr[i])
-
-        # Per-port pending signals — set high when FIFO has data not yet in a mux
-        # slot AND mux is free. Suppresses idle padding to let back-to-back
-        # responses (e.g. batched 000a/000c reads) accumulate in the same frame.
-        self.p_pending = [Signal(name=f"p{i}_pending") for i in range(nports)]
-        any_pending = Signal()
-        self.comb += any_pending.eq(reduce(lambda a, b: a | b, self.p_pending))
-
-        # Idle port — pads frame with 0xFFFFFFFF when stalled.
-        # Threshold of 64 cycles (~430ns@150MHz): long enough for back-to-back
-        # USB responses to both arrive, short enough to not delay single responses.
-        idle_idx = Signal(4)
-        idle_wr  = Signal()
+        # Priority request chain: mirrors pcileech_mux.sv p*_req_data logic.
         self.comb += [
-            idle_idx.eq(p_idx[nports]),
-            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
+            self.p_req[0].eq(self.rd_en & self.p_pending[0]),
+            self.p_req[1].eq(self.rd_en & self.p_pending[1] & ~self.p_pending[0]),
+            self.p_req[2].eq(self.rd_en & self.p_pending[2] & ~self.p_pending[1] & ~self.p_pending[0]),
+            self.p_req[3].eq(self.rd_en & self.p_pending[3] & ~self.p_pending[2] & ~self.p_pending[1] & ~self.p_pending[0]),
         ]
-        idx_max = Signal(4)
-        self.comb += idx_max.eq(idle_idx + idle_wr)
+        for i in range(4, nports):
+            self.comb += self.p_req[i].eq(0)
 
-        # All ports: req = rd_en (mirrors SV assign p_req_data = rd_en)
-        # All ports: req always high - ports write freely, backpressure via FIFOs
-        for i in range(nports):
-            self.comb += self.p_req[i].eq(1)
+        mux_wr = Signal()
+        self.comb += mux_wr.eq(
+            self.p_wr[0] | self.p_wr[1] | self.p_wr[2] | self.p_wr[3] | (mux_skip_counter > 7)
+        )
 
-
-
-        # -------------------------------------------------------------------
-        # Output frame assembly — must mirror SV dout_data exactly
-        # SV: { ctx[1],ctx[0], ctx[3],ctx[2], ctx[5],ctx[4], 4'hE,ctx[6],
-        #        data[0], data[1], data[2], data[3], data[4], data[5], data[6] }
-        # Migen Cat() is LSB-first so we reverse the order:
-        # -------------------------------------------------------------------
-        dout_data = Signal(256)
-        self.comb += dout_data.eq(Cat(
-            data_reg[6], data_reg[5], data_reg[4],         # bits  95:0
-            data_reg[3], data_reg[2], data_reg[1],         # bits 191:96
-            data_reg[0],                                    # bits 223:192
-            ctx_reg[6],                                     # bits 227:224
-            Signal(4, reset=0xE),                          # bits 231:228  (4'hE)
-            ctx_reg[4],  ctx_reg[5],                       # bits 239:232
-            ctx_reg[2],  ctx_reg[3],                       # bits 247:240
-            ctx_reg[0],  ctx_reg[1],                       # bits 255:248
-        ))
-
-        # Output hold register — latches completed frame until serializer takes it.
-        # frame_valid stays high until rd_en (serializer ready) clears it.
-        # Exposed as self.frame_valid so port ready signals can gate on it.
-        frame_valid = Signal()
-        self.frame_valid = frame_valid
-        frame_data  = Signal(256)
-
-        self.comb += [
-            self.valid.eq(frame_valid),
-            self.dout .eq(frame_data),
-        ]
-
-        # frame_ready: serializer consumed the frame this cycle
-        frame_consumed = Signal()
-        self.comb += frame_consumed.eq(frame_valid & self.rd_en)
-
-        # -------------------------------------------------------------------
-        # Sequential logic
-        # -------------------------------------------------------------------
         self.sync += [
             If(ResetSignal(),
-                idx_base.eq(0),
-                idle_count.eq(0),
-                frame_valid.eq(0),
+                self.valid.eq(0),
+                mux_count.eq(0),
+                mux_valid.eq(0),
+                mux_skip_counter.eq(0),
             ).Else(
-                # Clear frame_valid when serializer consumes it
-                If(frame_consumed,
-                    frame_valid.eq(0),
+                # count
+                If(mux_wr & (mux_count < 6),
+                    mux_valid.eq(0),
+                    mux_count.eq(mux_count + 1),
+                ).Elif(mux_wr & (mux_count == 6),
+                    mux_valid.eq(1),
+                    mux_count.eq(0),
+                    mux_skip_counter.eq(0),
+                ).Elif(mux_count > 0,
+                    mux_valid.eq(0),
+                    mux_skip_counter.eq(mux_skip_counter + 1),
+                ).Else(
+                    mux_valid.eq(0),
                 ),
 
-                # Run mux advance logic every cycle (en always high after reset)
-                If(en & ~frame_valid,
-                    # Advance base index, wrapping after frame emit
-                    idx_base.eq(idx_max - Mux(idx_max >= 7, 7, 0)),
+                # valid & transmit to output
+                self.dout[223:0].eq(mux_data),
+                self.dout[227:224].eq(mux_status[0:4]),
+                self.dout[231:228].eq(Constant(0xE, 4)),
+                self.dout[235:232].eq(mux_status[8:12]),
+                self.dout[239:236].eq(mux_status[4:8]),
+                self.dout[243:240].eq(mux_status[16:20]),
+                self.dout[247:244].eq(mux_status[12:16]),
+                self.dout[251:248].eq(mux_status[24:28]),
+                self.dout[255:252].eq(mux_status[20:24]),
+                self.valid.eq(mux_valid),
 
-                    # Idle counter: increment every cycle no real data arrives,
-                    # reset when any port writes data this cycle.
-                    If(idle_idx == p_idx[0],   # no port wrote anything
-                        idle_count.eq(idle_count + 1),
-                    ).Else(
-                        idle_count.eq(0),
-                    ),
-
-                    # Write data/ctx from active input ports into slots
-                    *[If(self.p_wr[i],
-                        data_reg[p_idx[i]].eq(self.p_din[i]),
-                        ctx_reg [p_idx[i]].eq(self.p_ctx[i]),
-                      ) for i in range(nports)],
-
-                    # Idle port fills padding slot
-                    If(idle_wr,
-                        data_reg[idle_idx].eq(0xFFFFFFFF),
-                        ctx_reg [idle_idx].eq(0b1111),
-                    ),
-
-                    # Latch completed frame into hold register; reset idle_count
-                    If(idx_max >= 7,
-                        frame_valid.eq(1),
-                        frame_data .eq(dout_data),
-                        idle_count .eq(0),   # restart idle timer after each frame commit
-                    ),
-                ),
+                # data & status, highest priority port wins
+                If(self.p_wr[0],
+                    mux_status.eq(Cat(Constant(0b00, 2), self.p_ctx[0], mux_status[0:24])),
+                    mux_data.eq(Cat(self.p_din[0], mux_data[0:192])),
+                ).Elif(self.p_wr[1],
+                    mux_status.eq(Cat(Constant(0b01, 2), self.p_ctx[1], mux_status[0:24])),
+                    mux_data.eq(Cat(self.p_din[1], mux_data[0:192])),
+                ).Elif(self.p_wr[2],
+                    mux_status.eq(Cat(Constant(0b10, 2), self.p_ctx[2], mux_status[0:24])),
+                    mux_data.eq(Cat(self.p_din[2], mux_data[0:192])),
+                ).Elif(self.p_wr[3],
+                    mux_status.eq(Cat(Constant(0b11, 2), self.p_ctx[3], mux_status[0:24])),
+                    mux_data.eq(Cat(self.p_din[3], mux_data[0:192])),
+                ).Elif((~self.p_wr[0]) & (~self.p_wr[1]) & (~self.p_wr[2]) & (~self.p_wr[3]) & (mux_skip_counter > 7),
+                    mux_status.eq(Cat(Constant(0b1111, 4), mux_status[0:24])),
+                    mux_data.eq(Cat(Constant(0xffffffff, 32), mux_data[0:192])),
+                )
             )
         ]
 
 
-# ---------------------------------------------------------------------------
-# MuxSerializer
-#
-# Consumes 256-bit frames from PCILeechMux and outputs them as 8 sequential
-# 32-bit words (MSB-first, i.e. word0 = bits[255:224]).
-# Drives mux.rd_en high whenever it is idle (ready for next frame).
-# ---------------------------------------------------------------------------
 class MuxSerializer(Module):
     def __init__(self):
         self.sink   = stream.Endpoint([("data", 256)])  # from PCILeechMux
@@ -728,8 +664,8 @@ class PCILeechFIFO(Module):
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
-            4: ro_readback.eq(Cat(Constant(VERSION_MINOR, 8),
-                                  Constant(VERSION_MAJOR, 8))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
+            4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
+                                  Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
             # DEVICE_ID response: need DWORD=000a0400 so pcileech uses small-tag profile
             # Cat puts first arg at LSB: Cat(lo, hi) → {hi, lo} in Verilog
             # We need readback[15:8]=DEVICE_ID so hi=DEVICE_ID → second arg has DEVICE_ID
@@ -763,7 +699,7 @@ class PCILeechFIFO(Module):
         # ===================================================================
         # TX PATH: mux + serialize → USB
         # ===================================================================
-        self.submodules.mux        = mux        = PCILeechMux(nports=8)
+        self.submodules.mux        = mux        = PCILeechMux(nports=4)
         self.submodules.serializer = serializer = MuxSerializer()
 
         # Mux rd_en driven by serializer being idle
@@ -804,52 +740,41 @@ class PCILeechFIFO(Module):
         #   TYPE_TLP =0x00 → tag=0b00 → matches p3 nibble & 0x03 = 0x0
         # -------------------------------------------------------------------
 
-        # p0: loopback — tag=0b10, ctx from stored loop_fifo.ctx
+        # Port order must match pcileech_fifo.sv / pcileech_mux.sv exactly:
+        #   p0 = TLP, p1 = CFG, p2 = LOOPBACK, p3 = CMD
+
+        # p0: TLP RX (highest priority), ctx = {1'b0, rx_last}
         self.comb += [
-            mux.p_din[0].eq(loop_fifo.source.data),
-            mux.p_ctx[0].eq(Cat(Constant(0b10, 2), loop_fifo.source.ctx)),
-            mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
-            loop_fifo.source.ready.eq(mux.p_req[0] & ~mux.frame_valid),
-            mux.p_pending[0].eq(0),  # loopback does not suppress idle
+            mux.p_din[0].eq(tlp_rx_fifo.source.dat),
+            mux.p_ctx[0].eq(Cat(tlp_rx_fifo.source.last, Constant(0, 1))),
+            mux.p_pending[0].eq(tlp_rx_fifo.source.valid),
+            mux.p_wr[0].eq(tlp_rx_fifo.source.valid & mux.p_req[0]),
+            tlp_rx_fifo.source.ready.eq(mux.p_req[0]),
         ]
 
-        # p1: CMD response — tag=0b11, ctx=0b00
+        # p1: CFG response, ctx = 2'b00
         self.comb += [
-            mux.p_din[1].eq(cmd_tx_fifo.source.data),
-            mux.p_ctx[1].eq(0b0011),
-            mux.p_wr [1].eq(cmd_tx_fifo.source.valid & mux.p_req[1]),
-            cmd_tx_fifo.source.ready.eq(mux.p_req[1] & ~mux.frame_valid),
-            mux.p_pending[1].eq(cmd_tx_fifo.source.valid & ~mux.frame_valid),
+            mux.p_din[1].eq(cfg_tx_fifo.source.data),
+            mux.p_ctx[1].eq(0),
+            mux.p_pending[1].eq(cfg_tx_fifo.source.valid),
+            mux.p_wr[1].eq(cfg_tx_fifo.source.valid & mux.p_req[1]),
+            cfg_tx_fifo.source.ready.eq(mux.p_req[1]),
         ]
 
-        # p2: CFG response — tag=0b01, ctx=0b00
+        # p2: LOOPBACK, ctx from stored loop FIFO
         self.comb += [
-            mux.p_din[2].eq(cfg_tx_fifo.source.data),
-            mux.p_ctx[2].eq(0b0001),
-            mux.p_wr [2].eq(cfg_tx_fifo.source.valid & mux.p_req[2]),
-            cfg_tx_fifo.source.ready.eq(mux.p_req[2] & ~mux.frame_valid),
-            mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.frame_valid),
+            mux.p_din[2].eq(loop_fifo.source.data),
+            mux.p_ctx[2].eq(loop_fifo.source.ctx),
+            mux.p_pending[2].eq(loop_fifo.source.valid),
+            mux.p_wr[2].eq(loop_fifo.source.valid & mux.p_req[2]),
+            loop_fifo.source.ready.eq(mux.p_req[2]),
         ]
 
-        # p3: TLP RX (PCIe → host)
-        # ctx nibble encoding: bits[1:0]=TYPE_TLP=0b00, bit[2]=last, bit[3]=0
-        # CRITICAL: bits[1:0] MUST be 0b00 (TYPE_TLP) for ALL beats including last
-        # Previously last was incorrectly placed in bit[0], corrupting the type tag
+        # p3: CMD response, ctx = 2'b00
         self.comb += [
-            mux.p_din[3].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[3].eq(Cat(Constant(0b00, 2),           # bits[1:0] = TYPE_TLP tag
-                                tlp_rx_fifo.source.last,     # bit[2] = last
-                                Constant(0, 1))),             # bit[3] = 0
-            mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
-            tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
-            mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
+            mux.p_din[3].eq(cmd_tx_fifo.source.data),
+            mux.p_ctx[3].eq(0),
+            mux.p_pending[3].eq(cmd_tx_fifo.source.valid),
+            mux.p_wr[3].eq(cmd_tx_fifo.source.valid & mux.p_req[3]),
+            cmd_tx_fifo.source.ready.eq(mux.p_req[3]),
         ]
-
-        # p4-p7: stubs
-        for i in range(4, 8):
-            self.comb += [
-                mux.p_din[i].eq(0),
-                mux.p_ctx[i].eq(0),
-                mux.p_wr [i].eq(0),
-                mux.p_pending[i].eq(0),
-            ]
