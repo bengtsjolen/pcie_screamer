@@ -89,6 +89,7 @@ class PCILeechMux(Module):
         dout_buf_data  = Signal(256)
 
         self.sync += en.eq(~ResetSignal())
+        self.en_out = en  # expose for port ready gating
 
         # -------------------------------------------------------------------
         # Priority-index chain (combinational)
@@ -121,7 +122,7 @@ class PCILeechMux(Module):
         # All ports: req = rd_en (mirrors SV assign p_req_data = rd_en)
         # All ports: req always high - ports write freely, backpressure via FIFOs
         for i in range(nports):
-            self.comb += self.p_req[i].eq(1)
+            self.comb += self.p_req[i].eq(en)  # gate on en: FIFOs only advance when mux is running
 
 
 
@@ -510,8 +511,7 @@ class PCILeechFIFO(Module):
         self.comb += [
             cfg_addr_byte.eq(cfg_cmd[16:32]),
             cfg_cmd_read .eq(cfg_cmd_valid & ~ResetSignal()),  # gate on reset to prevent spurious boot responses
-            # Only pop CFG request when tx FIFO has accepted the response
-            cfg_rx_fifo.source.ready.eq(cfg_tx_fifo.sink.ready | ~cfg_cmd_valid),
+            cfg_rx_fifo.source.ready.eq(1),
         ]
 
         # CFG register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
@@ -645,11 +645,7 @@ class PCILeechFIFO(Module):
             # bit14 of addr = shadow config space — we don't support that yet
             in_cmd_read .eq(cmd_valid & cmd[12] & ~cmd[30]),
             in_cmd_write.eq(cmd_valid & cmd[13] & ~cmd[30] & f_rw),
-            # Only pop CMD read when tx FIFO accepts; pop write/no-reply immediately
-            cmd_rx_fifo.source.ready.eq(
-                (in_cmd_read  & cmd_tx_fifo.sink.ready) |   # read: wait for tx accept
-                (cmd_valid & ~cmd[12])                       # write/nop: pop immediately
-            ),
+            cmd_rx_fifo.source.ready.eq(1),
         ]
 
         # Register file reset values (match pcileech_fifo.sv initialvalues task)
