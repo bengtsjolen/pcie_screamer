@@ -145,6 +145,7 @@ class PCILeechMux(Module):
 
         # Output hold register — latches completed frame until serializer takes it.
         frame_valid = Signal()
+        self.frame_valid = frame_valid
         # frame_valid stays high until rd_en (serializer ready) clears it.
         frame_data  = Signal(256)
 
