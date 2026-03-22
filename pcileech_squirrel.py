@@ -69,7 +69,7 @@ class PCIeSquirrel(SoCMini):
 
         # PCIe PHY ---------------------------------------------------------------------------------
         pcie_phy = self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
-                                             data_width=64, bar0_size=0x40000)
+                                             data_width=64, bar0_size=0) #0x40000)
         pcie_phy.config["Device_ID"] = "0666"
         pcie_phy.config["Class_Code_Base"] = "02"
         pcie_phy.config["Class_Code_Sub"] = "00"
