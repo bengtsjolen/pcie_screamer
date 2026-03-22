@@ -113,7 +113,7 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
+            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0) & ~any_pending),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
@@ -121,7 +121,7 @@ class PCILeechMux(Module):
         # All ports: req = rd_en (mirrors SV assign p_req_data = rd_en)
         # All ports: req always high - ports write freely, backpressure via FIFOs
         for i in range(nports):
-            self.comb += self.p_req[i].eq(1)
+            self.comb += self.p_req[i].eq(self.rd_en & ~frame_valid)
 
 
 
@@ -137,7 +137,7 @@ class PCILeechMux(Module):
             data_reg[3], data_reg[2], data_reg[1],         # bits 191:96
             data_reg[0],                                    # bits 223:192
             ctx_reg[6],                                     # bits 227:224
-            Signal(4, reset=0xE),                          # bits 231:228  (4'hE)
+            Constant(0xE, 4),                           # bits 231:228  (4'hE)
             ctx_reg[4],  ctx_reg[5],                       # bits 239:232
             ctx_reg[2],  ctx_reg[3],                       # bits 247:240
             ctx_reg[0],  ctx_reg[1],                       # bits 255:248
@@ -504,7 +504,7 @@ class PCILeechFIFO(Module):
         self.comb += [
             cfg_addr_byte.eq(cfg_cmd[16:32]),
             cfg_cmd_read .eq(cfg_cmd_valid & ~ResetSignal()),  # gate on reset to prevent spurious boot responses
-            cfg_rx_fifo.source.ready.eq(1),
+            cfg_rx_fifo.source.ready.eq(cfg_cmd_read & cfg_tx_fifo.sink.ready),
         ]
 
         # CFG register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
@@ -524,14 +524,21 @@ class PCILeechFIFO(Module):
             # PHY registers: value[7:0]→pb[0], value[15:8]→pb[1] (natural LE mapping)
             # pb[0] at 0x000a = {lnk_width[1:0], ltssm[5:0]}
             # pb[1] at 0x000b = {0000000, lnk_up}
-            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,  self.phy_lnk_width,   # [7:0]  = {lnk_width,ltssm}
-                                       self.phy_lnk_up, Signal(7))),            # [15:8] = {0...,lnk_up}
-            # pb[0] at 0x000c = {lnk_rate,0,0,0,0,lnk_up,lnk_width[1:0]}
-            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,                     # [1:0]  = lnk_width
-                                       self.phy_lnk_up,                         # [2]    = lnk_up
-                                       Signal(4),                               # [6:3]  = 0
-                                       self.phy_lnk_rate,                       # [7]    = lnk_rate
-                                       Signal(8))),                             # [15:8] = 0
+            5:  cfg_ro_readback.eq(Cat(
+                                       Constant(0, 3),          # tx_pm_state
+                                       self.phy_lnk_width,      # bits [4:3]
+                                       Constant(0, 3),          # padding / lane reversal
+                                       self.phy_ltssm,          # bits [13:8]
+                                       Constant(0, 2))),        # rx_pm_state
+            6:  cfg_ro_readback.eq(Cat(
+                                       Constant(0, 8),          # upper byte at 0x000d
+                                       self.phy_lnk_width,      # bits [9:8]
+                                       self.phy_lnk_up,         # bit 10
+                                       Constant(1, 1),          # gen2_cap
+                                       Constant(1, 1),          # partner_gen2
+                                       Constant(1, 1),          # upcfg_cap
+                                       self.phy_lnk_rate,       # bit 14
+                                       Constant(0, 1))),        # directed_change_done
             11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
             4:  cfg_ro_readback.eq(0x1600),  # byte 0x08: PCIe BDF hardcoded 16:00.0
             # byte 0x18 = word_index 12: dcommand shadow from real PCIe IP
@@ -602,8 +609,10 @@ class PCILeechFIFO(Module):
             # bit14 of addr = shadow config space — we don't support that yet
             in_cmd_read .eq(cmd_valid & cmd[12] & ~cmd[30]),
             in_cmd_write.eq(cmd_valid & cmd[13] & ~cmd[30] & f_rw),
-            # Always consume CMD FIFO
-            cmd_rx_fifo.source.ready.eq(1),
+            # Consume CMD FIFO only when the current command is handled.
+            cmd_rx_fifo.source.ready.eq((in_cmd_read & cmd_tx_fifo.sink.ready) |
+                                        in_cmd_write |
+                                        (cmd_valid & ~cmd[12] & ~cmd[13])),
         ]
 
         # Register file reset values (match pcileech_fifo.sv initialvalues task)
@@ -719,12 +728,14 @@ class PCILeechFIFO(Module):
         for word_idx in range(15):
             bit_base = word_idx * 16
             rw_rb_cases[word_idx] = rw_readback.eq(rw[bit_base:bit_base+16])
+        self.comb += rw_readback.eq(0)
         self.comb += Case(in_addr_byte[1:8], rw_rb_cases)
 
         # ro[] combinational readback — word_index = byte_offset >> 1
         # byte offset 0x00 → word_index 0 → magic 0xab89
         # byte offset 0x08 → word_index 4 → {VERSION_MINOR, VERSION_MAJOR}
         # byte offset 0x0A → word_index 5 → {0x00, DEVICE_ID}
+        self.comb += ro_readback.eq(0)
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
@@ -734,7 +745,7 @@ class PCILeechFIFO(Module):
             # Cat puts first arg at LSB: Cat(lo, hi) → {hi, lo} in Verilog
             # We need readback[15:8]=DEVICE_ID so hi=DEVICE_ID → second arg has DEVICE_ID
             # Use named signals to ensure stable Migen elaboration order
-            5: ro_readback.eq(Cat(Signal(8, name="dev_id_lo"), Signal(8, reset=DEVICE_ID, name="dev_id_hi"))),  # DWORD=000a0400
+            5: ro_readback.eq(Cat(Constant(0, 8), Constant(DEVICE_ID, 8))),  # DWORD=000a0400
         })
 
         # Select ro[] or rw[] based on f_rw flag
