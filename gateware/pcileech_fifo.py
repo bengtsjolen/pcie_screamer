@@ -88,24 +88,24 @@ class PCILeechMux(Module):
 
                 # selected source write into accumulators; priority exact like SV
                 If(self.p_wr[0],
-                    mux_status.eq(Cat(Const(0b00, 2), self.p_ctx[0], mux_status[0:24])),
+                    mux_status.eq(Cat(Constant(0b00, 2), self.p_ctx[0], mux_status[0:24])),
                     mux_data.eq(Cat(self.p_din[0], mux_data[0:192])),
                 ),
                 If(self.p_wr[1] & ~self.p_wr[0],
-                    mux_status.eq(Cat(Const(0b01, 2), self.p_ctx[1], mux_status[0:24])),
+                    mux_status.eq(Cat(Constant(0b01, 2), self.p_ctx[1], mux_status[0:24])),
                     mux_data.eq(Cat(self.p_din[1], mux_data[0:192])),
                 ),
                 If(self.p_wr[2] & ~self.p_wr[1] & ~self.p_wr[0],
-                    mux_status.eq(Cat(Const(0b10, 2), self.p_ctx[2], mux_status[0:24])),
+                    mux_status.eq(Cat(Constant(0b10, 2), self.p_ctx[2], mux_status[0:24])),
                     mux_data.eq(Cat(self.p_din[2], mux_data[0:192])),
                 ),
                 If(self.p_wr[3] & ~self.p_wr[2] & ~self.p_wr[1] & ~self.p_wr[0],
-                    mux_status.eq(Cat(Const(0b11, 2), self.p_ctx[3], mux_status[0:24])),
+                    mux_status.eq(Cat(Constant(0b11, 2), self.p_ctx[3], mux_status[0:24])),
                     mux_data.eq(Cat(self.p_din[3], mux_data[0:192])),
                 ),
                 If(~self.p_wr[3] & ~self.p_wr[2] & ~self.p_wr[1] & ~self.p_wr[0] & (mux_skip_counter > 7),
-                    mux_status.eq(Cat(Const(0b1111, 4), mux_status[0:24])),
-                    mux_data.eq(Cat(Const(0xffffffff, 32), mux_data[0:192])),
+                    mux_status.eq(Cat(Constant(0b1111, 4), mux_status[0:24])),
+                    mux_data.eq(Cat(Constant(0xffffffff, 32), mux_data[0:192])),
                 ),
             )
         ]
@@ -311,8 +311,8 @@ class PCILeechFIFO(Module):
         self.comb += Case(cfg_word_index, {
             0:  cfg_ro_readback.eq(0x6745),
             4:  cfg_ro_readback.eq(0x1600),
-            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm, self.phy_lnk_width, self.phy_lnk_up, Const(0, 7))),
-            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width, self.phy_lnk_up, Const(0, 4), self.phy_lnk_rate, Const(0, 8))),
+            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm, self.phy_lnk_width, self.phy_lnk_up, Constant(0, 7))),
+            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width, self.phy_lnk_up, Constant(0, 4), self.phy_lnk_rate, Constant(0, 8))),
             11: cfg_ro_readback.eq(rw[176:192]),
             12: cfg_ro_readback.eq(self.cfg_dcommand),
         })
@@ -394,8 +394,8 @@ class PCILeechFIFO(Module):
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
             3: ro_readback.eq(self.tlp_rx_level),
-            4: ro_readback.eq(Cat(Const(VERSION_MAJOR, 8), Const(VERSION_MINOR, 8))),
-            5: ro_readback.eq(Cat(Const(DEVICE_ID, 8), Const(0, 8))),
+            4: ro_readback.eq(Cat(Constant(VERSION_MAJOR, 8), Constant(VERSION_MINOR, 8))),
+            5: ro_readback.eq(Cat(Constant(DEVICE_ID, 8), Constant(0, 8))),
         })
         self.comb += If(f_rw, readback.eq(rw_readback)).Else(readback.eq(ro_readback))
 
@@ -442,7 +442,7 @@ class PCILeechFIFO(Module):
         self.comb += [
             # p0: TLP RX
             mux.p_din[0].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[0].eq(Cat(tlp_rx_fifo.source.last, Const(0, 1))),  # {0,last}
+            mux.p_ctx[0].eq(Cat(tlp_rx_fifo.source.last, Constant(0, 1))),  # {0,last}
             mux.p_wr[0].eq(tlp_rx_fifo.source.valid),
             mux.p_has_data[0].eq(tlp_rx_fifo.source.valid),
             tlp_rx_fifo.source.ready.eq(mux.p_req[0]),
