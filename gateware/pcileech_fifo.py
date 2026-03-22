@@ -542,7 +542,8 @@ class PCILeechFIFO(Module):
         # ro[100]    = pl_link_partner_gen2_sup   (byte 0x000c bit[4])
         # ro[101]    = pl_link_upcfg_cap          (byte 0x000c bit[5])
         # ro[102]    = pl_sel_lnk_rate            (byte 0x000c bit[6])
-        # ro[103]    = pl_directed_change_done    (byte 0x000c bit[7])        self.comb += Case(cfg_word_index, {
+        # ro[103]    = pl_directed_change_done    (byte 0x000c bit[7])
+        self.comb += Case(cfg_word_index, {
             0:  cfg_ro_readback.eq(0x6745),  # byte 0x00: wMagicPCIe
             4:  cfg_ro_readback.eq(0x1600),  # byte 0x08: PCIe BDF hardcoded 16:00.0
             5:  cfg_ro_readback.eq(0x1608),  # force host-visible 000a1608
