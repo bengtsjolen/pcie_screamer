@@ -75,15 +75,18 @@ class PCILeechMux(Module):
         self.rd_en  = Signal()   # driven by downstream (serializer IDLE)
 
         # -------------------------------------------------------------------
-        # Internal state — 15 slots (SV uses data_reg[14], indices 0..13)
+        # Internal state — 15 slots matching SV pcileech_mux.sv
+        # SV uses sliding window: slots 0-6 = current frame, 7-13 = overflow
+        # idx_base advances EVERY cycle (not just when frame_valid=0)
+        # This allows multiple responses to accumulate in the same frame
         # -------------------------------------------------------------------
         DEPTH    = 15
         data_reg = Array([Signal(32, reset=0xFFFFFFFF, name=f"dr{i}") for i in range(DEPTH)])
         ctx_reg  = Array([Signal(4,  reset=0b1111,    name=f"cr{i}") for i in range(DEPTH)])
 
         idx_base    = Signal(4, reset=0)
-        idle_count  = Signal(22, reset=0)
-        en          = Signal()          # always 1 after reset - mux runs freely
+        idle_count  = Signal(4, reset=0)   # SV uses 4-bit idle count, threshold=7
+        en          = Signal()             # always 1 after reset - mux runs freely
         dout_valid  = Signal()
         dout_buf_valid = Signal()
         dout_buf_data  = Signal(256)
@@ -114,15 +117,17 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
+            # SV: p8_wr_en = en && (idx_base > 0) && (idle_count > 7) && (idx_base == p8_idx)
+            # idle fires when: mux running, some data written, idle long enough, no more data this cycle
+            idle_wr .eq(en & (idle_idx > 0) & (idle_count > 7) & (idle_idx == p_idx[nports])),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
 
-        # All ports: req = rd_en (mirrors SV assign p_req_data = rd_en)
-        # All ports: req always high - ports write freely, backpressure via FIFOs
+        # SV: p_req_data = rd_en (the global FT601-ready signal)
+        # We use en as the equivalent — ports advance when mux is running
         for i in range(nports):
-            self.comb += self.p_req[i].eq(en)  # gate on en: FIFOs only advance when mux is running
+            self.comb += self.p_req[i].eq(en)
 
 
 
@@ -161,50 +166,69 @@ class PCILeechMux(Module):
         self.comb += frame_consumed.eq(frame_valid & self.rd_en)
 
         # -------------------------------------------------------------------
-        # Sequential logic
+        # Sequential logic — mirrors SV pcileech_mux.sv always block exactly
+        # Key difference from naive impl: idx_base advances EVERY cycle (not
+        # just when ~frame_valid), enabling multiple responses in one frame.
         # -------------------------------------------------------------------
         self.sync += [
             If(ResetSignal(),
                 idx_base.eq(0),
                 idle_count.eq(0),
                 frame_valid.eq(0),
+                dout_valid.eq(0),
+                dout_buf_valid.eq(0),
             ).Else(
-                # Clear frame_valid when serializer consumes it
-                If(frame_consumed,
-                    frame_valid.eq(0),
+                # OUTPUT BUFFER LOGIC (mirrors SV)
+                If(en,
+                    dout_buf_valid.eq(0),
+                ).Elif(dout_valid,
+                    dout_buf_data.eq(dout_data),
+                    dout_buf_valid.eq(1),
                 ),
 
-                # Run mux advance logic every cycle (en always high after reset)
-                If(en & ~frame_valid,
-                    # Advance base index, wrapping after frame emit
+                # OUTPUT VALID: frame ready when idx_max >= 7
+                dout_valid.eq(en & (idx_max >= 7)),
+
+                If(en,
+                    # NEXT INDEX BASE: advance every cycle, subtract 7 on frame emit
                     idx_base.eq(idx_max - Mux(idx_max >= 7, 7, 0)),
 
-                    # Idle counter: increment every cycle no real data arrives,
-                    # reset when any port writes data this cycle.
-                    If(idle_idx == p_idx[0],   # no port wrote anything
+                    # IDLE COUNT: increment when no new data, reset when data arrives
+                    If((idx_base > 0) & (idx_base == p_idx[nports]),
                         idle_count.eq(idle_count + 1),
                     ).Else(
                         idle_count.eq(0),
                     ),
 
-                    # Write data/ctx from active input ports into slots
+                    # Write data/ctx from all active ports into their slots
                     *[If(self.p_wr[i],
                         data_reg[p_idx[i]].eq(self.p_din[i]),
                         ctx_reg [p_idx[i]].eq(self.p_ctx[i]),
                       ) for i in range(nports)],
 
-                    # Idle port fills padding slot
+                    # Idle port fills its slot when threshold reached
                     If(idle_wr,
                         data_reg[idle_idx].eq(0xFFFFFFFF),
                         ctx_reg [idle_idx].eq(0b1111),
                     ),
+                ),
 
-                    # Latch completed frame into hold register; reset idle_count
-                    If(idx_max >= 7,
-                        frame_valid.eq(1),
-                        frame_data .eq(dout_data),
-                        idle_count .eq(0),   # restart idle timer after each frame commit
-                    ),
+                # OVERFLOW: when frame emits, copy overflow slots to base positions
+                # (mirrors SV: if(dout_valid) data_reg[i] <= data_reg[7+i])
+                If(dout_valid,
+                    *[If(idx_base > i,
+                        data_reg[i].eq(data_reg[7+i]),
+                        ctx_reg [i].eq(ctx_reg [7+i]),
+                      ) for i in range(7)],
+                ),
+
+                # Frame valid/data: use dout_buf when rd_en is low
+                If(frame_consumed,
+                    frame_valid.eq(0),
+                ),
+                If(dout_valid,
+                    frame_valid.eq(1),
+                    frame_data.eq(dout_data),
                 ),
             )
         ]
@@ -848,7 +872,7 @@ class PCILeechFIFO(Module):
             mux.p_din[0].eq(loop_fifo.source.data),
             mux.p_ctx[0].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
             mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
-            loop_fifo.source.ready.eq(mux.p_req[0] & ~mux.frame_valid),
+            loop_fifo.source.ready.eq(mux.p_req[0]),
             mux.p_pending[0].eq(0),  # loopback does not suppress idle
         ]
 
@@ -857,8 +881,8 @@ class PCILeechFIFO(Module):
             mux.p_din[1].eq(cmd_tx_fifo.source.data),
             mux.p_ctx[1].eq(0b0011),
             mux.p_wr [1].eq(cmd_tx_fifo.source.valid & mux.p_req[1]),
-            cmd_tx_fifo.source.ready.eq(mux.p_req[1] & ~mux.frame_valid),
-            mux.p_pending[1].eq(cmd_tx_fifo.source.valid & ~mux.frame_valid),
+            cmd_tx_fifo.source.ready.eq(mux.p_req[1]),
+            mux.p_pending[1].eq(cmd_tx_fifo.source.valid),
         ]
 
         # p2: CFG response — tag=0b01, ctx=0b00
@@ -866,7 +890,7 @@ class PCILeechFIFO(Module):
             mux.p_din[2].eq(cfg_tx_fifo.source.data),
             mux.p_ctx[2].eq(0b0001),
             mux.p_wr [2].eq(cfg_tx_fifo.source.valid & mux.p_req[2]),
-            cfg_tx_fifo.source.ready.eq(mux.p_req[2] & ~mux.frame_valid),
+            cfg_tx_fifo.source.ready.eq(mux.p_req[2]),
             mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.frame_valid),
         ]
 
@@ -880,8 +904,8 @@ class PCILeechFIFO(Module):
                                 tlp_rx_fifo.source.last,     # bit[2] = last
                                 Constant(0, 1))),             # bit[3] = 0
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
-            tlp_rx_fifo.source.ready.eq(mux.p_req[3] & ~mux.frame_valid),
-            mux.p_pending[3].eq(tlp_rx_fifo.source.valid & ~mux.frame_valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
+            tlp_rx_fifo.source.ready.eq(mux.p_req[3]),
+            mux.p_pending[3].eq(tlp_rx_fifo.source.valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
         ]
 
         # p4-p7: stubs
