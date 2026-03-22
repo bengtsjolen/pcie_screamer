@@ -504,7 +504,7 @@ class PCILeechFIFO(Module):
         self.comb += [
             cfg_addr_byte.eq(cfg_cmd[16:32]),
             cfg_cmd_read .eq(cfg_cmd_valid & ~ResetSignal()),  # gate on reset to prevent spurious boot responses
-            cfg_rx_fifo.source.ready.eq(cfg_cmd_read & cfg_tx_fifo.sink.ready),
+            cfg_rx_fifo.source.ready.eq(1),
         ]
 
         # CFG register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
@@ -520,35 +520,23 @@ class PCILeechFIFO(Module):
         self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
 
         self.comb += Case(cfg_word_index, {
-            0:  cfg_ro_readback.eq(0x6745),  # byte 0x00: wMagicPCIe
+            0:  cfg_ro_readback.eq(0x6745),                                               # byte 0x00: wMagicPCIe — value transmitted directly
+            # PHY registers: value[7:0]→pb[0], value[15:8]→pb[1] (natural LE mapping)
+            # pb[0] at 0x000a = {lnk_width[1:0], ltssm[5:0]}
+            # pb[1] at 0x000b = {0000000, lnk_up}
+            5:  cfg_ro_readback.eq(Cat(self.phy_ltssm,  self.phy_lnk_width,   # [7:0]  = {lnk_width,ltssm}
+                                       self.phy_lnk_up, Signal(7))),            # [15:8] = {0...,lnk_up}
+            # pb[0] at 0x000c = {lnk_rate,0,0,0,0,lnk_up,lnk_width[1:0]}
+            6:  cfg_ro_readback.eq(Cat(self.phy_lnk_width,                     # [1:0]  = lnk_width
+                                       self.phy_lnk_up,                         # [2]    = lnk_up
+                                       Signal(4),                               # [6:3]  = 0
+                                       self.phy_lnk_rate,                       # [7]    = lnk_rate
+                                       Signal(8))),                             # [15:8] = 0
+            11: cfg_ro_readback.eq(rw[176:192]),                        # byte 0x16: rw[191:176] pl_directed_*
             4:  cfg_ro_readback.eq(0x1600),  # byte 0x08: PCIe BDF hardcoded 16:00.0
-            # word 5 maps ro[95:80] from pcileech_pcie_cfg_a7.sv:
-            # [5:0]=ltssm, [7:6]=rx_pm_state(0), [10:8]=tx_pm_state(0),
-            # [13:11]=initial_link_width(1), [15:14]=lane_reversal(0).
-            # Natural 16-bit value 0x0816 is emitted as 000a1608 on the host.
-            5:  cfg_ro_readback.eq(Cat(
-                    self.phy_ltssm,          # [5:0]
-                    Constant(0, 2),          # [7:6]   rx_pm_state
-                    Constant(0, 3),          # [10:8]  tx_pm_state
-                    Constant(1, 3),          # [13:11] initial_link_width = x1
-                    Constant(0, 2)           # [15:14] lane_reversal
-                )),
-            # word 6 maps ro[111:96]:
-            # [1:0]=sel_lnk_width (reference traces expect 0 here),
-            # [2]=lnk_up, [3]=gen2_cap, [4]=partner_gen2, [5]=upcfg_cap,
-            # [6]=sel_lnk_rate, [7]=directed_change_done(0), [15:8]=0.
-            # Natural value 0x007c is emitted as 000c7c00 on the host.
-            6:  cfg_ro_readback.eq(Cat(
-                    Constant(0, 2),          # [1:0]   sel_lnk_width
-                    self.phy_lnk_up,         # [2]
-                    Constant(1, 1),          # [3]     link_gen2_cap
-                    Constant(1, 1),          # [4]     partner_gen2_supported
-                    Constant(1, 1),          # [5]     link_upcfg_cap
-                    self.phy_lnk_rate,       # [6]     sel_lnk_rate
-                    Constant(0, 1),          # [7]     directed_change_done
-                    Constant(0, 8)           # [15:8]
-                )),
-            11: cfg_ro_readback.eq(rw[176:192]),     # byte 0x16: rw[191:176] pl_directed_*
+            # byte 0x18 = word_index 12: dcommand shadow from real PCIe IP
+            # Exposes cfg_dcommand so pcileech knows MaxReadReq and ExtTag settings.
+            # Caller must wire self.cfg_dcommand from pcie_phy.cfg_dcommand.
             12: cfg_ro_readback.eq(self.cfg_dcommand),
             "default": cfg_ro_readback.eq(0),
         })
@@ -614,10 +602,8 @@ class PCILeechFIFO(Module):
             # bit14 of addr = shadow config space — we don't support that yet
             in_cmd_read .eq(cmd_valid & cmd[12] & ~cmd[30]),
             in_cmd_write.eq(cmd_valid & cmd[13] & ~cmd[30] & f_rw),
-            # Only consume reads when their response is accepted; writes/other cmds consume immediately.
-            cmd_rx_fifo.source.ready.eq((in_cmd_read & cmd_tx_fifo.sink.ready) |
-                                        in_cmd_write |
-                                        (cmd_valid & ~cmd[12] & ~cmd[13])),
+            # Always consume CMD FIFO
+            cmd_rx_fifo.source.ready.eq(1),
         ]
 
         # Register file reset values (match pcileech_fifo.sv initialvalues task)
@@ -728,11 +714,6 @@ class PCILeechFIFO(Module):
         ro_readback = Signal(16)
         readback    = Signal(16)
 
-        self.comb += [
-            rw_readback.eq(0),
-            ro_readback.eq(0),
-        ]
-
         # rw[] combinational readback
         rw_rb_cases = {}
         for word_idx in range(15):
@@ -748,12 +729,12 @@ class PCILeechFIFO(Module):
             0: ro_readback.eq(0xab89),
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
             4: ro_readback.eq(Cat(Constant(VERSION_MINOR, 8),
-                                  Constant(VERSION_MAJOR, 8))),
+                                  Constant(VERSION_MAJOR, 8))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
             # DEVICE_ID response: need DWORD=000a0400 so pcileech uses small-tag profile
             # Cat puts first arg at LSB: Cat(lo, hi) → {hi, lo} in Verilog
             # We need readback[15:8]=DEVICE_ID so hi=DEVICE_ID → second arg has DEVICE_ID
             # Use named signals to ensure stable Migen elaboration order
-            5: ro_readback.eq(Cat(Constant(0, 8), Constant(DEVICE_ID, 8))),  # DWORD=000a0400
+            5: ro_readback.eq(Cat(Signal(8, name="dev_id_lo"), Signal(8, reset=DEVICE_ID, name="dev_id_hi"))),  # DWORD=000a0400
         })
 
         # Select ro[] or rw[] based on f_rw flag
