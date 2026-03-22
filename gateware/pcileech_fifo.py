@@ -113,7 +113,7 @@ class PCILeechMux(Module):
         idle_wr  = Signal()
         self.comb += [
             idle_idx.eq(p_idx[nports]),
-            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0) & ~any_pending),
+            idle_wr .eq(en & (idle_idx < 7) & (idle_count > 1000) & (idle_idx > 0)),
         ]
         idx_max = Signal(4)
         self.comb += idx_max.eq(idle_idx + idle_wr)
@@ -673,7 +673,7 @@ class PCILeechFIFO(Module):
                 rw[192:200].eq(0x02),      # CFG_REV_ID
                 rw[200]    .eq(0),         # PCIE CORE RESET off — sys_rst_n=1 so user_lnk_up can assert
                 rw[201]    .eq(0),         # PCIE SUBSYSTEM RESET
-                rw[202]    .eq(0),         # CFGTLP PROCESSING ENABLE (0=bypass filter for debug)
+                rw[202]    .eq(1),         # CFGTLP PROCESSING ENABLE
                 rw[203]    .eq(1),         # CFGTLP ZERO DATA
                 rw[204]    .eq(1),         # CFGTLP FILTER TLP FROM USER
                 rw[205]    .eq(1),         # BAR PIO ENABLE
