@@ -137,7 +137,7 @@ class PCILeechMux(Module):
             data_reg[3], data_reg[2], data_reg[1],         # bits 191:96
             data_reg[0],                                    # bits 223:192
             ctx_reg[6],                                     # bits 227:224
-            Constant(0xE, 4),                          # bits 231:228  (4'hE)
+            Signal(4, reset=0xE),                          # bits 231:228  (4'hE)
             ctx_reg[4],  ctx_reg[5],                       # bits 239:232
             ctx_reg[2],  ctx_reg[3],                       # bits 247:240
             ctx_reg[0],  ctx_reg[1],                       # bits 255:248
@@ -728,8 +728,8 @@ class PCILeechFIFO(Module):
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
-            4: ro_readback.eq(Cat(Constant(VERSION_MINOR, 8),
-                                  Constant(VERSION_MAJOR, 8))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
+            4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
+                                  Signal(8, reset=VERSION_MAJOR))),  # VERSION_MAJOR at [15:8] → wData>>8=VERSION_MAJOR
             # DEVICE_ID response: need DWORD=000a0400 so pcileech uses small-tag profile
             # Cat puts first arg at LSB: Cat(lo, hi) → {hi, lo} in Verilog
             # We need readback[15:8]=DEVICE_ID so hi=DEVICE_ID → second arg has DEVICE_ID
