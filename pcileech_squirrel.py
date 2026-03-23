@@ -160,7 +160,38 @@ class PCIeSquirrel(SoCMini):
         self.add_csr("msi")
 
         # LEDs -------------------------------------------------------------------------------------
-        if 1:
+        if 0:
+            #tx0_latch = Signal()
+            #self.sync.pcie += If(pcileech_fifo.tlp_tx.valid & pcileech_fifo.tlp_tx.ready,
+            #                       tx0_latch.eq(1)
+            #                    )
+            tx1_latch = Signal()
+            self.sync.pcie += If(tlp_tx_conv.source.valid & tlp_tx_conv.source.ready,
+                                 tx1_latch.eq(1)
+                                 )
+            #tx2_latch = Signal()
+            #self.sync.pcie += If(self.pcie_phy.sink.valid & self.pcie_phy.sink.ready,
+            #                     tx2_latch.eq(1)
+            #                   )
+            #self.comb += platform.request("user_led", 0).eq(tx0_latch)
+            self.comb += platform.request("user_led", 1).eq(tx1_latch)
+        elif 1:
+            valid_latch = Signal(1)
+            self.sync.pcie += If(self.pcie_phy.sink.valid,valid_latch.eq(1))
+            self.comb += platform.request("user_led", 0).eq(valid_latch)
+
+            ready_latch = Signal(1)
+            self.sync.pcie += If(self.pcie_phy.sink.ready,ready_latch.eq(1))
+            self.comb += platform.request("user_led", 1).eq(ready_latch)
+        elif 1:
+            tx_err_drop_latch = Signal()
+            self.sync.pcie += If(self.pcie_phy.tx_err_drop, tx_err_drop_latch.eq(1))
+            self.comb += platform.request("user_led", 0).eq(tx_err_drop_latch)
+
+            raw_rx = Signal()
+            self.sync.pcie += If(self.pcie_phy.m_axis_rx_tvalid, raw_rx.eq(1))
+            self.comb += platform.request("user_led", 1).eq(raw_rx)
+        elif 1:
             # LED0: tx_err_drop — TLP dropped by PCIe IP (BME not set or flow control)
             tx_err_drop_latch = Signal()
             self.sync.pcie += If(self.pcie_phy.tx_err_drop, tx_err_drop_latch.eq(1))

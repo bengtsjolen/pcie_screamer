@@ -571,8 +571,8 @@ class PCILeechFIFO(Module):
         rw_pcie_rst_subsys = rw[201]
         rw_cfgtlp_en       = rw[202]
         # Wire filter bypass: rw[202]=1 means filter ON (normal), 0 means bypass (debug)
-        #self.comb += tlp_filter_bypass.eq(~rw[202])
-        self.comb += tlp_filter_bypass.eq(1)
+        self.comb += tlp_filter_bypass.eq(~rw[202])
+        #self.comb += tlp_filter_bypass.eq(1)
         
         rw_cfgtlp_zero     = rw[203]
         rw_cfgtlp_filter   = rw[204]
