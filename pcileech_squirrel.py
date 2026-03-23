@@ -154,13 +154,34 @@ class PCIeSquirrel(SoCMini):
                 pcileech_fifo.cfg_dcommand .eq(self.pcie_phy.dcommand),
             ]
 
+            if 1:
+                # Auto-set BME+MemEn once link is up
+                bme_done = Signal()
+                bme_timer = Signal(20)
+                self.sync.pcie += [
+                If(~bme_done,
+                   If(self.pcie_phy._link_status.fields.status,
+                      If(bme_timer < (1<<20)-1,
+                         bme_timer.eq(bme_timer + 1)
+                         )
+                      )
+                   )
+                ]
+                self.comb += [
+                    self.pcie_phy.cfg_mgmt_dwaddr.eq(1),      # DW1 = Command/Status
+                    self.pcie_phy.cfg_mgmt_di.eq(0x00000006), # BME=1, MemEn=1
+                    self.pcie_phy.cfg_mgmt_byte_en.eq(0x3),   # lower 2 bytes
+                    self.pcie_phy.cfg_mgmt_wr_en.eq(~bme_done & (bme_timer == (1<<20)-1)),
+                ]
+                self.sync.pcie += If(self.pcie_phy.cfg_mgmt_rd_wr_done, bme_done.eq(1))
+
         # MSI --------------------------------------------------------------------------------------
         self.submodules.msi = MSI()
         self.comb += self.msi.source.connect(self.pcie_phy.msi)
         self.add_csr("msi")
 
         # LEDs -------------------------------------------------------------------------------------
-        if 1:
+        if 0:
             # LED0: tx_err_drop — TLP dropped by PCIe IP (BME not set or flow control)
             tx_err_drop_latch = Signal()
             self.sync.pcie += If(self.pcie_phy.tx_err_drop, tx_err_drop_latch.eq(1))
@@ -177,7 +198,7 @@ class PCIeSquirrel(SoCMini):
             self.comb += platform.request("user_led", 0).eq(tx_seen)
 
             rx_seen = Signal()
-            self.sync.sys += If(self.pcie_phy.source.valid, rx_seen.eq(1))
+            self.sync.pcie += If(self.pcie_phy.source.valid, rx_seen.eq(1))
             self.comb += platform.request("user_led", 1).eq(rx_seen)
         elif 0:
             # 7/8 LED0 lit at usb clock so verify usb clock present and polarity of driving led
