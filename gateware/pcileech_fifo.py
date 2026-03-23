@@ -568,7 +568,7 @@ class PCILeechFIFO(Module):
         # ro[103]    = pl_directed_change_done    (byte 0x000c bit[7])
         self.comb += Case(cfg_word_index, {
             0:  cfg_ro_readback.eq(0x6745),         # byte 0x00: wMagicPCIe
-            4:  cfg_ro_readback.eq(0x1600),         # byte 0x08: BDF 16:00.0
+            4:  cfg_ro_readback.eq(self.phy_id),    # byte 0x08: real BDF from PCIe IP
             # byte 0x000a: ro[87:80] = {pl_rx_pm_state[1:0], pl_ltssm[5:0]}
             # byte 0x000b: ro[95:88] = {pl_lane_rev[1:0], pl_init_lnk_width[2:0], pl_tx_pm[2:0]}
             # ufrisk observed: 000a1608 → value=0x1608, bytes={0x08,0x16}
