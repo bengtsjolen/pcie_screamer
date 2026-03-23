@@ -419,11 +419,14 @@ class PCILeechFIFO(Module):
                 tlp_tx_suppress.eq(0),
             )
         ]
-        # pkt_data is already in correct PCIe byte order - no swap needed.
-        # rx_word byteswap + rx64 assembly already produces the right order.
+        # pkt_data byte order: rx_word already byteswaps FT601 data to match
+        # Xilinx PCIe IP s_axis_tx_tdata byte order (DW0 byte0 at tdata[7:0]).
+        # The extra swap here was incorrect - use pkt_data directly.
+        pkt_data_swapped = Signal(32)
+        self.comb += pkt_data_swapped.eq(pkt_data)  # no swap - pkt_data already correct
         self.comb += [
             tlp_tx_fifo.sink.valid.eq(rx_is_tlp & ~tlp_tx_suppress),
-            tlp_tx_fifo.sink.dat  .eq(pkt_data),
+            tlp_tx_fifo.sink.dat  .eq(pkt_data_swapped),
             tlp_tx_fifo.sink.be   .eq(0xf),
             tlp_tx_fifo.sink.last .eq(pkt_last),
             tlp_tx_fifo.source.connect(self.tlp_tx),
@@ -445,9 +448,12 @@ class PCILeechFIFO(Module):
         tlp_filter_pass   = Signal(reset=0)   # current TLP passes filter
         # First DWORD bits[31:25] = {Fmt[2:0], Type[4:3]} — check Cpl/CplD
         tlp_is_cpl = Signal()
+        # PCIe IP delivers byte0 (TLP type) at tdata[7:0], so dat[7:0] = byte0.
+        # byte0 = {R, Fmt[2:0], Type[4:0]}. Cpl=0x0a (fmt=000,type=01010),
+        # CplD=0x4a (fmt=010,type=01010). Check bits[7:1] = {Fmt[2:0],Type[4:3]}:
         self.comb += tlp_is_cpl.eq(
-            (self.tlp_rx.dat[25:32] == 0b0000101) |  # Cpl
-            (self.tlp_rx.dat[25:32] == 0b0100101)    # CplD
+            (self.tlp_rx.dat[1:8] == 0b0000101) |   # Cpl  byte0[7:1]=0b0000101
+            (self.tlp_rx.dat[1:8] == 0b0100101)     # CplD byte0[7:1]=0b0100101
         )
         self.sync += [
             If(self.tlp_rx.valid & self.tlp_rx.ready,
