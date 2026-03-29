@@ -69,7 +69,9 @@ class PCIeSquirrel(SoCMini):
 
         # PCIe PHY ---------------------------------------------------------------------------------
         pcie_phy = self.submodules.pcie_phy = S7PCIEPHY(platform, platform.request("pcie_x1"),
-                                             data_width=64, bar0_size=0) #0x40000)
+                                                        data_width=64, bar0_size=0x40000
+                                                        #, cd="pcie"
+                                                        )
         pcie_phy.config["Device_ID"] = "0666"
         pcie_phy.config["Class_Code_Base"] = "02"
         pcie_phy.config["Class_Code_Sub"] = "00"
@@ -156,24 +158,29 @@ class PCIeSquirrel(SoCMini):
 
             if 1:
                 # Auto-set BME+MemEn once link is up
+                # Replace the combinational wr_en with a registered single-cycle pulse
                 bme_done = Signal()
                 bme_timer = Signal(20)
+                bme_pulse = Signal()
                 self.sync.pcie += [
-                If(~bme_done,
-                   If(self.pcie_phy._link_status.fields.status,
-                      If(bme_timer < (1<<20)-1,
-                         bme_timer.eq(bme_timer + 1)
-                         )
-                      )
-                   )
+                    bme_pulse.eq(0),  # default off
+                    If(~bme_done,
+                       If(self.pcie_phy._link_status.fields.status,
+                          If(bme_timer < (1<<20)-1,
+                             bme_timer.eq(bme_timer + 1)
+                             ).Elif(~bme_pulse,  # only pulse once
+                                    bme_pulse.eq(1),
+                                    bme_done.eq(1)
+                                    )
+                          )
+                       ),
                 ]
                 self.comb += [
-                    self.pcie_phy.cfg_mgmt_dwaddr.eq(1),      # DW1 = Command/Status
-                    self.pcie_phy.cfg_mgmt_di.eq(0x00000006), # BME=1, MemEn=1
-                    self.pcie_phy.cfg_mgmt_byte_en.eq(0x3),   # lower 2 bytes
-                    self.pcie_phy.cfg_mgmt_wr_en.eq(~bme_done & (bme_timer == (1<<20)-1)),
+                    self.pcie_phy.cfg_mgmt_dwaddr.eq(1),
+                    self.pcie_phy.cfg_mgmt_di.eq(0x00000006),
+                    self.pcie_phy.cfg_mgmt_byte_en.eq(0x3),
+                    self.pcie_phy.cfg_mgmt_wr_en.eq(bme_pulse),
                 ]
-                self.sync.pcie += If(self.pcie_phy.cfg_mgmt_rd_wr_done, bme_done.eq(1))
 
         # MSI --------------------------------------------------------------------------------------
         self.submodules.msi = MSI()
@@ -182,6 +189,20 @@ class PCIeSquirrel(SoCMini):
 
         # LEDs -------------------------------------------------------------------------------------
         if 0:
+            #tx0_latch = Signal()
+            #self.sync.pcie += If(pcileech_fifo.tlp_tx.valid & pcileech_fifo.tlp_tx.ready,tx0_latch.eq(1))
+            #tx1_latch = Signal()
+            #self.sync.pcie += If(tlp_tx_conv.source.valid & tlp_tx_conv.source.ready,tx1_latch.eq(1))
+            #tx2_latch = Signal()
+            #self.sync.pcie += If(self.pcie_phy.sink.valid & self.pcie_phy.sink.ready,tx2_latch.eq(1))
+            
+            tx3_latch = Signal()
+            self.sync.pcie += If(self.pcie_phy.m_axis_rx_tvalid, tx3_latch.eq(1))
+            tx4_latch = Signal()
+            self.sync.pcie += If(self.pcie_phy.s_axis_tx_tvalid, tx4_latch.eq(1))
+            self.comb += platform.request("user_led", 0).eq(tx3_latch)
+            self.comb += platform.request("user_led", 1).eq(tx4_latch)
+        elif 0:
             # LED0: tx_err_drop — TLP dropped by PCIe IP (BME not set or flow control)
             tx_err_drop_latch = Signal()
             self.sync.pcie += If(self.pcie_phy.tx_err_drop, tx_err_drop_latch.eq(1))
@@ -213,8 +234,19 @@ class PCIeSquirrel(SoCMini):
         # Analyzer ---------------------------------------------------------------------------------
         if with_analyzer:
             analyzer_signals = [
-                self.pcie_phy.sink,
-                self.pcie_phy.source,
+                #self.pcie_phy.sink,
+                #self.pcie_phy.source,
+
+                self.pcie_phy.s_axis_tx_tvalid, 
+                self.pcie_phy.s_axis_tx_tready,
+                self.pcie_phy.s_axis_tx_tdata,
+                self.pcie_phy.s_axis_tx_tlast,
+                self.pcie_phy.m_axis_rx_tvalid,
+                self.pcie_phy.m_axis_rx_tdata,
+                self.pcie_phy.m_axis_rx_tlast,
+                self.pcie_phy._link_status.fields.status,
+                self.pcie_phy._link_status.fields.ltssm,
+                
             ]
             self.submodules.analyzer = LiteScopeAnalyzer(
                 analyzer_signals, 1024, csr_csv="test/analyzer.csv")
