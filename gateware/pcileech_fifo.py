@@ -423,7 +423,11 @@ class PCILeechFIFO(Module):
         # Xilinx PCIe IP s_axis_tx_tdata byte order (DW0 byte0 at tdata[7:0]).
         # The extra swap here was incorrect - use pkt_data directly.
         pkt_data_swapped = Signal(32)
+
+        # Swapped or not swapped?
         self.comb += pkt_data_swapped.eq(pkt_data)  # no swap - pkt_data already correct
+        #self.comb += pkt_data_swapped.eq(Cat(pkt_data[24:32], pkt_data[16:24], pkt_data[8:16], pkt_data[0:8]))
+
         self.comb += [
             tlp_tx_fifo.sink.valid.eq(rx_is_tlp & ~tlp_tx_suppress),
             tlp_tx_fifo.sink.dat  .eq(pkt_data_swapped),
@@ -452,6 +456,9 @@ class PCILeechFIFO(Module):
         # byte0 = {R, Fmt[2:0], Type[4:0]}. Cpl=0x0a (fmt=000,type=01010),
         # CplD=0x4a (fmt=010,type=01010). Check bits[7:1] = {Fmt[2:0],Type[4:3]}:
         self.comb += tlp_is_cpl.eq(
+            # Swapped or not swapped?
+            #(self.tlp_rx.dat[25:32] == 0b0000101) |  # Cpl
+            #(self.tlp_rx.dat[25:32] == 0b0100101)    # CplD
             (self.tlp_rx.dat[1:8] == 0b0000101) |   # Cpl  byte0[7:1]=0b0000101
             (self.tlp_rx.dat[1:8] == 0b0100101)     # CplD byte0[7:1]=0b0100101
         )
