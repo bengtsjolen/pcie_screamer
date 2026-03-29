@@ -329,9 +329,14 @@ class PCILeechFIFO(Module):
         self.phy_id        = Signal(16) # PCIe BDF: {bus[7:0], dev[4:0], fn[2:0]}
         self.cfg_dcommand  = Signal(16) # PCIe Device Control register (dcommand)
 
-        # Diagnostic output: [15:8]=rx_seen_count[7:0], [7:0]=tlp_rx_fifo.level[7:0]
-        # Read via CMD register 0x0006 (ro, word_index 3)
-        self.tlp_rx_level  = Signal(16)
+        # Diagnostic output - read via CMD register 0x0006 (ro, word_index 3):
+        # [7:0]=tlp_rx_fifo.level, [13:8]=rx_seen_count[5:0],
+        # [14]=phy_source_seen (pcie_phy.source.valid after CDC),
+        # [15]=phy_raw_rx_seen (m_axis_rx_tvalid before CDC)
+        self.tlp_rx_level    = Signal(16)
+        self.phy_source_seen = Signal()  # driven from squirrel.py sys domain
+        self.phy_raw_rx_seen = Signal()  # driven from squirrel.py sys domain (CDC from pcie)
+        
 
         # ===================================================================
         # RX PATH: USB → dispatch
@@ -495,7 +500,13 @@ class PCILeechFIFO(Module):
                 rx_seen_count.eq(rx_seen_count + 1),
             )
         ]
-        self.comb += self.tlp_rx_level.eq(Cat(tlp_rx_fifo.level[0:8], rx_seen_count[0:8]))
+        #self.comb += self.tlp_rx_level.eq(Cat(tlp_rx_fifo.level[0:8], rx_seen_count[0:8]))
+        self.comb += self.tlp_rx_level.eq(Cat(
+            tlp_rx_fifo.level[0:8],  # [7:0]  fifo fill level
+            rx_seen_count[0:6],      # [13:8] beats reaching self.tlp_rx
+            self.phy_source_seen,    # [14]   pcie_phy.source.valid fired (after CDC)
+            self.phy_raw_rx_seen,    # [15]   m_axis_rx_tvalid fired (raw PCIe IP RX)
+        ))
 
         # ===================================================================
         # LOOPBACK FIFO: host→host echo  (64 deep, 34 bit)
@@ -596,16 +607,22 @@ class PCILeechFIFO(Module):
             #   byte0(0x000c)=0x7c=0b01111100: lnk_width=0b00,lnk_up=1,gen2=1,partner=1,upcfg=1,rate=1,done=0
             # word6: ufrisk returns 0x7c00: byte0=0x00, byte1=0x7c=lnk_up+caps
             # readback[7:0]=0, readback[15:8]=lnk_up/rate/caps byte
-            6:  cfg_ro_readback.eq(Cat(
-                    Constant(0, 8),         # byte 0x000d = 0 (low byte)
-                    self.phy_lnk_width[0:2],# ro[97:96] pl_sel_lnk_width
-                    self.phy_lnk_up,        # ro[98]    pl_phy_lnk_up
-                    Constant(1, 1),         # ro[99]    pl_link_gen2_cap = 1
-                    Constant(1, 1),         # ro[100]   pl_link_partner_gen2_supported = 1
-                    Constant(1, 1),         # ro[101]   pl_link_upcfg_cap = 1
-                    self.phy_lnk_rate,      # ro[102]   pl_sel_lnk_rate
-                    Constant(0, 1),         # ro[103]   pl_directed_change_done = 0
-                )),
+            #6:  cfg_ro_readback.eq(Cat(
+            #        Constant(0, 8),         # byte 0x000d = 0 (low byte)
+            #        self.phy_lnk_width[0:2],# ro[97:96] pl_sel_lnk_width
+            #        self.phy_lnk_up,        # ro[98]    pl_phy_lnk_up
+            #        Constant(1, 1),         # ro[99]    pl_link_gen2_cap = 1
+            #        Constant(1, 1),         # ro[100]   pl_link_partner_gen2_supported = 1
+            #        Constant(1, 1),         # ro[101]   pl_link_upcfg_cap = 1
+            #        self.phy_lnk_rate,      # ro[102]   pl_sel_lnk_rate
+            #        Constant(0, 1),         # ro[103]   pl_directed_change_done = 0
+            #)),
+            # word6 temporarily replaced with tlp_rx_level diagnostic:
+            # [7:0]=tlp_rx_fifo.level, [13:8]=rx_seen_count[5:0],
+            # [14]=phy_source_seen (after CDC), [15]=phy_raw_rx_seen (raw PCIe IP RX)
+            # Appears in usbmon as "000c????" - decode the ???? value
+            6:  cfg_ro_readback.eq(self.tlp_rx_level),
+
             11: cfg_ro_readback.eq(rw[176:192]),    # byte 0x16: pl_directed_link_*
             12: cfg_ro_readback.eq(self.cfg_dcommand), # byte 0x18: cfg_dcommand
             "default": cfg_ro_readback.eq(0),
