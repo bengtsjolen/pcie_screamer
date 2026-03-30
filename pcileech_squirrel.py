@@ -107,94 +107,92 @@ class TLP32To64Packer(Module):
                    )
                 )
 
-
 class TLP64To32Unpacker(Module):
     def __init__(self, swap_words=False):
         self.sink   = sink   = stream.Endpoint(phy_layout(64))
         self.source = source = stream.Endpoint(phy_layout(32))
         
-        # Buffered 64-bit beat split into two DWORD lanes.
-        low_dat   = Signal(32)
-        low_be    = Signal(4)
-        high_dat  = Signal(32)
-        high_be   = Signal(4)
+        # Buffered 64-bit beat.
+        lo_dat   = Signal(32)
+        hi_dat   = Signal(32)
+        lo_be    = Signal(4)
+        hi_be    = Signal(4)
+        lo_v     = Signal()
+        hi_v     = Signal()
         beat_last = Signal()
         
-        send_high = Signal(reset=0)
-        
-        low_valid  = Signal()
-        high_valid = Signal()
-        
-        self.comb += [
-            low_valid.eq(low_be != 0),
-            high_valid.eq(high_be != 0),
-        ]
-        
-        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
+        self.submodules.fsm = fsm = FSM(reset_state="LOAD")
         
         self.comb += [
             sink.ready.eq(0),
             source.valid.eq(0),
-            source.last.eq(0),
             source.dat.eq(0),
             source.be.eq(0),
+            source.last.eq(0),
         ]
         
-        # IDLE: accept exactly one 64-bit beat on handshake.
-        fsm.act("IDLE",
+        # Accept exactly one 64-bit beat.
+        fsm.act("LOAD",
                 sink.ready.eq(1),
                 If(sink.valid & sink.ready,
                    If(swap_words,
-                      NextValue(low_dat,   sink.dat[32:64]),
-                      NextValue(low_be,    sink.be[4:8]),
-                      NextValue(high_dat,  sink.dat[0:32]),
-                      NextValue(high_be,   sink.be[0:4]),
+                      NextValue(lo_dat, sink.dat[32:64]),
+                      NextValue(lo_be,  sink.be[4:8]),
+                      NextValue(hi_dat, sink.dat[0:32]),
+                      NextValue(hi_be,  sink.be[0:4]),
+                      NextValue(lo_v,   sink.be[4:8] != 0),
+                      NextValue(hi_v,   sink.be[0:4] != 0),
                       ).Else(
-                          NextValue(low_dat,   sink.dat[0:32]),
-                          NextValue(low_be,    sink.be[0:4]),
-                          NextValue(high_dat,  sink.dat[32:64]),
-                          NextValue(high_be,   sink.be[4:8]),
+                          NextValue(lo_dat, sink.dat[0:32]),
+                          NextValue(lo_be,  sink.be[0:4]),
+                          NextValue(hi_dat, sink.dat[32:64]),
+                          NextValue(hi_be,  sink.be[4:8]),
+                          NextValue(lo_v,   sink.be[0:4] != 0),
+                          NextValue(hi_v,   sink.be[4:8] != 0),
                       ),
                    NextValue(beat_last, sink.last),
-                   NextValue(send_high, 0),
-                   NextState("EMIT")
+                   If(swap_words,
+                      If(sink.be[4:8] != 0,
+                         NextState("EMIT_LO")
+                         ).Elif(sink.be[0:4] != 0,
+                                NextState("EMIT_HI")
+                                )
+                      ).Else(
+                          If(sink.be[0:4] != 0,
+                             NextState("EMIT_LO")
+                             ).Elif(sink.be[4:8] != 0,
+                                    NextState("EMIT_HI")
+                                    )
+                      )
                    )
                 )
         
-        # EMIT: emit low DWORD first if valid, otherwise skip to high.
-        fsm.act("EMIT",
-                If(~send_high,
-                   If(low_valid,
-                      source.valid.eq(1),
-                      source.dat.eq(low_dat),
-                      source.be.eq(low_be),
-                      source.last.eq(beat_last & ~high_valid),
-                      If(source.ready,
-                         If(high_valid,
-                            NextValue(send_high, 1),
-                            ).Else(
-                                NextState("IDLE")
-                            )
-                         )
-                      ).Elif(high_valid,
-                             # No low DWORD, emit high on next cycle.
-                             NextValue(send_high, 1)
-                             ).Else(
-                                 # Nothing valid in this beat.
-                                 NextState("IDLE")
-                             )
-                   ).Else(
-                       source.valid.eq(1),
-                       source.dat.eq(high_dat),
-                       source.be.eq(high_be),
-                       source.last.eq(beat_last),
-                       If(source.ready,
-                          NextState("IDLE")
-                          )
+        # Emit first 32-bit word.
+        fsm.act("EMIT_LO",
+                source.valid.eq(1),
+                source.dat.eq(lo_dat),
+                source.be.eq(lo_be),
+                source.last.eq(beat_last & ~hi_v),
+                If(source.ready,
+                   If(hi_v,
+                      NextState("EMIT_HI")
+                      ).Else(
+                          NextState("LOAD")
+                      )
                    )
-            )
+                )
         
-        
+        # Emit second 32-bit word.
+        fsm.act("EMIT_HI",
+                source.valid.eq(1),
+                source.dat.eq(hi_dat),
+                source.be.eq(hi_be),
+                source.last.eq(beat_last),
+                If(source.ready,
+                   NextState("LOAD")
+                   )
+                )
+
 
         
 
@@ -286,7 +284,7 @@ class PCIeSquirrel(SoCMini):
             # phy_layout maps directly to our tlp_rx/tlp_tx last signal.
             #
             # RX: PCIe bus → pcie_phy.source (64-bit) → conv → pcileech_fifo.tlp_rx (32-bit)
-            if 0: 
+            if 1: 
                 self.submodules.tlp_rx_conv = tlp_rx_conv = StrideConverter(
                     phy_layout(64), phy_layout(32), reverse=False)
             else:
