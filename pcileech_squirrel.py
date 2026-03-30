@@ -413,6 +413,84 @@ class PCIeSquirrel(SoCMini):
                     )),
                 ]
 
+            if 1:
+                rx_dbg0 = Signal(64)
+                rx_dbg1 = Signal(64)
+                rx_dbg2 = Signal(64)
+                rx_dbg3 = Signal(64)
+                rx_dbg4 = Signal(64)
+                rx_dbg5 = Signal(64)
+                rx_dbg6 = Signal(64)
+                rx_dbg7 = Signal(64)
+
+                rx_be0 = Signal(8)
+                rx_be1 = Signal(8)
+                rx_be2 = Signal(8)
+                rx_be3 = Signal(8)
+                rx_be4 = Signal(8)
+                rx_be5 = Signal(8)
+                rx_be6 = Signal(8)
+                rx_be7 = Signal(8)
+
+                rx_lasts = Signal(8)
+                rx_seen  = Signal()
+                rx_armed = Signal(reset=1)
+                rx_count = Signal(4)
+
+                self.sync += [
+                    If(ResetSignal(),
+                       rx_dbg0.eq(0), rx_dbg1.eq(0), rx_dbg2.eq(0), rx_dbg3.eq(0),
+                       rx_dbg4.eq(0), rx_dbg5.eq(0), rx_dbg6.eq(0), rx_dbg7.eq(0),
+                       rx_be0.eq(0),  rx_be1.eq(0),  rx_be2.eq(0),  rx_be3.eq(0),
+                       rx_be4.eq(0),  rx_be5.eq(0),  rx_be6.eq(0),  rx_be7.eq(0),
+                       rx_lasts.eq(0),
+                       rx_seen.eq(0),
+                       rx_armed.eq(1),
+                       rx_count.eq(0),
+                       ).Elif(rx_armed & self.pcie_phy.source.valid & self.pcie_phy.source.ready,
+                              rx_seen.eq(1),
+                              Case(rx_count, {
+                                  0: [rx_dbg0.eq(self.pcie_phy.source.dat), rx_be0.eq(self.pcie_phy.source.be), rx_lasts[0].eq(self.pcie_phy.source.last)],
+                                  1: [rx_dbg1.eq(self.pcie_phy.source.dat), rx_be1.eq(self.pcie_phy.source.be), rx_lasts[1].eq(self.pcie_phy.source.last)],
+                                  2: [rx_dbg2.eq(self.pcie_phy.source.dat), rx_be2.eq(self.pcie_phy.source.be), rx_lasts[2].eq(self.pcie_phy.source.last)],
+                                  3: [rx_dbg3.eq(self.pcie_phy.source.dat), rx_be3.eq(self.pcie_phy.source.be), rx_lasts[3].eq(self.pcie_phy.source.last)],
+                                  4: [rx_dbg4.eq(self.pcie_phy.source.dat), rx_be4.eq(self.pcie_phy.source.be), rx_lasts[4].eq(self.pcie_phy.source.last)],
+                                  5: [rx_dbg5.eq(self.pcie_phy.source.dat), rx_be5.eq(self.pcie_phy.source.be), rx_lasts[5].eq(self.pcie_phy.source.last)],
+                                  6: [rx_dbg6.eq(self.pcie_phy.source.dat), rx_be6.eq(self.pcie_phy.source.be), rx_lasts[6].eq(self.pcie_phy.source.last)],
+                                7: [
+                                    rx_dbg7.eq(self.pcie_phy.source.dat),
+                                    rx_be7.eq(self.pcie_phy.source.be),
+                                    rx_lasts[7].eq(self.pcie_phy.source.last),
+                                    rx_armed.eq(0),
+                                ],
+                              }),
+                              If(rx_count != 7,
+                                 rx_count.eq(rx_count + 1)
+                                 )
+                              )
+                ]
+                
+                self.comb += [
+                    pcileech_fifo.rxsink_dbg[0].eq(rx_dbg0),
+                    pcileech_fifo.rxsink_dbg[1].eq(rx_dbg1),
+                    pcileech_fifo.rxsink_dbg[2].eq(rx_dbg2),
+                    pcileech_fifo.rxsink_dbg[3].eq(rx_dbg3),
+                    pcileech_fifo.rxsink_dbg[4].eq(rx_dbg4),
+                    pcileech_fifo.rxsink_dbg[5].eq(rx_dbg5),
+                    pcileech_fifo.rxsink_dbg[6].eq(rx_dbg6),
+                    pcileech_fifo.rxsink_dbg[7].eq(rx_dbg7),
+                    pcileech_fifo.rxsink_be[0].eq(rx_be0),
+                    pcileech_fifo.rxsink_be[1].eq(rx_be1),
+                    pcileech_fifo.rxsink_be[2].eq(rx_be2),
+                    pcileech_fifo.rxsink_be[3].eq(rx_be3),
+                    pcileech_fifo.rxsink_be[4].eq(rx_be4),
+                    pcileech_fifo.rxsink_be[5].eq(rx_be5),
+                    pcileech_fifo.rxsink_be[6].eq(rx_be6),
+                    pcileech_fifo.rxsink_be[7].eq(rx_be7),
+                    pcileech_fifo.rxsink_lasts.eq(rx_lasts),
+                    pcileech_fifo.rxsink_flags.eq(Cat(rx_seen, rx_armed, rx_count, Constant(0, 10))),
+                ]
+                
             
             # PCIe reset driven by CMD register file.
             # rw[200] starts at 1 (core held in reset at startup).

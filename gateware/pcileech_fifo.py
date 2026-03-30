@@ -362,6 +362,13 @@ class PCILeechFIFO(Module):
         self.txsink_dbg_last0 = Signal()
         self.txsink_dbg_last1 = Signal()
         self.txsink_dbg_flags = Signal(16)
+
+        self.rxsink_dbg = Array(Signal(64) for _ in range(8))
+        self.rxsink_be  = Array(Signal(8)  for _ in range(8))
+        self.rxsink_lasts = Signal(8)
+        self.rxsink_flags = Signal(16)
+
+        
         
         # Timeout / snapshot outputs
         self.diag_force_pcie_reset = Signal()
@@ -1046,6 +1053,53 @@ class PCILeechFIFO(Module):
             18: ro_readback.eq(Cat(self.txsink_dbg_last0,
                                                           self.txsink_dbg_last1,
                                                           self.txsink_dbg_flags[2:16])),                 # 0x0024
+
+
+            19: ro_readback.eq(self.rxsink_dbg[0][ 0:16]),   # 0x0026
+            20: ro_readback.eq(self.rxsink_dbg[0][16:32]),   # 0x0028
+            21: ro_readback.eq(self.rxsink_dbg[0][32:48]),   # 0x002a
+            22: ro_readback.eq(self.rxsink_dbg[0][48:64]),   # 0x002c
+        
+            23: ro_readback.eq(self.rxsink_dbg[1][ 0:16]),   # 0x0026
+            24: ro_readback.eq(self.rxsink_dbg[1][16:32]),   # 0x0028
+            25: ro_readback.eq(self.rxsink_dbg[1][32:48]),   # 0x002a
+            26: ro_readback.eq(self.rxsink_dbg[1][48:64]),   # 0x002c
+
+            27: ro_readback.eq(self.rxsink_dbg[2][ 0:16]),   # 0x0026
+            28: ro_readback.eq(self.rxsink_dbg[2][16:32]),   # 0x0028
+            29: ro_readback.eq(self.rxsink_dbg[2][32:48]),   # 0x002a
+            30: ro_readback.eq(self.rxsink_dbg[2][48:64]),   # 0x002c
+
+            31: ro_readback.eq(self.rxsink_dbg[3][ 0:16]),   # 0x0026
+            32: ro_readback.eq(self.rxsink_dbg[3][16:32]),   # 0x0028
+            33: ro_readback.eq(self.rxsink_dbg[3][32:48]),   # 0x002a
+            34: ro_readback.eq(self.rxsink_dbg[3][48:64]),   # 0x002c
+            
+            35: ro_readback.eq(self.rxsink_dbg[4][ 0:16]),   # 0x0026
+            36: ro_readback.eq(self.rxsink_dbg[4][16:32]),   # 0x0028
+            37: ro_readback.eq(self.rxsink_dbg[4][32:48]),   # 0x002a
+            38: ro_readback.eq(self.rxsink_dbg[4][48:64]),   # 0x002c
+        
+            39: ro_readback.eq(self.rxsink_dbg[5][ 0:16]),   # 0x0026
+            40: ro_readback.eq(self.rxsink_dbg[5][16:32]),   # 0x0028
+            41: ro_readback.eq(self.rxsink_dbg[5][32:48]),   # 0x002a
+            42: ro_readback.eq(self.rxsink_dbg[5][48:64]),   # 0x002c
+        
+            43: ro_readback.eq(self.rxsink_dbg[6][ 0:16]),   # 0x0026
+            44: ro_readback.eq(self.rxsink_dbg[6][16:32]),   # 0x0028
+            45: ro_readback.eq(self.rxsink_dbg[6][32:48]),   # 0x002a
+            46: ro_readback.eq(self.rxsink_dbg[5][48:64]),   # 0x002c
+        
+            47: ro_readback.eq(self.rxsink_dbg[7][ 0:16]),   # 0x0026
+            48: ro_readback.eq(self.rxsink_dbg[7][16:32]),   # 0x0028
+            49: ro_readback.eq(self.rxsink_dbg[7][32:48]),   # 0x002a
+            50: ro_readback.eq(self.rxsink_dbg[7][48:64]),   # 0x002c
+    
+            51: ro_readback.eq(Cat(self.rxsink_be[0], self.rxsink_be[1])),  # 0x0060
+            52: ro_readback.eq(Cat(self.rxsink_be[2], self.rxsink_be[3])),  # 0x0062
+            53: ro_readback.eq(Cat(self.rxsink_be[4], self.rxsink_be[5])),  # 0x0064
+            54: ro_readback.eq(Cat(self.rxsink_be[6], self.rxsink_be[7])),  # 0x0066
+            55: ro_readback.eq(Cat(self.rxsink_lasts, self.rxsink_flags[0:8])),  # 0x0068
         })
 
         # Select ro[] or rw[] based on f_rw flag
