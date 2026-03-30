@@ -106,6 +106,98 @@ class TLP32To64Packer(Module):
                       )
                    )
                 )
+
+
+
+class TLP64To32Unpacker(Module):
+    def __init__(self, swap_words=False):
+        self.sink   = sink   = stream.Endpoint(phy_layout(64))
+        self.source = source = stream.Endpoint(phy_layout(32))
+        
+        low_dat   = Signal(32)
+        low_be    = Signal(4)
+        high_dat  = Signal(32)
+        high_be   = Signal(4)
+        beat_last = Signal()
+        
+        have_buf    = Signal(reset=0)
+        send_high   = Signal(reset=0)
+        low_valid   = Signal()
+        high_valid  = Signal()
+        
+        self.comb += [
+            low_valid.eq(low_be != 0),
+            high_valid.eq(high_be != 0),
+        ]
+        
+        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
+        
+        self.comb += [
+            sink.ready.eq(0),
+            source.valid.eq(0),
+            source.last.eq(0),
+            source.dat.eq(0),
+            source.be.eq(0),
+        ]
+        
+        fsm.act("IDLE",
+                sink.ready.eq(~have_buf),
+                If(~have_buf & sink.valid,
+                   If(swap_words,
+                      NextValue(low_dat,  sink.dat[32:64]),
+                      NextValue(low_be,   sink.be[4:8]),
+                      NextValue(high_dat, sink.dat[0:32]),
+                      NextValue(high_be,  sink.be[0:4]),
+                      ).Else(
+                          NextValue(low_dat,  sink.dat[0:32]),
+                          NextValue(low_be,   sink.be[0:4]),
+                          NextValue(high_dat, sink.dat[32:64]),
+                          NextValue(high_be,  sink.be[4:8]),
+                      ),
+                   NextValue(beat_last, sink.last),
+                   NextValue(have_buf, 1),
+                   NextValue(send_high, 0),
+                   NextState("SEND")
+                   )
+                )
+        
+        fsm.act("SEND",
+                If(~send_high,
+                   If(low_valid,
+                      source.valid.eq(1),
+                      source.dat.eq(low_dat),
+                      source.be.eq(low_be),
+                      source.last.eq(beat_last & ~high_valid),
+                      If(source.ready,
+                         If(high_valid,
+                            NextValue(send_high, 1),
+                            ).Else(
+                                NextValue(have_buf, 0),
+                                NextState("IDLE")
+                            )
+                         )
+                      ).Elif(high_valid,
+                             # No low DWORD, go straight to high DWORD.
+                             NextValue(send_high, 1)
+                             ).Else(
+                                 # Empty beat, just consume it.
+                                 NextValue(have_buf, 0),
+                                 NextState("IDLE")
+                             )
+                   ).Else(
+                       source.valid.eq(1),
+                       source.dat.eq(high_dat),
+                       source.be.eq(high_be),
+                       source.last.eq(beat_last),
+                       If(source.ready,
+                          NextValue(have_buf, 0),
+                          NextState("IDLE")
+                          )
+                   )
+                )
+        
+        
+
         
 
 # CRG ----------------------------------------------------------------------------------------------
@@ -196,11 +288,16 @@ class PCIeSquirrel(SoCMini):
             # phy_layout maps directly to our tlp_rx/tlp_tx last signal.
             #
             # RX: PCIe bus → pcie_phy.source (64-bit) → conv → pcileech_fifo.tlp_rx (32-bit)
-            self.submodules.tlp_rx_conv = tlp_rx_conv = StrideConverter(
-                phy_layout(64), phy_layout(32), reverse=False)
+            if 1: 
+                self.submodules.tlp_rx_conv = tlp_rx_conv = StrideConverter(
+                    phy_layout(64), phy_layout(32), reverse=False)
+            else:
+                self.submodules.tlp_rx_conv = tlp_rx_conv = TLP64To32Unpacker(
+                    swap_words=False
+                )
 
             # TX: pcileech_fifo.tlp_tx (32-bit) → conv → pcie_phy.sink (64-bit) → PCIe bus
-            if 1:
+            if 0:
                 self.submodules.tlp_tx_conv = tlp_tx_conv = StrideConverter(
                     phy_layout(32), phy_layout(64), reverse=False)
             else:
