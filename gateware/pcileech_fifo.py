@@ -329,6 +329,43 @@ class PCILeechFIFO(Module):
         self.phy_id        = Signal(16) # PCIe BDF: {bus[7:0], dev[4:0], fn[2:0]}
         self.cfg_dcommand  = Signal(16) # PCIe Device Control register (dcommand)
 
+        # Extra diagnostics from pcie_phy / wrappers
+        self.diag_tx_conv_seen   = Signal()  # tlp_tx_conv.source.valid & ready
+        self.diag_tx_axis_seen   = Signal()  # pcie_phy.s_axis_tx_tvalid & ready
+        self.diag_rx_axis_seen   = Signal()  # pcie_phy.m_axis_rx_tvalid
+        self.diag_tx_err_drop    = Signal()  # pcie_phy.tx_err_drop
+
+        self.tlp_tx_dbg0 = Signal(32)
+        self.tlp_tx_dbg1 = Signal(32)
+        self.tlp_tx_dbg2 = Signal(32)
+        self.tlp_tx_dbg3 = Signal(32)
+        self.tlp_tx_dbg_be0 = Signal(4)
+        self.tlp_tx_dbg_be1 = Signal(4)
+        self.tlp_tx_dbg_be2 = Signal(4)
+        self.tlp_tx_dbg_be3 = Signal(4)
+        self.tlp_tx_dbg_last0 = Signal()
+        self.tlp_tx_dbg_last1 = Signal()
+        self.tlp_tx_dbg_last2 = Signal()
+        self.tlp_tx_dbg_last3 = Signal()
+        dbg_armed   = Signal(reset=1)
+        dbg_count   = Signal(3)
+        dbg_seen    = Signal()
+
+        self.tx64_dbg0      = Signal(64)
+        self.tx64_dbg1      = Signal(64)
+        self.tx64_dbg_flags = Signal(16)  # low bits: seen/armed/count
+
+        self.txsink_dbg0      = Signal(64)
+        self.txsink_dbg1      = Signal(64)
+        self.txsink_dbg_be0   = Signal(8)
+        self.txsink_dbg_be1   = Signal(8)
+        self.txsink_dbg_last0 = Signal()
+        self.txsink_dbg_last1 = Signal()
+        self.txsink_dbg_flags = Signal(16)
+        
+        # Timeout / snapshot outputs
+        self.diag_force_pcie_reset = Signal()
+        
         # Diagnostic output - read via CMD register 0x0006 (ro, word_index 3):
         # [7:0]=tlp_rx_fifo.level, [13:8]=rx_seen_count[5:0],
         # [14]=phy_source_seen (pcie_phy.source.valid after CDC),
@@ -441,6 +478,56 @@ class PCILeechFIFO(Module):
             tlp_tx_fifo.source.connect(self.tlp_tx),
         ]
 
+
+
+
+        # TLP Debug
+        self.sync += [
+            If(ResetSignal(),
+               dbg_armed.eq(1),
+               dbg_count.eq(0),
+               dbg_seen.eq(0),
+               ).Elif(dbg_armed & self.tlp_tx.valid & self.tlp_tx.ready,
+                      dbg_seen.eq(1),
+                      Case(dbg_count, {
+                          0: [
+                              self.tlp_tx_dbg0.eq(self.tlp_tx.dat),
+                              self.tlp_tx_dbg_be0.eq(self.tlp_tx.be),
+                              self.tlp_tx_dbg_last0.eq(self.tlp_tx.last),
+                          ],
+                          1: [
+                              self.tlp_tx_dbg1.eq(self.tlp_tx.dat),
+                              self.tlp_tx_dbg_be1.eq(self.tlp_tx.be),
+                              self.tlp_tx_dbg_last1.eq(self.tlp_tx.last),
+                          ],
+                          2: [
+                              self.tlp_tx_dbg2.eq(self.tlp_tx.dat),
+                              self.tlp_tx_dbg_be2.eq(self.tlp_tx.be),
+                              self.tlp_tx_dbg_last2.eq(self.tlp_tx.last),
+                          ],
+                          3: [
+                              self.tlp_tx_dbg3.eq(self.tlp_tx.dat),
+                              self.tlp_tx_dbg_be3.eq(self.tlp_tx.be),
+                              self.tlp_tx_dbg_last3.eq(self.tlp_tx.last),
+                              dbg_armed.eq(0),
+                          ],
+                      }),
+                      If(dbg_count != 3,
+                         dbg_count.eq(dbg_count + 1)
+                         )
+                      )
+        ]
+        
+
+
+
+
+
+
+
+
+        
+
         # ===================================================================
         # TLP RX FIFO: PCIe→host  (256 deep, 32+1 bit)
         # Receives TLP words from pcie_phy RX, feeds TX mux port 3.
@@ -507,6 +594,96 @@ class PCILeechFIFO(Module):
             self.phy_source_seen,    # [14]   pcie_phy.source.valid fired (after CDC)
             self.phy_raw_rx_seen,    # [15]   m_axis_rx_tvalid fired (raw PCIe IP RX)
         ))
+
+        # -------------------------------------------------------------------
+        # PCIe timeout diagnostics / recovery
+        # -------------------------------------------------------------------
+        TIMEOUT_CYCLES = 200_000_000  # 2 seconds at 100 MHz sys clock
+
+        tx_axis_seen_count = Signal(8)
+        rx_axis_seen_count = Signal(8)
+        tx_err_drop_count  = Signal(8)
+
+        tx_axis_ever     = Signal()
+        rx_axis_ever     = Signal()
+        tx_err_drop_ever = Signal()
+
+        waiting_for_rx   = Signal()
+        stall_counter    = Signal(max=TIMEOUT_CYCLES + 1)
+        stall_hit        = Signal()
+        reset_holdoff    = Signal(24)  # ~0.16s at 100 MHz
+
+        # Snapshots captured when timeout hits
+        snap_tx_axis_seen_count = Signal(8)
+        snap_rx_axis_seen_count = Signal(8)
+        snap_tx_err_drop_count  = Signal(8)
+        snap_flags              = Signal(16)
+
+        self.sync += [
+            # Defaults
+            self.diag_force_pcie_reset.eq(0),
+            
+            # Live counters / sticky bits
+            If(self.diag_tx_axis_seen,
+               tx_axis_seen_count.eq(tx_axis_seen_count + 1),
+               tx_axis_ever.eq(1)
+               ),
+            If(self.diag_rx_axis_seen,
+               rx_axis_seen_count.eq(rx_axis_seen_count + 1),
+               rx_axis_ever.eq(1)
+               ),
+            If(self.diag_tx_err_drop,
+               tx_err_drop_count.eq(tx_err_drop_count + 1),
+               tx_err_drop_ever.eq(1)
+               ),
+
+            # Start watchdog on first TX beat, stop on any RX beat
+            If(~waiting_for_rx & self.diag_tx_axis_seen,
+               waiting_for_rx.eq(1),
+               stall_counter.eq(0)
+               ).Elif(waiting_for_rx & self.diag_rx_axis_seen,
+                      waiting_for_rx.eq(0),
+                      stall_counter.eq(0)
+                      ).Elif(waiting_for_rx & ~stall_hit,
+                             If(stall_counter < TIMEOUT_CYCLES,
+                                stall_counter.eq(stall_counter + 1)
+                                ).Else(
+                                    stall_hit.eq(1),
+                                    waiting_for_rx.eq(0),
+                                    
+                                    # Snapshot current diagnostics
+                                    snap_tx_axis_seen_count.eq(tx_axis_seen_count),
+                                    snap_rx_axis_seen_count.eq(rx_axis_seen_count),
+                                    snap_tx_err_drop_count.eq(tx_err_drop_count),
+                                    snap_flags.eq(Cat(
+                                        tx_axis_ever,      # bit 0
+                                        rx_axis_ever,      # bit 1
+                                        tx_err_drop_ever,  # bit 2
+                                        Constant(1, 1),    # bit 3 = stall_hit snapshot
+                                        Constant(0, 12)
+                                    )),
+                                    
+                                    # Start reset pulse
+                                    reset_holdoff.eq((1 << 24) - 1)
+                                )
+                             ),
+        
+            # Automatic PCIe reset pulse after timeout
+            If(reset_holdoff != 0,
+               self.diag_force_pcie_reset.eq(1),
+               reset_holdoff.eq(reset_holdoff - 1)
+               ),
+
+            # Optional: clear live TX/RX wait state after reset pulse finishes
+            If((reset_holdoff == 1)),
+            stall_hit.eq(0)
+        ]
+        
+
+
+
+
+        
 
         # ===================================================================
         # LOOPBACK FIFO: host→host echo  (64 deep, 34 bit)
@@ -622,7 +799,6 @@ class PCILeechFIFO(Module):
             # [14]=phy_source_seen (after CDC), [15]=phy_raw_rx_seen (raw PCIe IP RX)
             # Appears in usbmon as "000c????" - decode the ???? value
             6:  cfg_ro_readback.eq(self.tlp_rx_level),
-
             11: cfg_ro_readback.eq(rw[176:192]),    # byte 0x16: pl_directed_link_*
             12: cfg_ro_readback.eq(self.cfg_dcommand), # byte 0x18: cfg_dcommand
             "default": cfg_ro_readback.eq(0),
@@ -819,13 +995,57 @@ class PCILeechFIFO(Module):
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
             3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
-            4: ro_readback.eq(Cat(Signal(8, reset=VERSION_MINOR),
-                                  Signal(8, reset=VERSION_MAJOR))),
+            4: ro_readback.eq(Cat(Constant(VERSION_MINOR,8),
+                                  Constant(VERSION_MAJOR,8))),
             # DEVICE_ID response: need DWORD=000a0400 so pcileech uses small-tag profile
             # Cat puts first arg at LSB: Cat(lo, hi) → {hi, lo} in Verilog
             # We need readback[15:8]=DEVICE_ID so hi=DEVICE_ID → second arg has DEVICE_ID
             # Use named signals to ensure stable Migen elaboration order
             5: ro_readback.eq(Cat(Constant(0, 8), Constant(DEVICE_ID, 8))),  # DWORD=000a0400 → Tag=0x01 profile
+
+            # FIXME: extra status readbacks
+            6:  ro_readback.eq(Cat(snap_tx_axis_seen_count, snap_rx_axis_seen_count)),  # 0x000c
+            7:  ro_readback.eq(Cat(snap_tx_err_drop_count, snap_flags[0:8])),            # 0x000e
+
+
+            
+            #9:  ro_readback.eq(self.tlp_tx_dbg0[0:16]),   # 0x0012 low half dbg0
+            #10: ro_readback.eq(self.tlp_tx_dbg0[16:32]),  # 0x0014 high half dbg0
+            #11: ro_readback.ebq(self.tlp_tx_dbg1[0:16]),   # 0x0016
+            #12: ro_readback.eq(self.tlp_tx_dbg1[16:32]),  # 0x0018
+            #13: ro_readback.eq(self.tlp_tx_dbg2[0:16]),   # 0x001a
+            #14: ro_readback.eq(self.tlp_tx_dbg2[16:32]),  # 0x001c
+            #15: ro_readback.eq(self.tlp_tx_dbg3[0:16]),   # 0x001e
+            #16: ro_readback.eq(self.tlp_tx_dbg3[16:32]),  # 0x0020
+            #17: ro_readback.eq(Cat(self.tlp_tx_dbg_be0, self.tlp_tx_dbg_be1,
+            #                                              self.tlp_tx_dbg_be2, self.tlp_tx_dbg_be3)),           # 0x0022
+            #18: ro_readback.eq(Cat(self.tlp_tx_dbg_last0, self.tlp_tx_dbg_last1,
+            #                                              self.tlp_tx_dbg_last2, self.tlp_tx_dbg_last3,
+            #                                              dbg_seen, dbg_armed, Constant(0, 10))),               # 0x0024
+            
+
+            #9:  ro_readback.eq(self.tx64_dbg0[ 0:16]),   # 0x0012
+            #10: ro_readback.eq(self.tx64_dbg0[16:32]),   # 0x0014
+            #11: ro_readback.eq(self.tx64_dbg0[32:48]),   # 0x0016
+            #12: ro_readback.eq(self.tx64_dbg0[48:64]),   # 0x0018
+            #13: ro_readback.eq(self.tx64_dbg1[ 0:16]),   # 0x001a
+            #14: ro_readback.eq(self.tx64_dbg1[16:32]),   # 0x001c
+            #15: ro_readback.eq(self.tx64_dbg1[32:48]),   # 0x001e
+            #16: ro_readback.eq(self.tx64_dbg1[48:64]),   # 0x0020
+            #17: ro_readback.eq(self.tx64_dbg_flags),     # 0x0022
+
+            9:  ro_readback.eq(self.txsink_dbg0[ 0:16]),   # 0x0012
+            10: ro_readback.eq(self.txsink_dbg0[16:32]),   # 0x0014
+            11: ro_readback.eq(self.txsink_dbg0[32:48]),   # 0x0016
+            12: ro_readback.eq(self.txsink_dbg0[48:64]),   # 0x0018
+            13: ro_readback.eq(self.txsink_dbg1[ 0:16]),   # 0x001a
+            14: ro_readback.eq(self.txsink_dbg1[16:32]),   # 0x001c
+            15: ro_readback.eq(self.txsink_dbg1[32:48]),   # 0x001e
+            16: ro_readback.eq(self.txsink_dbg1[48:64]),   # 0x0020
+            17: ro_readback.eq(Cat(self.txsink_dbg_be0, self.txsink_dbg_be1)),   # 0x0022
+            18: ro_readback.eq(Cat(self.txsink_dbg_last0,
+                                                          self.txsink_dbg_last1,
+                                                          self.txsink_dbg_flags[2:16])),                 # 0x0024
         })
 
         # Select ro[] or rw[] based on f_rw flag

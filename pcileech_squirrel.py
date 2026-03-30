@@ -14,6 +14,7 @@ import argparse
 
 from migen import *
 from migen.genlib.resetsync import AsyncResetSynchronizer
+from migen.genlib.cdc import MultiReg
 
 from litex.build.generic_platform import *
 from litex.soc.cores.clock import *
@@ -32,6 +33,80 @@ from gateware.pcileech_fifo import PCILeechFIFO
 from litescope import LiteScopeAnalyzer
 
 from platforms.pcie_squirrel import Platform
+
+
+
+class TLP32To64Packer(Module):
+    def __init__(self, swap_words=False):
+        self.sink   = sink   = stream.Endpoint(phy_layout(32))
+        self.source = source = stream.Endpoint(phy_layout(64))
+        
+        # Stored first DWORD of a pair.
+        have_first  = Signal(reset=0)
+        first_dat   = Signal(32)
+        first_be    = Signal(4)
+        
+        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
+        
+        # Default assignments.
+        self.comb += [
+            source.valid.eq(0),
+            source.last.eq(0),
+            source.dat.eq(0),
+            source.be.eq(0),
+            sink.ready.eq(0),
+        ]
+        
+        fsm.act("IDLE",
+                sink.ready.eq(1),
+                If(sink.valid,
+                   # Single-DWORD packet: emit immediately as partial 64-bit beat.
+                   If(sink.last,
+                      source.valid.eq(1),
+                      source.last.eq(1),
+                      If(swap_words,
+                         # Put the single DWORD in the upper half.
+                         source.dat.eq(Cat(Constant(0, 32), sink.dat)),
+                         source.be.eq(Cat(Constant(0x0, 4), sink.be)),
+                         ).Else(
+                             # Put the single DWORD in the lower half.
+                             source.dat.eq(Cat(sink.dat, Constant(0, 32))),
+                             source.be.eq(Cat(sink.be, Constant(0x0, 4))),
+                         ),
+                    If(source.ready,
+                       sink.ready.eq(1),
+                       )
+                      ).Else(
+                          NextValue(first_dat, sink.dat),
+                          NextValue(first_be,  sink.be),
+                          NextValue(have_first, 1),
+                          NextState("HAVE_FIRST")
+                      )
+                   )
+                )
+        
+        fsm.act("HAVE_FIRST",
+                # Wait for second DWORD.
+                sink.ready.eq(1),
+                If(sink.valid,
+                   source.valid.eq(1),
+                   source.last.eq(sink.last),
+                   If(swap_words,
+                      # beat = {first, second} in bus-order terms reversed vs Cat order
+                      source.dat.eq(Cat(sink.dat, first_dat)),
+                      source.be.eq(Cat(sink.be, first_be)),
+                      ).Else(
+                          source.dat.eq(Cat(first_dat, sink.dat)),
+                          source.be.eq(Cat(first_be, sink.be)),
+                      ),
+                   If(source.ready,
+                      sink.ready.eq(1),
+                    NextValue(have_first, 0),
+                      NextState("IDLE")
+                      )
+                   )
+                )
+        
 
 # CRG ----------------------------------------------------------------------------------------------
 
@@ -125,9 +200,14 @@ class PCIeSquirrel(SoCMini):
                 phy_layout(64), phy_layout(32), reverse=False)
 
             # TX: pcileech_fifo.tlp_tx (32-bit) → conv → pcie_phy.sink (64-bit) → PCIe bus
-            self.submodules.tlp_tx_conv = tlp_tx_conv = StrideConverter(
-                phy_layout(32), phy_layout(64), reverse=False)
-
+            if 1:
+                self.submodules.tlp_tx_conv = tlp_tx_conv = StrideConverter(
+                    phy_layout(32), phy_layout(64), reverse=False)
+            else:
+                self.submodules.tlp_tx_conv = tlp_tx_conv = TLP32To64Packer(
+                    swap_words=False
+                )
+                
             self.comb += [
                 # RX path
                 self.pcie_phy.source.connect(tlp_rx_conv.sink),
@@ -137,6 +217,106 @@ class PCIeSquirrel(SoCMini):
                 tlp_tx_conv.source.connect(self.pcie_phy.sink),
             ]
 
+            if 0:
+                tx64_dbg0      = Signal(64)
+                tx64_dbg1      = Signal(64)
+                tx64_dbg_count = Signal(2)
+                tx64_dbg_seen  = Signal()
+                tx64_dbg_armed = Signal(reset=1)
+
+                self.sync += [
+                    If(ResetSignal(),
+                       tx64_dbg0.eq(0),
+                       tx64_dbg1.eq(0),
+                       tx64_dbg_count.eq(0),
+                       tx64_dbg_seen.eq(0),
+                       tx64_dbg_armed.eq(1),
+                       ).Elif(tx64_dbg_armed & tlp_tx_conv.source.valid & tlp_tx_conv.source.ready,
+                              tx64_dbg_seen.eq(1),
+                              Case(tx64_dbg_count, {
+                                  0: [tx64_dbg0.eq(tlp_tx_conv.source.dat)],
+                                  1: [
+                                      tx64_dbg1.eq(tlp_tx_conv.source.dat),
+                                      tx64_dbg_armed.eq(0),
+                                  ],
+                              }),
+                              If(tx64_dbg_count != 1,
+                                 tx64_dbg_count.eq(tx64_dbg_count + 1)
+                                 )
+                              )
+                ]
+
+                self.comb += [
+                    pcileech_fifo.tx64_dbg0.eq(tx64_dbg0),
+                    pcileech_fifo.tx64_dbg1.eq(tx64_dbg1),
+                    pcileech_fifo.tx64_dbg_flags.eq(Cat(
+                    tx64_dbg_seen,          # bit 0
+                        tx64_dbg_armed,         # bit 1
+                        tx64_dbg_count,         # bits 3:2
+                        Constant(0, 12),
+                    )),
+                ]
+
+            if 1:
+                txsink_dbg0      = Signal(64)
+                txsink_dbg1      = Signal(64)
+                txsink_dbg_be0   = Signal(8)
+                txsink_dbg_be1   = Signal(8)
+                txsink_dbg_last0 = Signal()
+                txsink_dbg_last1 = Signal()
+                txsink_dbg_seen  = Signal()
+                txsink_dbg_armed = Signal(reset=1)
+                txsink_dbg_count = Signal(2)
+            
+                self.sync += [
+                    If(ResetSignal(),
+                       txsink_dbg0.eq(0),
+                       txsink_dbg1.eq(0),
+                       txsink_dbg_be0.eq(0),
+                       txsink_dbg_be1.eq(0),
+                       txsink_dbg_last0.eq(0),
+                       txsink_dbg_last1.eq(0),
+                       txsink_dbg_seen.eq(0),
+                       txsink_dbg_armed.eq(1),
+                       txsink_dbg_count.eq(0),
+                       ).Elif(txsink_dbg_armed & self.pcie_phy.sink.valid & self.pcie_phy.sink.ready,
+                              txsink_dbg_seen.eq(1),
+                              Case(txsink_dbg_count, {
+                                  0: [
+                                      txsink_dbg0.eq(self.pcie_phy.sink.dat),
+                                      txsink_dbg_be0.eq(self.pcie_phy.sink.be),
+                                      txsink_dbg_last0.eq(self.pcie_phy.sink.last),
+                                  ],
+                                  1: [
+                                    txsink_dbg1.eq(self.pcie_phy.sink.dat),
+                                      txsink_dbg_be1.eq(self.pcie_phy.sink.be),
+                                      txsink_dbg_last1.eq(self.pcie_phy.sink.last),
+                                      txsink_dbg_armed.eq(0),
+                                  ],
+                              }),
+                              If(txsink_dbg_count != 1,
+                                 txsink_dbg_count.eq(txsink_dbg_count + 1)
+                                 )
+                            )
+                ]
+
+
+                self.comb += [
+                    pcileech_fifo.txsink_dbg0.eq(txsink_dbg0),
+                    pcileech_fifo.txsink_dbg1.eq(txsink_dbg1),
+                    pcileech_fifo.txsink_dbg_be0.eq(txsink_dbg_be0),
+                    pcileech_fifo.txsink_dbg_be1.eq(txsink_dbg_be1),
+                    pcileech_fifo.txsink_dbg_last0.eq(txsink_dbg_last0),
+                    pcileech_fifo.txsink_dbg_last1.eq(txsink_dbg_last1),
+                    pcileech_fifo.txsink_dbg_flags.eq(Cat(
+                        txsink_dbg_seen,    # bit 0
+                        txsink_dbg_armed,   # bit 1
+                        txsink_dbg_count,   # bits 3:2
+                        Constant(0, 12),
+                    )),
+                ]
+
+            
             # PCIe reset driven by CMD register file.
             # rw[200] starts at 1 (core held in reset at startup).
             # Host clears it via CMD write to bring PCIe core online.
@@ -155,7 +335,11 @@ class PCIeSquirrel(SoCMini):
                 pcileech_fifo.phy_id       .eq(self.pcie_phy.id),
                 pcileech_fifo.cfg_dcommand .eq(self.pcie_phy.dcommand),
             ]
-
+            self.comb += [
+                pcileech_fifo.diag_tx_axis_seen.eq(self.pcie_phy.s_axis_tx_tvalid & self.pcie_phy.s_axis_tx_tready),
+                pcileech_fifo.diag_rx_axis_seen.eq(self.pcie_phy.m_axis_rx_tvalid),
+                pcileech_fifo.diag_tx_err_drop.eq(self.pcie_phy.tx_err_drop),
+            ]
             if 1:
                 # Auto-set BME+MemEn once link is up
                 # Replace the combinational wr_en with a registered single-cycle pulse
@@ -187,6 +371,19 @@ class PCIeSquirrel(SoCMini):
         self.comb += self.msi.source.connect(self.pcie_phy.msi)
         self.add_csr("msi")
 
+        if 1:
+
+
+            source_seen_latch = Signal()
+            self.sync.sys += If(self.pcie_phy.source.valid, source_seen_latch.eq(1))
+            self.comb += pcileech_fifo.phy_source_seen.eq(source_seen_latch)
+
+            raw_rx_seen_pcie = Signal()
+            raw_rx_seen_sys  = Signal()
+            self.sync.pcie += If(self.pcie_phy.m_axis_rx_tvalid, raw_rx_seen_pcie.eq(1))
+            self.specials += MultiReg(raw_rx_seen_pcie, raw_rx_seen_sys)
+            self.comb += pcileech_fifo.phy_raw_rx_seen.eq(raw_rx_seen_sys)
+            
         # LEDs -------------------------------------------------------------------------------------
         if 0:
             #tx0_latch = Signal()
