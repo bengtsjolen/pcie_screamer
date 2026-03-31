@@ -1249,11 +1249,11 @@ class PCILeechFIFO(Module):
                 mux.p_pending[i].eq(0),
             ]
 
-        if 0:
+        if 1:
             self.sync += [
                     If(tlp_rx_fifo.sink.valid & tlp_rx_fifo.sink.ready,rxfifo_in_seen.eq(rxfifo_in_seen + 1)),
                     If(tlp_rx_fifo.source.valid & tlp_rx_fifo.source.ready,rxfifo_out_seen.eq(rxfifo_out_seen + 1)),
-                    If(mux.p_wr[3],mux_p3_wr_seen.eq(mux_p3_wr_seen + 1)),
+                #If(mux.p_wr[3],mux_p3_wr_seen.eq(mux_p3_wr_seen + 1)),
                 ]
             self.comb += [
                 self.diag_rxfifo_in_seen.eq(rxfifo_in_seen),
