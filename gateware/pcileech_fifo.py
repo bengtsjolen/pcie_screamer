@@ -1135,12 +1135,25 @@ class PCILeechFIFO(Module):
 
         # Mux rd_en driven by serializer being idle
         self.comb += mux.rd_en.eq(serializer.sink.ready)
-
+        
         # Connect mux output to serializer
-        self.comb += [
-            serializer.sink.valid.eq(mux.valid),
-            serializer.sink.data .eq(mux.dout),
-        ]
+        if 0:
+            self.comb += [
+                serializer.sink.valid.eq(mux.valid),
+                serializer.sink.data .eq(mux.dout),
+            ]
+        else:
+            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 2)
+
+            self.comb += [
+                # Mux writes frames into a small FIFO / skid buffer.
+                mux_out_fifo.sink.valid.eq(mux.valid),
+                mux_out_fifo.sink.data.eq(mux.dout),
+                mux.rd_en.eq(mux_out_fifo.sink.ready),
+                
+                # Serializer reads whole frames from the FIFO.
+                mux_out_fifo.source.connect(serializer.sink),
+            ]
 
         # Connect serializer output to USB TX with byte-swap.
         # FT601 swaps bytes on TX (pcileech_ft601.sv line 36), so we pre-swap
