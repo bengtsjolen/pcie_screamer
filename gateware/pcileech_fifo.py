@@ -119,7 +119,8 @@ class PCILeechMux(Module):
 
         # SV: p_req_data = rd_en (the global FT601-ready signal)
         for i in range(nports):
-            self.comb += self.p_req[i].eq(self.rd_en)
+            #self.comb += self.p_req[i].eq(self.rd_en)
+            self.comb += self.p_req[i].eq(en)
 
 
         # -------------------------------------------------------------------
