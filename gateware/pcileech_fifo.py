@@ -91,7 +91,7 @@ class PCILeechMux(Module):
         dout_buf_valid = Signal()
         dout_buf_data  = Signal(256)
 
-        self.sync += en.eq(~ResetSignal())
+        self.sync += en.eq(self.rd_en & ~ResetSignal())
         self.en_out = en  # expose for port ready gating
 
         # -------------------------------------------------------------------
@@ -125,10 +125,8 @@ class PCILeechMux(Module):
         self.comb += idx_max.eq(idle_idx + idle_wr)
 
         # SV: p_req_data = rd_en (the global FT601-ready signal)
-        # We use en as the equivalent — ports advance when mux is running
         for i in range(nports):
-            self.comb += self.p_req[i].eq(en)
-
+            self.comb += self.p_req[i].eq(self.rd_en)
 
 
         # -------------------------------------------------------------------
@@ -149,21 +147,12 @@ class PCILeechMux(Module):
             ctx_reg[0],  ctx_reg[1],                       # bits 255:248
         ))
 
-        # Output hold register — latches completed frame until serializer takes it.
-        # frame_valid stays high until rd_en (serializer ready) clears it.
-        # Exposed as self.frame_valid so port ready signals can gate on it.
-        frame_valid = Signal()
-        self.frame_valid = frame_valid
-        frame_data  = Signal(256)
-
+        self.busy = Signal()
         self.comb += [
-            self.valid.eq(frame_valid),
-            self.dout .eq(frame_data),
+            self.valid.eq(self.rd_en & (dout_buf_valid | dout_valid)),
+            self.dout.eq(Mux(dout_buf_valid, dout_buf_data, dout_data)),
+            self.busy.eq(dout_buf_valid | dout_valid),
         ]
-
-        # frame_ready: serializer consumed the frame this cycle
-        frame_consumed = Signal()
-        self.comb += frame_consumed.eq(frame_valid & self.rd_en)
 
         # -------------------------------------------------------------------
         # Sequential logic — mirrors SV pcileech_mux.sv always block exactly
@@ -174,7 +163,6 @@ class PCILeechMux(Module):
             If(ResetSignal(),
                 idx_base.eq(0),
                 idle_count.eq(0),
-                frame_valid.eq(0),
                 dout_valid.eq(0),
                 dout_buf_valid.eq(0),
             ).Else(
@@ -220,15 +208,6 @@ class PCILeechMux(Module):
                         data_reg[i].eq(data_reg[7+i]),
                         ctx_reg [i].eq(ctx_reg [7+i]),
                       ) for i in range(7)],
-                ),
-
-                # Frame valid/data: use dout_buf when rd_en is low
-                If(frame_consumed,
-                    frame_valid.eq(0),
-                ),
-                If(dout_valid,
-                    frame_valid.eq(1),
-                    frame_data.eq(dout_data),
                 ),
             )
         ]
@@ -1223,7 +1202,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[2].eq(0b0001),
             mux.p_wr [2].eq(cfg_tx_fifo.source.valid & mux.p_req[2]),
             cfg_tx_fifo.source.ready.eq(mux.p_req[2]),
-            mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.frame_valid),
+            mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.busy),
         ]
 
         # p3: TLP RX (PCIe → host)
