@@ -103,13 +103,6 @@ class PCILeechMux(Module):
         for i in range(nports):
             self.comb += p_idx[i+1].eq(p_idx[i] + self.p_wr[i])
 
-        # Per-port pending signals — set high when FIFO has data not yet in a mux
-        # slot AND mux is free. Suppresses idle padding to let back-to-back
-        # responses (e.g. batched 000a/000c reads) accumulate in the same frame.
-        self.p_pending = [Signal(name=f"p{i}_pending") for i in range(nports)]
-        any_pending = Signal()
-        self.comb += any_pending.eq(reduce(lambda a, b: a | b, self.p_pending))
-
         # Idle port — pads frame with 0xFFFFFFFF when stalled.
         # Threshold of 64 cycles (~430ns@150MHz): long enough for back-to-back
         # USB responses to both arrive, short enough to not delay single responses.
@@ -147,11 +140,11 @@ class PCILeechMux(Module):
             ctx_reg[0],  ctx_reg[1],                       # bits 255:248
         ))
 
-        self.busy = Signal()
+        #self.busy = Signal()
         self.comb += [
             self.valid.eq(self.rd_en & (dout_buf_valid | dout_valid)),
             self.dout.eq(Mux(dout_buf_valid, dout_buf_data, dout_data)),
-            self.busy.eq(dout_buf_valid | dout_valid),
+            #self.busy.eq(dout_buf_valid | dout_valid),
         ]
 
         # -------------------------------------------------------------------
@@ -1184,7 +1177,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[0].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
             mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
             loop_fifo.source.ready.eq(mux.p_req[0]),
-            mux.p_pending[0].eq(0),  # loopback does not suppress idle
+            #mux.p_pending[0].eq(0),  # loopback does not suppress idle
         ]
 
         # p1: CMD response — tag=0b11, ctx=0b00
@@ -1193,7 +1186,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[1].eq(0b0011),
             mux.p_wr [1].eq(cmd_tx_fifo.source.valid & mux.p_req[1]),
             cmd_tx_fifo.source.ready.eq(mux.p_req[1]),
-            mux.p_pending[1].eq(cmd_tx_fifo.source.valid),
+            #mux.p_pending[1].eq(cmd_tx_fifo.source.valid),
         ]
 
         # p2: CFG response — tag=0b01, ctx=0b00
@@ -1202,7 +1195,7 @@ class PCILeechFIFO(Module):
             mux.p_ctx[2].eq(0b0001),
             mux.p_wr [2].eq(cfg_tx_fifo.source.valid & mux.p_req[2]),
             cfg_tx_fifo.source.ready.eq(mux.p_req[2]),
-            mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.busy),
+            #mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.busy),
         ]
 
         # p3: TLP RX (PCIe → host)
@@ -1216,7 +1209,7 @@ class PCILeechFIFO(Module):
                                 Constant(0, 1))),             # bit[3] = 0
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3]),
-            mux.p_pending[3].eq(tlp_rx_fifo.source.valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
+            #mux.p_pending[3].eq(tlp_rx_fifo.source.valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
         ]
 
         # p4-p7: stubs
@@ -1225,7 +1218,7 @@ class PCILeechFIFO(Module):
                 mux.p_din[i].eq(0),
                 mux.p_ctx[i].eq(0),
                 mux.p_wr [i].eq(0),
-                mux.p_pending[i].eq(0),
+                #mux.p_pending[i].eq(0),
             ]
 
         if 1:
