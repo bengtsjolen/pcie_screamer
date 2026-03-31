@@ -305,6 +305,7 @@ class PCIeSquirrel(SoCMini):
                 # RX path
                 self.pcie_phy.source.connect(tlp_rx_conv.sink),
                 tlp_rx_conv.source.connect(pcileech_fifo.tlp_rx),
+                
                 # TX path
                 pcileech_fifo.tlp_tx.connect(tlp_tx_conv.sink),
                 tlp_tx_conv.source.connect(self.pcie_phy.sink),
@@ -486,6 +487,38 @@ class PCIeSquirrel(SoCMini):
                     pcileech_fifo.rxsink_lasts.eq(rx_lasts),
                     pcileech_fifo.rxsink_flags.eq(Cat(rx_seen, rx_armed, rx_count, Constant(0, 10))),
                 ]
+
+
+
+            if 1:
+                rx64_seen       = Signal(16)
+                rx32_seen       = Signal(16)
+                ser_out_seen    = Signal(16)
+                usbtx_seen      = Signal(16)
+                self.comb += [
+                    pcileech_fifo.diag_rx64_seen.eq(rx64_seen),
+                    pcileech_fifo.diag_rx32_seen.eq(rx32_seen),
+                    pcileech_fifo.diag_ser_out_seen.eq(ser_out_seen),
+                    pcileech_fifo.diag_usbtx_seen.eq(usbtx_seen),
+                ]
+                self.sync += [
+                    If(self.pcie_phy.source.valid & self.pcie_phy.source.ready,
+                       rx64_seen.eq(rx64_seen + 1)
+                       ),
+                    If(tlp_rx_conv.source.valid & tlp_rx_conv.source.ready,
+                       rx32_seen.eq(rx32_seen + 1)
+                       ),
+                ]
+                
+                self.sync += [
+                    If(pcileech_fifo.serializer.source.valid & pcileech_fifo.serializer.source.ready,
+                       ser_out_seen.eq(ser_out_seen + 1)
+                       ),
+                    If(self.usb_phy.sink.valid & self.usb_phy.sink.ready,
+                       usbtx_seen.eq(usbtx_seen + 1)
+                       ),
+                ]
+                
                 
             
             # PCIe reset driven by CMD register file.

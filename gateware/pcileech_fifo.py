@@ -367,7 +367,20 @@ class PCILeechFIFO(Module):
         self.rxsink_be  = Array(Signal(8)  for _ in range(8))
         self.rxsink_lasts = Signal(8)
         self.rxsink_flags = Signal(16)
+        
+        # Flow counters captured in top-level / locally.
+        self.diag_rx64_seen      = Signal(16)
+        self.diag_rx32_seen      = Signal(16)
+        self.diag_ser_out_seen   = Signal(16)
+        self.diag_usbtx_seen     = Signal(16)
+        
+        self.diag_rxfifo_in_seen = Signal(16)
+        self.diag_rxfifo_out_seen= Signal(16)
+        self.diag_mux_p3_wr_seen = Signal(16)
 
+        rxfifo_in_seen   = Signal(16)
+        rxfifo_out_seen  = Signal(16)
+        mux_p3_wr_seen   = Signal(16)
         
         
         # Timeout / snapshot outputs
@@ -569,6 +582,12 @@ class PCILeechFIFO(Module):
                 )
             )
         ]
+
+
+
+
+
+        
         # Gate TLP RX into FIFO: first beat requires Cpl/CplD, subsequent beats follow filter state
         tlp_rx_gated_valid = Signal()
         self.comb += [
@@ -1100,6 +1119,15 @@ class PCILeechFIFO(Module):
             53: ro_readback.eq(Cat(self.rxsink_be[4], self.rxsink_be[5])),  # 0x0064
             54: ro_readback.eq(Cat(self.rxsink_be[6], self.rxsink_be[7])),  # 0x0066
             55: ro_readback.eq(Cat(self.rxsink_lasts, self.rxsink_flags[0:8])),  # 0x0068
+
+            56: ro_readback.eq(self.diag_rx64_seen),       # 0x0070
+            57: ro_readback.eq(self.diag_rx32_seen),       # 0x0072
+            58: ro_readback.eq(self.diag_rxfifo_in_seen),  # 0x0074
+            59: ro_readback.eq(self.diag_rxfifo_out_seen), # 0x0076
+            60: ro_readback.eq(self.diag_mux_p3_wr_seen),  # 0x0078
+            61: ro_readback.eq(self.diag_ser_out_seen),    # 0x007a
+            62: ro_readback.eq(self.diag_usbtx_seen),      # 0x007c
+            
         })
 
         # Select ro[] or rw[] based on f_rw flag
@@ -1130,6 +1158,8 @@ class PCILeechFIFO(Module):
         # ===================================================================
         self.submodules.mux        = mux        = PCILeechMux(nports=8)
         self.submodules.serializer = serializer = MuxSerializer()
+
+        
 
         # Mux rd_en driven by serializer being idle
         self.comb += mux.rd_en.eq(serializer.sink.ready)
@@ -1218,3 +1248,19 @@ class PCILeechFIFO(Module):
                 mux.p_wr [i].eq(0),
                 mux.p_pending[i].eq(0),
             ]
+
+        if 0:
+            self.sync += [
+                    If(tlp_rx_fifo.sink.valid & tlp_rx_fifo.sink.ready,rxfifo_in_seen.eq(rxfifo_in_seen + 1)),
+                    If(tlp_rx_fifo.source.valid & tlp_rx_fifo.source.ready,rxfifo_out_seen.eq(rxfifo_out_seen + 1)),
+                    If(mux.p_wr[3],mux_p3_wr_seen.eq(mux_p3_wr_seen + 1)),
+                ]
+            self.comb += [
+                self.diag_rxfifo_in_seen.eq(rxfifo_in_seen),
+                self.diag_rxfifo_out_seen.eq(rxfifo_out_seen),
+                self.diag_mux_p3_wr_seen.eq(mux_p3_wr_seen),
+            ]
+        
+
+
+            

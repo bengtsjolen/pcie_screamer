@@ -82,7 +82,7 @@ def main(argv, stdout, environ):
     first = int(args[0])
     step=7
     #step=20
-    total=40
+    total=48
     for i in range(first,first+total,step):
         #print("cycle")
         if 0:
