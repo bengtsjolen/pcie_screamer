@@ -464,7 +464,8 @@ class PCILeechFIFO(Module):
         #self.comb += pkt_data_swapped.eq(Cat(pkt_data[24:32], pkt_data[16:24], pkt_data[8:16], pkt_data[0:8]))
 
         self.comb += [
-            tlp_tx_fifo.sink.valid.eq(rx_is_tlp & ~tlp_tx_suppress),
+            #tlp_tx_fifo.sink.valid.eq(rx_is_tlp & ~tlp_tx_suppress),
+            tlp_tx_fifo.sink.valid.eq(rx_is_tlp & ~(tlp_tx_suppress & pkt_last)),
             tlp_tx_fifo.sink.dat  .eq(pkt_data_swapped),
             tlp_tx_fifo.sink.be   .eq(0xf),
             tlp_tx_fifo.sink.last .eq(pkt_last),
