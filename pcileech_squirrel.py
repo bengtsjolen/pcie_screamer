@@ -40,72 +40,73 @@ class TLP32To64Packer(Module):
     def __init__(self, swap_words=False):
         self.sink   = sink   = stream.Endpoint(phy_layout(32))
         self.source = source = stream.Endpoint(phy_layout(64))
-        
+
         # Stored first DWORD of a pair.
-        have_first  = Signal(reset=0)
-        first_dat   = Signal(32)
-        first_be    = Signal(4)
-        
+        first_dat = Signal(32)
+        first_be  = Signal(4)
+
         self.submodules.fsm = fsm = FSM(reset_state="IDLE")
-        
-        # Default assignments.
+
+        # Default: nothing happening.
         self.comb += [
             source.valid.eq(0),
-            source.last.eq(0),
-            source.dat.eq(0),
-            source.be.eq(0),
-            sink.ready.eq(0),
+            source.last .eq(0),
+            source.dat  .eq(0),
+            source.be   .eq(0),
+            sink.ready  .eq(0),
         ]
-        
+
+        # ---- IDLE: waiting for first DWORD of a pair (or a lone last) ----
         fsm.act("IDLE",
+            If(sink.valid & sink.last,
+                # Single-DWORD packet: emit immediately as partial 64-bit beat.
+                # CRITICAL: only consume when output can accept.
+                source.valid.eq(1),
+                source.last .eq(1),
+                If(swap_words,
+                    source.dat.eq(Cat(Constant(0, 32), sink.dat)),
+                    source.be .eq(Cat(Constant(0x0, 4), sink.be)),
+                ).Else(
+                    source.dat.eq(Cat(sink.dat, Constant(0, 32))),
+                    source.be .eq(Cat(sink.be,  Constant(0x0, 4))),
+                ),
+                sink.ready.eq(source.ready),   # ← FIX: was unconditional 1
+            ).Elif(sink.valid,
+                # First of a pair: latch and move on.  No output yet,
+                # so we can always accept.
                 sink.ready.eq(1),
-                If(sink.valid,
-                   # Single-DWORD packet: emit immediately as partial 64-bit beat.
-                   If(sink.last,
-                      source.valid.eq(1),
-                      source.last.eq(1),
-                      If(swap_words,
-                         # Put the single DWORD in the upper half.
-                         source.dat.eq(Cat(Constant(0, 32), sink.dat)),
-                         source.be.eq(Cat(Constant(0x0, 4), sink.be)),
-                         ).Else(
-                             # Put the single DWORD in the lower half.
-                             source.dat.eq(Cat(sink.dat, Constant(0, 32))),
-                             source.be.eq(Cat(sink.be, Constant(0x0, 4))),
-                         ),
-                    If(source.ready,
-                       sink.ready.eq(1),
-                       )
-                      ).Else(
-                          NextValue(first_dat, sink.dat),
-                          NextValue(first_be,  sink.be),
-                          NextValue(have_first, 1),
-                          NextState("HAVE_FIRST")
-                      )
-                   )
-                )
-        
+                NextValue(first_dat, sink.dat),
+                NextValue(first_be,  sink.be),
+                NextState("HAVE_FIRST"),
+            ).Else(
+                # No data — stay idle, ready to accept.
+                sink.ready.eq(1),
+            )
+        )
+
+        # ---- HAVE_FIRST: waiting for second DWORD to form a 64-bit pair ----
         fsm.act("HAVE_FIRST",
-                # Wait for second DWORD.
-                sink.ready.eq(1),
-                If(sink.valid,
-                   source.valid.eq(1),
-                   source.last.eq(sink.last),
-                   If(swap_words,
-                      # beat = {first, second} in bus-order terms reversed vs Cat order
-                      source.dat.eq(Cat(sink.dat, first_dat)),
-                      source.be.eq(Cat(sink.be, first_be)),
-                      ).Else(
-                          source.dat.eq(Cat(first_dat, sink.dat)),
-                          source.be.eq(Cat(first_be, sink.be)),
-                      ),
-                   If(source.ready,
-                      sink.ready.eq(1),
-                    NextValue(have_first, 0),
-                      NextState("IDLE")
-                      )
-                   )
+            If(sink.valid,
+                # Pair ready: emit both DWORDs as one 64-bit beat.
+                source.valid.eq(1),
+                source.last .eq(sink.last),
+                If(swap_words,
+                    source.dat.eq(Cat(sink.dat, first_dat)),
+                    source.be .eq(Cat(sink.be,  first_be)),
+                ).Else(
+                    source.dat.eq(Cat(first_dat, sink.dat)),
+                    source.be .eq(Cat(first_be,  sink.be)),
+                ),
+                # CRITICAL: only consume when output can accept.
+                sink.ready.eq(source.ready),   # ← FIX: was unconditional 1
+                If(source.ready,
+                    NextState("IDLE"),
                 )
+            )
+            # If no data: sink.ready stays 0 (default), we wait.
+            # (Could set sink.ready=1 here too — doesn't matter since
+            #  sink.valid=0 means no handshake either way.)
+        )
 
 class TLP64To32Unpacker(Module):
     def __init__(self, swap_words=False):
@@ -193,6 +194,77 @@ class TLP64To32Unpacker(Module):
                    )
                 )
 
+class StrideConverterBEFilter(Module):
+    """Strip ghost words (be=0) from a StrideConverter 64→32 output.
+
+    Inserts 1 cycle of latency.  Correctly moves the 'last' flag from
+    a ghost word back onto the preceding real word.
+
+    Connect:  StrideConverter.source → BEFilter.sink
+              BEFilter.source → downstream (pcileech_fifo.tlp_rx)
+    """
+    def __init__(self):
+        self.sink   = sink   = stream.Endpoint(phy_layout(32))
+        self.source = source = stream.Endpoint(phy_layout(32))
+
+        # Pipeline register
+        buf_dat  = Signal(32)
+        buf_be   = Signal(4)
+        buf_last = Signal()
+
+        # Combinational peek at the incoming word
+        is_ghost = Signal()
+        self.comb += is_ghost.eq(sink.valid & (sink.be == 0))
+
+        self.submodules.fsm = fsm = FSM(reset_state="EMPTY")
+
+        # ---- EMPTY: buffer has no word, not producing output ----
+        fsm.act("EMPTY",
+            source.valid.eq(0),
+            # Accept any real (non-ghost) word into the buffer.
+            # Ghost-when-empty shouldn't happen in normal operation,
+            # but if it does, just consume and stay empty.
+            sink.ready.eq(1),
+            If(sink.valid & ~is_ghost,
+                NextValue(buf_dat,  sink.dat),
+                NextValue(buf_be,   sink.be),
+                NextValue(buf_last, sink.last),
+                NextState("FULL"),
+            )
+        )
+
+        # ---- FULL: present the buffered word, peek at the next ----
+        fsm.act("FULL",
+            source.valid.eq(1),
+            source.dat .eq(buf_dat),
+            source.be  .eq(buf_be),
+            # Merge ghost's 'last' into our output combinationally:
+            # if the very next word is a ghost (be=0, last=1), we set
+            # last=1 on THIS word and discard the ghost.
+            source.last.eq(buf_last | is_ghost),
+
+            If(source.ready,
+                # Output word accepted — advance the pipeline.
+                sink.ready.eq(1),
+                If(is_ghost,
+                    # Ghost consumed (its last was merged above).
+                    # Nothing real to buffer → go empty.
+                    NextState("EMPTY"),
+                ).Elif(sink.valid,
+                    # Real word: latch into buffer, stay full.
+                    NextValue(buf_dat,  sink.dat),
+                    NextValue(buf_be,   sink.be),
+                    NextValue(buf_last, sink.last),
+                    # NextState stays "FULL" implicitly
+                ).Else(
+                    # No new word available — drain buffer, go empty.
+                    NextState("EMPTY"),
+                )
+            ).Else(
+                # Downstream stalled — hold everything.
+                sink.ready.eq(0),
+            )
+        )
 
         
 
@@ -287,6 +359,9 @@ class PCIeSquirrel(SoCMini):
             if 1: 
                 self.submodules.tlp_rx_conv = tlp_rx_conv = StrideConverter(
                     phy_layout(64), phy_layout(32), reverse=False)
+                self.submodules.tlp_rx_filt = tlp_rx_filt = StrideConverterBEFilter()
+
+                
             else:
                 self.submodules.tlp_rx_conv = tlp_rx_conv = TLP64To32Unpacker(
                     swap_words=False
@@ -304,7 +379,8 @@ class PCIeSquirrel(SoCMini):
             self.comb += [
                 # RX path
                 self.pcie_phy.source.connect(tlp_rx_conv.sink),
-                tlp_rx_conv.source.connect(pcileech_fifo.tlp_rx),
+                tlp_rx_conv.source.connect(tlp_rx_filt.sink),
+                tlp_rx_filt.source.connect(pcileech_fifo.tlp_rx),
                 
                 # TX path
                 pcileech_fifo.tlp_tx.connect(tlp_tx_conv.sink),
