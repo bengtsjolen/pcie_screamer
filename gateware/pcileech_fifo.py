@@ -950,6 +950,60 @@ class PCILeechFIFO(Module):
             self.pcie_rst_subsys.eq(rw_pcie_rst_subsys),
         ]
 
+        # ===================================================================
+        # Inactivity timer (matches pcileech_fifo.sv)
+        #
+        # rw[16]    = enable
+        # rw[95:64] = tick count (how many ticks of inactivity before firing)
+        #
+        # A 64-bit free-running counter (tickcount64) increments every cycle.
+        # When enabled and no CMD write has occurred for 'ticks' cycles,
+        # a dummy CMD response word is pushed into cmd_tx_fifo.  This flows
+        # through the mux → serializer → FT601 → USB, unblocking the host's
+        # FT_ReadPipe call so pcileech can check completion status.
+        #
+        # The host configures the timer during init via CMD write to rw[16]
+        # and rw[95:64].  Typical value: ~100k ticks = ~1ms at 100 MHz.
+        # ===================================================================
+        tickcount64        = Signal(64)
+        inactivity_base    = Signal(64)
+        inactivity_fire    = Signal()
+        timer_enable       = Signal()
+        timer_ticks        = Signal(32)
+
+        self.comb += [
+            timer_enable.eq(rw[16]),
+            timer_ticks .eq(rw[64:96]),
+        ]
+
+        # Free-running 64-bit tick counter
+        self.sync += tickcount64.eq(tickcount64 + 1)
+
+        # Timer fires when: enabled, no CMD write this cycle, cmd_tx_fifo
+        # has space, and enough ticks have elapsed since base was set.
+        # Comparison: (inactivity_base + timer_ticks) < tickcount64
+        # Use subtraction to avoid 64+32 bit add: (tickcount64 - inactivity_base) > timer_ticks
+        inactivity_elapsed = Signal(64)
+        self.comb += [
+            inactivity_elapsed.eq(tickcount64 - inactivity_base),
+            inactivity_fire.eq(
+                timer_enable
+                & ~in_cmd_write
+                & ~in_cmd_read
+                & cmd_tx_fifo.sink.ready
+                & (inactivity_elapsed > timer_ticks)
+            ),
+        ]
+
+        # Update base: reset on CMD write (activity), advance on timer fire
+        self.sync += [
+            If(in_cmd_write,
+                inactivity_base.eq(tickcount64),
+            ).Elif(inactivity_fire,
+                inactivity_base.eq(tickcount64),
+            )
+        ]
+
         # CMD read response → cmd_tx_fifo
         # Response format (matches pcileech_fifo.sv):
         #   [31:16] = in_addr_byte (echoed address)
@@ -1114,17 +1168,38 @@ class PCILeechFIFO(Module):
         # CMD TX response format (matches pcileech_fifo.sv lines 361-365):
         #   [31:16] = in_cmd_address_byte  (echoed back)
         #   [15:0]  = {data_in[7:0], data_in[15:8]}  (byte-swapped 16-bit value)
+        # CMD TX response: either a real CMD read response or an inactivity
+        # timer keepalive.  CMD reads take priority.
+        #
+        # Keepalive data: looks like a CMD read of ro[0] (magic=0xab89).
+        # pcileech parses it as a normal CMD frame, doesn't match any
+        # pending register read, and discards it.  The important thing
+        # is that data flows through the mux → FT601 → USB so the host's
+        # FT_ReadPipe unblocks.
+        cmd_tx_valid = Signal()
+        cmd_tx_data  = Signal(32)
+
         self.comb += [
-            # Response format: transmitted MSB-first, host reads LE.
-            # Host needs: dwData[15:0] = byteswap(addr), dwData[23:16] = value_lo, dwData[31:24] = value_hi
-            # Since serializer transmits X[31:24] first → dwData[7:0]=X[31:24], dwData[15:8]=X[23:16], etc.
-            # So: X = Cat(value[0:8], value[8:16], addr[0:8], addr[8:16])
-            cmd_tx_fifo.sink.valid.eq(in_cmd_read & ~ResetSignal()),
-            cmd_tx_fifo.sink.data .eq(Cat(
-                readback[0:8], readback[8:16],          # X[15:0]  = value (lo byte, hi byte)
-                in_addr_byte[0:8], in_addr_byte[8:16],  # X[31:16] = addr (lo byte, hi byte)
-            )),
-            cmd_tx_fifo.sink.last.eq(1),
+            If(in_cmd_read,
+                cmd_tx_valid.eq(1),
+                cmd_tx_data .eq(Cat(
+                    readback[0:8], readback[8:16],
+                    in_addr_byte[0:8], in_addr_byte[8:16],
+                )),
+            ).Elif(inactivity_fire,
+                cmd_tx_valid.eq(1),
+                # Keepalive word: addr=0x0000, value=0xab89 (ro magic)
+                cmd_tx_data .eq(Cat(
+                    Constant(0x89, 8), Constant(0xab, 8),  # value bytes
+                    Constant(0x00, 8), Constant(0x00, 8),  # addr bytes
+                )),
+            ).Else(
+                cmd_tx_valid.eq(0),
+                cmd_tx_data .eq(0),
+            ),
+            cmd_tx_fifo.sink.valid.eq(cmd_tx_valid & ~ResetSignal()),
+            cmd_tx_fifo.sink.data .eq(cmd_tx_data),
+            cmd_tx_fifo.sink.last .eq(1),
         ]
 
         # ===================================================================
