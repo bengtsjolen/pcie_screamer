@@ -260,6 +260,91 @@ class MuxSerializer(Module):
         )
 
 
+class MuxSerializer(Module):
+    def __init__(self):
+        self.sink   = stream.Endpoint([("data", 256)])
+        self.source = stream.Endpoint([("data", 32)])
+        
+        buf   = Signal(256)
+        count = Signal(3)
+        
+        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
+        
+        fsm.act("IDLE",
+                self.sink.ready.eq(1),
+                If(self.sink.valid,
+                   NextValue(buf,   self.sink.data),
+                   NextValue(count, 7),
+                   NextState("SEND"),
+                   )
+                )
+        fsm.act("SEND",
+                self.source.valid.eq(1),
+                self.source.data.eq(buf[224:256]),
+                If(self.source.ready,
+                   NextValue(buf, buf << 32),
+                   If(count == 0,
+                      NextState("IDLE"),
+                      ).Else(
+                          NextValue(count, count - 1),
+                      )
+                   )
+                )
+
+
+class MuxSerializer(Module):
+    def __init__(self):
+        self.sink   = stream.Endpoint([("data", 256)])
+        self.source = stream.Endpoint([("data", 32)])
+        
+        buf   = Signal(256)
+        count = Signal(3)
+        rsync = Signal(3)
+        
+        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
+        
+        fsm.act("IDLE",
+                self.sink.ready.eq(1),
+                If(self.sink.valid,
+                   NextValue(buf,   self.sink.data),
+                   NextValue(count, 7),
+                   NextValue(rsync, 4),
+                   NextState("RESYNC"),
+                   )
+                )
+        fsm.act("RESYNC",
+                self.source.valid.eq(1),
+                self.source.data.eq(0x66665555),
+                If(self.source.ready,
+                   If(rsync == 0,
+                      NextState("SEND"),
+                      ).Else(
+                          NextValue(rsync, rsync - 1),
+                      )
+                   )
+                )
+        fsm.act("SEND",
+                self.source.valid.eq(1),
+                self.source.data.eq(buf[224:256]),
+                If(self.source.ready,
+                   If(count == 0,
+                      # Last word sent — try to grab next frame immediately
+                      self.sink.ready.eq(1),
+                      If(self.sink.valid,
+                         # Back-to-back: load next frame, skip RESYNC
+                         NextValue(buf,   self.sink.data),
+                         NextValue(count, 7),
+                         # Stay in SEND
+                         ).Else(
+                             NextState("IDLE"),
+                         )
+                      ).Else(
+                          NextValue(buf, buf << 32),
+                          NextValue(count, count - 1),
+                      )
+                   )
+                )
+        
 # ---------------------------------------------------------------------------
 # PCILeechFIFO
 #
@@ -774,7 +859,8 @@ class PCILeechFIFO(Module):
             # readback[7:0]=lnk_width byte, readback[15:8]=ltssm byte
             5:  cfg_ro_readback.eq(Cat(
                     Constant(0, 3),         # ro[90:88] pl_tx_pm_state = 0
-                    self.phy_lnk_width[0:3],# ro[93:91] pl_initial_link_width
+                    self.phy_lnk_width[0:2],# ro[93:91] pl_initial_link_width
+                    Constant((0, 1),
                     Constant(0, 2),         # ro[95:94] pl_lane_reversal = 0
                     self.phy_ltssm[0:6],    # ro[85:80] bits[5:0] = ltssm
                     Constant(0, 2),         # ro[87:86] pl_rx_pm_state = 0
@@ -784,21 +870,21 @@ class PCILeechFIFO(Module):
             #   byte0(0x000c)=0x7c=0b01111100: lnk_width=0b00,lnk_up=1,gen2=1,partner=1,upcfg=1,rate=1,done=0
             # word6: ufrisk returns 0x7c00: byte0=0x00, byte1=0x7c=lnk_up+caps
             # readback[7:0]=0, readback[15:8]=lnk_up/rate/caps byte
-            #6:  cfg_ro_readback.eq(Cat(
-            #        Constant(0, 8),         # byte 0x000d = 0 (low byte)
-            #        self.phy_lnk_width[0:2],# ro[97:96] pl_sel_lnk_width
-            #        self.phy_lnk_up,        # ro[98]    pl_phy_lnk_up
-            #        Constant(1, 1),         # ro[99]    pl_link_gen2_cap = 1
-            #        Constant(1, 1),         # ro[100]   pl_link_partner_gen2_supported = 1
-            #        Constant(1, 1),         # ro[101]   pl_link_upcfg_cap = 1
-            #        self.phy_lnk_rate,      # ro[102]   pl_sel_lnk_rate
-            #        Constant(0, 1),         # ro[103]   pl_directed_change_done = 0
-            #)),
+            6:  cfg_ro_readback.eq(Cat(
+                    Constant(0, 8),         # byte 0x000d = 0 (low byte)
+                    self.phy_lnk_width[0:2],# ro[97:96] pl_sel_lnk_width
+                    self.phy_lnk_up,        # ro[98]    pl_phy_lnk_up
+                    Constant(1, 1),         # ro[99]    pl_link_gen2_cap = 1
+                    Constant(1, 1),         # ro[100]   pl_link_partner_gen2_supported = 1
+                    Constant(1, 1),         # ro[101]   pl_link_upcfg_cap = 1
+                    self.phy_lnk_rate,      # ro[102]   pl_sel_lnk_rate
+                    Constant(0, 1),         # ro[103]   pl_directed_change_done = 0
+            )),
             # word6 temporarily replaced with tlp_rx_level diagnostic:
             # [7:0]=tlp_rx_fifo.level, [13:8]=rx_seen_count[5:0],
             # [14]=phy_source_seen (after CDC), [15]=phy_raw_rx_seen (raw PCIe IP RX)
             # Appears in usbmon as "000c????" - decode the ???? value
-            6:  cfg_ro_readback.eq(self.tlp_rx_level),
+            #6:  cfg_ro_readback.eq(self.tlp_rx_level),
             11: cfg_ro_readback.eq(rw[176:192]),    # byte 0x16: pl_directed_link_*
             12: cfg_ro_readback.eq(self.cfg_dcommand), # byte 0x18: cfg_dcommand
             "default": cfg_ro_readback.eq(0),
@@ -989,18 +1075,26 @@ class PCILeechFIFO(Module):
             inactivity_fire.eq(
                 timer_enable
                 & ~in_cmd_write
-                & ~in_cmd_read
+                #& ~in_cmd_read
+                #& ~cmd_rx_fifo.source.valid
+                #& ~cfg_rx_fifo.source.valid
+                #& ~tlp_tx_fifo.sink.valid
                 & cmd_tx_fifo.sink.ready
                 & (inactivity_elapsed > timer_ticks)
             ),
         ]
 
         # Update base: reset on CMD write (activity), advance on timer fire
+
+        usb_com_activity = Signal()
+        self.comb += usb_com_activity.eq(self.usb_rx.valid)
         self.sync += [
-            If(in_cmd_write,
+            If(usb_com_activity, # | ~self.usb_rx.ready,
+               #If(in_cmd_write | in_cmd_read,
                 inactivity_base.eq(tickcount64),
             ).Elif(inactivity_fire,
                 inactivity_base.eq(tickcount64),
+                rw[16].eq(0)
             )
         ]
 
@@ -1189,10 +1283,11 @@ class PCILeechFIFO(Module):
             ).Elif(inactivity_fire,
                 cmd_tx_valid.eq(1),
                 # Keepalive word: addr=0x0000, value=0xab89 (ro magic)
-                cmd_tx_data .eq(Cat(
-                    Constant(0x89, 8), Constant(0xab, 8),  # value bytes
-                    Constant(0x00, 8), Constant(0x00, 8),  # addr bytes
-                )),
+                #cmd_tx_data .eq(Cat(
+                #    Constant(0x89, 8), Constant(0xab, 8),  # value bytes
+                #    Constant(0x00, 8), Constant(0x00, 8),  # addr bytes
+                #)),
+                cmd_tx_data.eq(0xffffcede)
             ).Else(
                 cmd_tx_valid.eq(0),
                 cmd_tx_data .eq(0),
