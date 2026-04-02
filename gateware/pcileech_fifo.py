@@ -216,84 +216,6 @@ class PCILeechMux(Module):
 # ---------------------------------------------------------------------------
 class MuxSerializer(Module):
     def __init__(self):
-        self.sink   = stream.Endpoint([("data", 256)])  # from PCILeechMux
-        self.source = stream.Endpoint([("data", 32)])   # to FT601
-
-        buf   = Signal(256)
-        count = Signal(3)   # remaining words to send (0 = done)
-        rsync = Signal(3)   # resync words remaining
-
-        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
-
-        fsm.act("IDLE",
-            self.sink.ready.eq(1),
-            If(self.sink.valid,
-                NextValue(buf,   self.sink.data),
-                NextValue(count, 7),
-                NextValue(rsync, 4),   # will send rsync+1 = 5 resync words
-                NextState("RESYNC"),
-            )
-        )
-        fsm.act("RESYNC",
-            self.source.valid.eq(1),
-            self.source.data.eq(0x66665555),
-            If(self.source.ready,
-                If(rsync == 0,
-                    NextState("SEND"),
-                ).Else(
-                    NextValue(rsync, rsync - 1),
-                )
-            )
-        )
-        fsm.act("SEND",
-            self.source.valid.eq(1),
-            # Word 0 is at MSB — shift left by 32 each cycle
-            self.source.data.eq(buf[224:256]),
-            If(self.source.ready,
-                NextValue(buf, buf << 32),
-                If(count == 0,
-                    NextState("IDLE"),
-                ).Else(
-                    NextValue(count, count - 1),
-                )
-            )
-        )
-
-
-class MuxSerializer(Module):
-    def __init__(self):
-        self.sink   = stream.Endpoint([("data", 256)])
-        self.source = stream.Endpoint([("data", 32)])
-        
-        buf   = Signal(256)
-        count = Signal(3)
-        
-        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
-        
-        fsm.act("IDLE",
-                self.sink.ready.eq(1),
-                If(self.sink.valid,
-                   NextValue(buf,   self.sink.data),
-                   NextValue(count, 7),
-                   NextState("SEND"),
-                   )
-                )
-        fsm.act("SEND",
-                self.source.valid.eq(1),
-                self.source.data.eq(buf[224:256]),
-                If(self.source.ready,
-                   NextValue(buf, buf << 32),
-                   If(count == 0,
-                      NextState("IDLE"),
-                      ).Else(
-                          NextValue(count, count - 1),
-                      )
-                   )
-                )
-
-
-class MuxSerializer(Module):
-    def __init__(self):
         self.sink   = stream.Endpoint([("data", 256)])
         self.source = stream.Endpoint([("data", 32)])
         
@@ -860,7 +782,7 @@ class PCILeechFIFO(Module):
             5:  cfg_ro_readback.eq(Cat(
                     Constant(0, 3),         # ro[90:88] pl_tx_pm_state = 0
                     self.phy_lnk_width[0:2],# ro[93:91] pl_initial_link_width
-                    Constant((0, 1),
+                    Constant(0, 1),
                     Constant(0, 2),         # ro[95:94] pl_lane_reversal = 0
                     self.phy_ltssm[0:6],    # ro[85:80] bits[5:0] = ltssm
                     Constant(0, 2),         # ro[87:86] pl_rx_pm_state = 0
