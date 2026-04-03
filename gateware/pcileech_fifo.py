@@ -119,8 +119,8 @@ class PCILeechMux(Module):
 
         # SV: p_req_data = rd_en (the global FT601-ready signal)
         for i in range(nports):
-            #self.comb += self.p_req[i].eq(self.rd_en)
             self.comb += self.p_req[i].eq(en)
+            #self.comb += self.p_req[i].eq(self.rd_en)
 
 
         # -------------------------------------------------------------------
@@ -141,11 +141,9 @@ class PCILeechMux(Module):
             ctx_reg[0],  ctx_reg[1],                       # bits 255:248
         ))
 
-        #self.busy = Signal()
         self.comb += [
             self.valid.eq(self.rd_en & (dout_buf_valid | dout_valid)),
             self.dout.eq(Mux(dout_buf_valid, dout_buf_data, dout_data)),
-            #self.busy.eq(dout_buf_valid | dout_valid),
         ]
 
         # -------------------------------------------------------------------
@@ -266,6 +264,268 @@ class MuxSerializer(Module):
                       )
                    )
                 )
+
+class MuxSerializer(Module):
+    def __init__(self):
+        self.sink   = stream.Endpoint([("data", 256)])
+        self.source = stream.Endpoint([("data", 32)])
+        
+        buf        = Signal(256)
+        count      = Signal(3)
+        rsync      = Signal(3)
+        
+        next_buf   = Signal(256)
+        next_valid = Signal()
+    
+        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
+        
+        self.comb += [
+            self.sink.ready.eq(0),
+            self.source.valid.eq(0),
+            self.source.data.eq(0),
+        ]
+        
+        fsm.act("IDLE",
+                self.sink.ready.eq(1),
+                If(self.sink.valid,
+                   NextValue(buf, self.sink.data),
+                   NextValue(count, 7),
+                   NextValue(rsync, 4),
+                   NextValue(next_valid, 0),
+                   NextState("RESYNC"),
+                   )
+                )
+        
+        fsm.act("RESYNC",
+                self.source.valid.eq(1),
+                self.source.data.eq(0x66665555),
+                If(self.source.ready,
+                   If(rsync == 0,
+                      NextState("SEND"),
+                      ).Else(
+                          NextValue(rsync, rsync - 1),
+                      )
+                   )
+                )
+        
+        fsm.act("SEND",
+                If(~next_valid,
+                   self.sink.ready.eq(1),
+                   If(self.sink.valid,
+                      NextValue(next_buf, self.sink.data),
+                      NextValue(next_valid, 1),
+                      )
+                   ),
+                
+                self.source.valid.eq(1),
+                self.source.data.eq(buf[224:256]),
+                
+                If(self.source.ready,
+                   If(count == 0,
+                      If(next_valid,
+                         NextValue(buf, next_buf),
+                         NextValue(count, 7),
+                         NextValue(next_valid, 0),
+                         # stay in SEND, no RESYNC
+                         ).Else(
+                             NextState("IDLE"),
+                         )
+                      ).Else(
+                          NextValue(buf, buf << 32),
+                          NextValue(count, count - 1),
+                      )
+                   )
+                )
+
+class xxMuxSerializer(Module):
+    def __init__(self):
+        self.sink   = stream.Endpoint([("data", 256)])
+        self.source = stream.Endpoint([("data", 32)])
+        
+        buf   = Signal(256)
+        count = Signal(3)
+        rsync = Signal(3)
+        
+        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
+        
+        fsm.act("IDLE",
+                # Always ready — matches SV where rd_en=1 during idle.
+                # Mux can accumulate words via en=registered(rd_en).
+                self.sink.ready.eq(1),
+                If(self.sink.valid,
+                   NextValue(buf,   self.sink.data),
+                   NextValue(count, 7),
+                   NextValue(rsync, 4),
+                   NextState("RESYNC"),
+                   )
+                )
+        fsm.act("RESYNC",
+                # During RESYNC, sink.ready=0. rd_en=0. en=0 (next cycle).
+                # Mux pauses — matches SV behavior during send.
+                self.source.valid.eq(1),
+                self.source.data.eq(0x66665555),
+                If(self.source.ready,
+                   If(rsync == 0,
+                      NextState("SEND"),
+                      ).Else(
+                          NextValue(rsync, rsync - 1),
+                      )
+                   )
+                )
+        fsm.act("SEND",
+                self.source.valid.eq(1),
+                self.source.data.eq(buf[224:256]),
+                If(self.source.ready,
+                   If(count == 0,
+                      # Done — go back to IDLE (not back-to-back).
+                      # IDLE has sink.ready=1, so if a frame is waiting,
+                      # it's taken immediately (1 cycle IDLE → RESYNC).
+                      # This matches SV: ~7 cycles IDLE + 5+8 SEND = ~20 cycles.
+                      NextState("IDLE"),
+                      ).Else(
+                          NextValue(buf, buf << 32),
+                          NextValue(count, count - 1),
+                      )
+                   )
+                )
+
+class MuxWordQueueTX(Module):
+    def __init__(self, idle_threshold=64):
+        self.sink   = stream.Endpoint([("data", 256)])  # from PCILeechMux
+        self.source = stream.Endpoint([("data", 32)])   # to usb_tx / FT601
+        
+        # Match SV idea: ask for more data when queue occupancy is low.
+        # Expose this as "sink.ready" so mux.rd_en can be driven directly from it.
+        #
+        # Queue storage: 5 words, like FT601_DATA_OUT[0..4] in SV.
+        q0 = Signal(32)
+        q1 = Signal(32)
+        q2 = Signal(32)
+        q3 = Signal(32)
+        q4 = Signal(32)
+        q_count = Signal(3)   # 0..5
+        
+        # One pending 256-bit frame from mux.
+        frame_buf   = Signal(256)
+        frame_valid = Signal()
+        frame_idx   = Signal(4)   # 0..7 words remaining position
+        
+        # Idle tracking: after a long idle, next burst gets sync preload.
+        idle_count    = Signal(max=idle_threshold + 1)
+        need_resync   = Signal(reset=1)
+        
+        # -----------------------------
+        # Helpers
+        # -----------------------------
+        def q_word(n):
+            return [q0, q1, q2, q3, q4][n]
+        
+        queue_empty = Signal()
+        queue_full  = Signal()
+        low_water   = Signal()
+        
+        self.comb += [
+            queue_empty.eq(q_count == 0),
+            queue_full.eq(q_count == 5),
+            # Close to SV behavior: request more when occupancy is 2 or 3.
+            low_water.eq((q_count == 2) | (q_count == 3)),
+        ]
+        
+        # source side: always drive from queue head
+        self.comb += [
+            self.source.valid.eq(q_count != 0),
+            self.source.data.eq(q0),
+        ]
+        
+        # sink side: request another 256-bit frame only when:
+        # - no frame already buffered
+        # - queue occupancy is low enough to accept a refill
+        #
+        # This is the analog of SV din_req_data.
+        self.comb += [
+            self.sink.ready.eq((~frame_valid) & low_water),
+        ]
+        
+        # -----------------------------
+        # Sequential behavior
+        # -----------------------------
+        self.sync += [
+            # ---------------------------------
+            # Track long idle
+            # ---------------------------------
+            If(queue_empty & ~frame_valid,
+               If(idle_count < idle_threshold,
+                  idle_count.eq(idle_count + 1)
+                  ).Else(
+                      need_resync.eq(1)
+                  )
+               ).Else(
+                   idle_count.eq(0)
+               ),
+            
+            # ---------------------------------
+            # Drain one word to USB
+            # ---------------------------------
+            If(self.source.valid & self.source.ready,
+               q0.eq(q1),
+               q1.eq(q2),
+               q2.eq(q3),
+               q3.eq(q4),
+               q4.eq(0),
+               If(q_count != 0,
+                  q_count.eq(q_count - 1)
+                  )
+               ),
+            
+            # ---------------------------------
+            # Capture a mux frame when requested
+            # ---------------------------------
+            If(self.sink.valid & self.sink.ready,
+               frame_buf.eq(self.sink.data),
+               frame_valid.eq(1),
+               frame_idx.eq(0)
+               ),
+            
+            # ---------------------------------
+            # If we need resync and queue is empty, preload 5 sync words.
+            # This matches the "sync burst after long idle" behavior.
+            # ---------------------------------
+            If(need_resync & (q_count == 0) & ~frame_valid,
+               q0.eq(0x66665555),
+               q1.eq(0x66665555),
+               q2.eq(0x66665555),
+               q3.eq(0x66665555),
+               q4.eq(0x66665555),
+               q_count.eq(5),
+               need_resync.eq(0)
+               ),
+            
+            # ---------------------------------
+            # Expand buffered 256-bit frame into queue words.
+            # Only push when queue has space.
+            # Word order is MSB-first:
+            #   word0 = bits[255:224]
+            #   ...
+            #   word7 = bits[31:0]
+            # ---------------------------------
+            If(frame_valid & (q_count != 5),
+               Case(q_count, {
+                   0: [q0.eq(frame_buf[224:256])],
+                   1: [q1.eq(frame_buf[224:256])],
+                   2: [q2.eq(frame_buf[224:256])],
+                   3: [q3.eq(frame_buf[224:256])],
+                   4: [q4.eq(frame_buf[224:256])],
+               }),
+               q_count.eq(q_count + 1),
+               frame_buf.eq(frame_buf << 32),
+               If(frame_idx == 7,
+                  frame_valid.eq(0)
+                  ).Else(
+                      frame_idx.eq(frame_idx + 1)
+                  )
+               )
+        ]
+
         
 # ---------------------------------------------------------------------------
 # PCILeechFIFO
@@ -463,17 +723,9 @@ class PCILeechFIFO(Module):
         ]
         # pkt_data byte order: rx_word already byteswaps FT601 data to match
         # Xilinx PCIe IP s_axis_tx_tdata byte order (DW0 byte0 at tdata[7:0]).
-        # The extra swap here was incorrect - use pkt_data directly.
-        pkt_data_swapped = Signal(32)
-
-        # Swapped or not swapped?
-        self.comb += pkt_data_swapped.eq(pkt_data)  # no swap - pkt_data already correct
-        #self.comb += pkt_data_swapped.eq(Cat(pkt_data[24:32], pkt_data[16:24], pkt_data[8:16], pkt_data[0:8]))
-
         self.comb += [
-            #tlp_tx_fifo.sink.valid.eq(rx_is_tlp & ~tlp_tx_suppress),
             tlp_tx_fifo.sink.valid.eq(rx_is_tlp & ~(tlp_tx_suppress & pkt_last)),
-            tlp_tx_fifo.sink.dat  .eq(pkt_data_swapped),
+            tlp_tx_fifo.sink.dat  .eq(pkt_data),
             tlp_tx_fifo.sink.be   .eq(0xf),
             tlp_tx_fifo.sink.last .eq(pkt_last),
             tlp_tx_fifo.source.connect(self.tlp_tx),
@@ -549,9 +801,6 @@ class PCILeechFIFO(Module):
         # byte0 = {R, Fmt[2:0], Type[4:0]}. Cpl=0x0a (fmt=000,type=01010),
         # CplD=0x4a (fmt=010,type=01010). Check bits[7:1] = {Fmt[2:0],Type[4:3]}:
         self.comb += tlp_is_cpl.eq(
-            # Swapped or not swapped?
-            #(self.tlp_rx.dat[25:32] == 0b0000101) |  # Cpl
-            #(self.tlp_rx.dat[25:32] == 0b0100101)    # CplD
             (self.tlp_rx.dat[1:8] == 0b0000101) |   # Cpl  byte0[7:1]=0b0000101
             (self.tlp_rx.dat[1:8] == 0b0100101)     # CplD byte0[7:1]=0b0100101
         )
@@ -594,7 +843,6 @@ class PCILeechFIFO(Module):
                 rx_seen_count.eq(rx_seen_count + 1),
             )
         ]
-        #self.comb += self.tlp_rx_level.eq(Cat(tlp_rx_fifo.level[0:8], rx_seen_count[0:8]))
         self.comb += self.tlp_rx_level.eq(Cat(
             tlp_rx_fifo.level[0:8],  # [7:0]  fifo fill level
             rx_seen_count[0:6],      # [13:8] beats reaching self.tlp_rx
@@ -789,7 +1037,6 @@ class PCILeechFIFO(Module):
             # ufrisk observed: 000a1608 → value=0x1608, bytes={0x08,0x16}
             #   byte0(0x000a)=0x16=pl_ltssm=22(L0), byte1(0x000b)=0x08=pl_init_lnk_width=1(x1)
             # word5: ufrisk returns 0x1608: byte0=0x08=lnk_width, byte1=0x16=ltssm
-            # readback[7:0]=lnk_width byte, readback[15:8]=ltssm byte
             5:  cfg_ro_readback.eq(Cat(
                     Constant(0, 3),         # ro[90:88] pl_tx_pm_state = 0
                     initial_link_width,     # ro[93:91] pl_initial_link_width (was self.phy_lnk_width[0:2])
@@ -812,11 +1059,6 @@ class PCILeechFIFO(Module):
                     self.phy_lnk_rate,      # ro[102]   pl_sel_lnk_rate
                     Constant(0, 1),         # ro[103]   pl_directed_change_done = 0
             )),
-            # word6 temporarily replaced with tlp_rx_level diagnostic:
-            # [7:0]=tlp_rx_fifo.level, [13:8]=rx_seen_count[5:0],
-            # [14]=phy_source_seen (after CDC), [15]=phy_raw_rx_seen (raw PCIe IP RX)
-            # Appears in usbmon as "000c????" - decode the ???? value
-            #6:  cfg_ro_readback.eq(self.tlp_rx_level),
             11: cfg_ro_readback.eq(rw[176:192]),    # byte 0x16: pl_directed_link_*
             12: cfg_ro_readback.eq(self.cfg_dcommand), # byte 0x18: cfg_dcommand
             "default": cfg_ro_readback.eq(0),
@@ -1021,8 +1263,7 @@ class PCILeechFIFO(Module):
         usb_com_activity = Signal()
         self.comb += usb_com_activity.eq(self.usb_rx.valid)
         self.sync += [
-            If(usb_com_activity, # | ~self.usb_rx.ready,
-               #If(in_cmd_write | in_cmd_read,
+            If(usb_com_activity,
                 inactivity_base.eq(tickcount64),
             ).Elif(inactivity_fire,
                 inactivity_base.eq(tickcount64),
@@ -1083,11 +1324,12 @@ class PCILeechFIFO(Module):
             # Use named signals to ensure stable Migen elaboration order
             5: ro_readback.eq(Cat(Constant(0, 8), Constant(DEVICE_ID, 8))),  # DWORD=000a0400 → Tag=0x01 profile
 
+
+
+            
             # FIXME: extra status readbacks
             6:  ro_readback.eq(Cat(snap_tx_axis_seen_count, snap_rx_axis_seen_count)),  # 0x000c
             7:  ro_readback.eq(Cat(snap_tx_err_drop_count, snap_flags[0:8])),            # 0x000e
-
-
             
             #9:  ro_readback.eq(self.tlp_tx_dbg0[0:16]),   # 0x0012 low half dbg0
             #10: ro_readback.eq(self.tlp_tx_dbg0[16:32]),  # 0x0014 high half dbg0
@@ -1102,7 +1344,6 @@ class PCILeechFIFO(Module):
             #18: ro_readback.eq(Cat(self.tlp_tx_dbg_last0, self.tlp_tx_dbg_last1,
             #                                              self.tlp_tx_dbg_last2, self.tlp_tx_dbg_last3,
             #                                              dbg_seen, dbg_armed, Constant(0, 10))),               # 0x0024
-            
 
             #9:  ro_readback.eq(self.tx64_dbg0[ 0:16]),   # 0x0012
             #10: ro_readback.eq(self.tx64_dbg0[16:32]),   # 0x0014
@@ -1214,12 +1455,11 @@ class PCILeechFIFO(Module):
                 )),
             ).Elif(inactivity_fire,
                 cmd_tx_valid.eq(1),
-                # Keepalive word: addr=0x0000, value=0xab89 (ro magic)
-                #cmd_tx_data .eq(Cat(
-                #    Constant(0x89, 8), Constant(0xab, 8),  # value bytes
-                #    Constant(0x00, 8), Constant(0x00, 8),  # addr bytes
-                #)),
-                cmd_tx_data.eq(0xffffcede)
+                # Keepalive word: match ufrisk pcileech_fifo.sv inactivity marker
+                cmd_tx_data .eq(Cat(
+                    Constant(0xDE, 8), Constant(0xCE, 8),  # value = 0xCEDE
+                    Constant(0xFF, 8), Constant(0xFF, 8),  # addr  = 0xFFFF
+                )),
             ).Else(
                 cmd_tx_valid.eq(0),
                 cmd_tx_data .eq(0),
@@ -1241,13 +1481,8 @@ class PCILeechFIFO(Module):
         #self.comb += mux.rd_en.eq(serializer.sink.ready)
         
         # Connect mux output to serializer
-        if 0:
-            self.comb += [
-                serializer.sink.valid.eq(mux.valid),
-                serializer.sink.data .eq(mux.dout),
-            ]
-        elif 1:
-            # FIXME: 2 deep fifo makes it drop 1 frame every 14 frames(!) so changed to 32
+        if 1:
+            # with 2 deep fifo we can get 1,2,3 pages, with 128 deep fifo we can get 4 pages but not 5 (!)
             self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 128)
 
             self.comb += [
@@ -1255,26 +1490,25 @@ class PCILeechFIFO(Module):
                 mux_out_fifo.sink.valid.eq(mux.valid),
                 mux_out_fifo.sink.data.eq(mux.dout),
                 mux.rd_en.eq(mux_out_fifo.sink.ready),
-                
+
                 # Serializer reads whole frames from the FIFO.
                 mux_out_fifo.source.connect(serializer.sink),
             ]
         elif 0:
-            # Connect mux output to serializer — direct, no FIFO
             self.comb += [
                 serializer.sink.valid.eq(mux.valid),
                 serializer.sink.data .eq(mux.dout),
                 mux.rd_en.eq(serializer.sink.ready),
             ]
         else:
-            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 32)
-
+            self.submodules.txpipe = txpipe = MuxWordQueueTX(idle_threshold=64)
+            
             self.comb += [
-                mux_out_fifo.sink.valid.eq(mux.valid),
-                mux_out_fifo.sink.data.eq(mux.dout),
-                mux.rd_en.eq(mux_out_fifo.sink.ready),
-                mux_out_fifo.source.connect(serializer.sink),
+                txpipe.sink.valid.eq(mux.valid),
+                txpipe.sink.data.eq(mux.dout),
+                mux.rd_en.eq(txpipe.sink.ready),
             ]
+            serializer=txpipe
 
         # Connect serializer output to USB TX with byte-swap.
         # FT601 swaps bytes on TX (pcileech_ft601.sv line 36), so we pre-swap
@@ -1311,7 +1545,6 @@ class PCILeechFIFO(Module):
             mux.p_ctx[0].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
             mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
             loop_fifo.source.ready.eq(mux.p_req[0]),
-            #mux.p_pending[0].eq(0),  # loopback does not suppress idle
         ]
 
         # p1: CMD response — tag=0b11, ctx=0b00
@@ -1320,7 +1553,6 @@ class PCILeechFIFO(Module):
             mux.p_ctx[1].eq(0b0011),
             mux.p_wr [1].eq(cmd_tx_fifo.source.valid & mux.p_req[1]),
             cmd_tx_fifo.source.ready.eq(mux.p_req[1]),
-            #mux.p_pending[1].eq(cmd_tx_fifo.source.valid),
         ]
 
         # p2: CFG response — tag=0b01, ctx=0b00
@@ -1329,7 +1561,6 @@ class PCILeechFIFO(Module):
             mux.p_ctx[2].eq(0b0001),
             mux.p_wr [2].eq(cfg_tx_fifo.source.valid & mux.p_req[2]),
             cfg_tx_fifo.source.ready.eq(mux.p_req[2]),
-            #mux.p_pending[2].eq(cfg_tx_fifo.source.valid & ~mux.busy),
         ]
 
         # p3: TLP RX (PCIe → host)
@@ -1343,7 +1574,6 @@ class PCILeechFIFO(Module):
                                 Constant(0, 1))),             # bit[3] = 0
             mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
             tlp_rx_fifo.source.ready.eq(mux.p_req[3]),
-            #mux.p_pending[3].eq(tlp_rx_fifo.source.valid),  # TLP RX triggers fast idle so CplDs are delivered quickly
         ]
 
         # p4-p7: stubs
@@ -1352,14 +1582,14 @@ class PCILeechFIFO(Module):
                 mux.p_din[i].eq(0),
                 mux.p_ctx[i].eq(0),
                 mux.p_wr [i].eq(0),
-                #mux.p_pending[i].eq(0),
             ]
 
         if 1:
             self.sync += [
                     If(tlp_rx_fifo.sink.valid & tlp_rx_fifo.sink.ready,rxfifo_in_seen.eq(rxfifo_in_seen + 1)),
                     If(tlp_rx_fifo.source.valid & tlp_rx_fifo.source.ready,rxfifo_out_seen.eq(rxfifo_out_seen + 1)),
-                #If(mux.p_wr[3],mux_p3_wr_seen.eq(mux_p3_wr_seen + 1)),
+                    # breaks things:
+                    #If(mux.p_wr[3],mux_p3_wr_seen.eq(mux_p3_wr_seen + 1)),
                 ]
             self.comb += [
                 self.diag_rxfifo_in_seen.eq(rxfifo_in_seen),

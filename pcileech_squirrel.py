@@ -387,46 +387,6 @@ class PCIeSquirrel(SoCMini):
                 tlp_tx_conv.source.connect(self.pcie_phy.sink),
             ]
 
-            if 0:
-                tx64_dbg0      = Signal(64)
-                tx64_dbg1      = Signal(64)
-                tx64_dbg_count = Signal(2)
-                tx64_dbg_seen  = Signal()
-                tx64_dbg_armed = Signal(reset=1)
-
-                self.sync += [
-                    If(ResetSignal(),
-                       tx64_dbg0.eq(0),
-                       tx64_dbg1.eq(0),
-                       tx64_dbg_count.eq(0),
-                       tx64_dbg_seen.eq(0),
-                       tx64_dbg_armed.eq(1),
-                       ).Elif(tx64_dbg_armed & tlp_tx_conv.source.valid & tlp_tx_conv.source.ready,
-                              tx64_dbg_seen.eq(1),
-                              Case(tx64_dbg_count, {
-                                  0: [tx64_dbg0.eq(tlp_tx_conv.source.dat)],
-                                  1: [
-                                      tx64_dbg1.eq(tlp_tx_conv.source.dat),
-                                      tx64_dbg_armed.eq(0),
-                                  ],
-                              }),
-                              If(tx64_dbg_count != 1,
-                                 tx64_dbg_count.eq(tx64_dbg_count + 1)
-                                 )
-                              )
-                ]
-
-                self.comb += [
-                    pcileech_fifo.tx64_dbg0.eq(tx64_dbg0),
-                    pcileech_fifo.tx64_dbg1.eq(tx64_dbg1),
-                    pcileech_fifo.tx64_dbg_flags.eq(Cat(
-                    tx64_dbg_seen,          # bit 0
-                        tx64_dbg_armed,         # bit 1
-                        tx64_dbg_count,         # bits 3:2
-                        Constant(0, 12),
-                    )),
-                ]
-
             if 1:
                 txsink_dbg0      = Signal(64)
                 txsink_dbg1      = Signal(64)
@@ -652,8 +612,6 @@ class PCIeSquirrel(SoCMini):
         self.add_csr("msi")
 
         if 1:
-
-
             source_seen_latch = Signal()
             self.sync.sys += If(self.pcie_phy.source.valid, source_seen_latch.eq(1))
             self.comb += pcileech_fifo.phy_source_seen.eq(source_seen_latch)
