@@ -770,6 +770,17 @@ class PCILeechFIFO(Module):
         # ro[101]    = pl_link_upcfg_cap          (byte 0x000c bit[5])
         # ro[102]    = pl_sel_lnk_rate            (byte 0x000c bit[6])
         # ro[103]    = pl_directed_change_done    (byte 0x000c bit[7])
+
+        # Derive pl_initial_link_width (3-bit count) from pl_sel_lnk_width (2-bit encoded)
+        # sel=00→1, sel=01→2, sel=10→4
+        initial_link_width = Signal(3)
+        self.comb += Case(self.phy_lnk_width, {
+            0b00: initial_link_width.eq(1),
+            0b01: initial_link_width.eq(2),
+            0b10: initial_link_width.eq(4),
+            "default": initial_link_width.eq(1),
+        })
+
         self.comb += Case(cfg_word_index, {
             0:  cfg_ro_readback.eq(0x6745),         # byte 0x00: wMagicPCIe
             4:  cfg_ro_readback.eq(self.phy_id),    # byte 0x08: real BDF from PCIe IP
@@ -781,8 +792,7 @@ class PCILeechFIFO(Module):
             # readback[7:0]=lnk_width byte, readback[15:8]=ltssm byte
             5:  cfg_ro_readback.eq(Cat(
                     Constant(0, 3),         # ro[90:88] pl_tx_pm_state = 0
-                    self.phy_lnk_width[0:2],# ro[93:91] pl_initial_link_width
-                    Constant(0, 1),
+                    initial_link_width,     # ro[93:91] pl_initial_link_width (was self.phy_lnk_width[0:2])
                     Constant(0, 2),         # ro[95:94] pl_lane_reversal = 0
                     self.phy_ltssm[0:6],    # ro[85:80] bits[5:0] = ltssm
                     Constant(0, 2),         # ro[87:86] pl_rx_pm_state = 0
@@ -1228,7 +1238,7 @@ class PCILeechFIFO(Module):
         
 
         # Mux rd_en driven by serializer being idle
-        self.comb += mux.rd_en.eq(serializer.sink.ready)
+        #self.comb += mux.rd_en.eq(serializer.sink.ready)
         
         # Connect mux output to serializer
         if 0:
@@ -1236,8 +1246,9 @@ class PCILeechFIFO(Module):
                 serializer.sink.valid.eq(mux.valid),
                 serializer.sink.data .eq(mux.dout),
             ]
-        else:
-            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 2)
+        elif 1:
+            # FIXME: 2 deep fifo makes it drop 1 frame every 14 frames(!) so changed to 32
+            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 128)
 
             self.comb += [
                 # Mux writes frames into a small FIFO / skid buffer.
@@ -1246,6 +1257,22 @@ class PCILeechFIFO(Module):
                 mux.rd_en.eq(mux_out_fifo.sink.ready),
                 
                 # Serializer reads whole frames from the FIFO.
+                mux_out_fifo.source.connect(serializer.sink),
+            ]
+        elif 0:
+            # Connect mux output to serializer — direct, no FIFO
+            self.comb += [
+                serializer.sink.valid.eq(mux.valid),
+                serializer.sink.data .eq(mux.dout),
+                mux.rd_en.eq(serializer.sink.ready),
+            ]
+        else:
+            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 32)
+
+            self.comb += [
+                mux_out_fifo.sink.valid.eq(mux.valid),
+                mux_out_fifo.sink.data.eq(mux.dout),
+                mux.rd_en.eq(mux_out_fifo.sink.ready),
                 mux_out_fifo.source.connect(serializer.sink),
             ]
 
