@@ -62,7 +62,7 @@ TYPE_CMD    = 0b11
 # ctx tag per word = {ctx[1:0], type_tag[1:0]}  (4 bits)
 # ---------------------------------------------------------------------------
 class PCILeechMux(Module):
-    def __init__(self, nports=8):
+    def __init__(self, nports=8, registered=0):
         # Per-port signals — caller connects these
         self.p_din  = [Signal(32, name=f"p{i}_din")  for i in range(nports)]
         self.p_ctx  = [Signal(4,  name=f"p{i}_ctx")  for i in range(nports)]
@@ -119,8 +119,10 @@ class PCILeechMux(Module):
 
         # SV: p_req_data = rd_en (the global FT601-ready signal)
         for i in range(nports):
-            self.comb += self.p_req[i].eq(en)
-            #self.comb += self.p_req[i].eq(self.rd_en)
+            if registered:
+                self.comb += self.p_req[i].eq(en)
+            else:
+                self.comb += self.p_req[i].eq(self.rd_en)
 
 
         # -------------------------------------------------------------------
@@ -337,195 +339,223 @@ class MuxSerializer(Module):
                    )
                 )
 
-class xxMuxSerializer(Module):
-    def __init__(self):
-        self.sink   = stream.Endpoint([("data", 256)])
-        self.source = stream.Endpoint([("data", 32)])
-        
-        buf   = Signal(256)
-        count = Signal(3)
-        rsync = Signal(3)
-        
-        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
-        
-        fsm.act("IDLE",
-                # Always ready — matches SV where rd_en=1 during idle.
-                # Mux can accumulate words via en=registered(rd_en).
-                self.sink.ready.eq(1),
-                If(self.sink.valid,
-                   NextValue(buf,   self.sink.data),
-                   NextValue(count, 7),
-                   NextValue(rsync, 4),
-                   NextState("RESYNC"),
-                   )
-                )
-        fsm.act("RESYNC",
-                # During RESYNC, sink.ready=0. rd_en=0. en=0 (next cycle).
-                # Mux pauses — matches SV behavior during send.
-                self.source.valid.eq(1),
-                self.source.data.eq(0x66665555),
-                If(self.source.ready,
-                   If(rsync == 0,
-                      NextState("SEND"),
-                      ).Else(
-                          NextValue(rsync, rsync - 1),
-                      )
-                   )
-                )
-        fsm.act("SEND",
-                self.source.valid.eq(1),
-                self.source.data.eq(buf[224:256]),
-                If(self.source.ready,
-                   If(count == 0,
-                      # Done — go back to IDLE (not back-to-back).
-                      # IDLE has sink.ready=1, so if a frame is waiting,
-                      # it's taken immediately (1 cycle IDLE → RESYNC).
-                      # This matches SV: ~7 cycles IDLE + 5+8 SEND = ~20 cycles.
-                      NextState("IDLE"),
-                      ).Else(
-                          NextValue(buf, buf << 32),
-                          NextValue(count, count - 1),
-                      )
-                   )
-                )
 
+
+        
 class MuxWordQueueTX(Module):
-    def __init__(self, idle_threshold=64):
+    def __init__(self, idle_threshold=64, word_fifo_depth=32, start_wait_max=8):
         self.sink   = stream.Endpoint([("data", 256)])  # from PCILeechMux
-        self.source = stream.Endpoint([("data", 32)])   # to usb_tx / FT601
+        self.source = stream.Endpoint([("data", 32)])   # to USB / FT601
         
-        # Match SV idea: ask for more data when queue occupancy is low.
-        # Expose this as "sink.ready" so mux.rd_en can be driven directly from it.
+        # ------------------------------------------------------------------
+        # Real 32-bit word FIFO.
+        # Sync words are NOT stored here.
+        # ------------------------------------------------------------------
+        self.submodules.word_fifo = word_fifo = SyncFIFO([("data", 32)], word_fifo_depth)
+        
+        # ------------------------------------------------------------------
+        # Two full-frame buffers.
         #
-        # Queue storage: 5 words, like FT601_DATA_OUT[0..4] in SV.
-        q0 = Signal(32)
-        q1 = Signal(32)
-        q2 = Signal(32)
-        q3 = Signal(32)
-        q4 = Signal(32)
-        q_count = Signal(3)   # 0..5
+        # fb0 = frame currently being expanded into word_fifo
+        # fb1 = next full frame already captured from mux
+        # ------------------------------------------------------------------
+        fb0       = Signal(256)
+        fb0_valid = Signal()
+        fb0_idx   = Signal(4)   # 0..7
         
-        # One pending 256-bit frame from mux.
-        frame_buf   = Signal(256)
-        frame_valid = Signal()
-        frame_idx   = Signal(4)   # 0..7 words remaining position
+        fb1       = Signal(256)
+        fb1_valid = Signal()
         
-        # Idle tracking: after a long idle, next burst gets sync preload.
-        idle_count    = Signal(max=idle_threshold + 1)
-        need_resync   = Signal(reset=1)
-        
-        # -----------------------------
-        # Helpers
-        # -----------------------------
-        def q_word(n):
-            return [q0, q1, q2, q3, q4][n]
-        
-        queue_empty = Signal()
-        queue_full  = Signal()
-        low_water   = Signal()
-        
-        self.comb += [
-            queue_empty.eq(q_count == 0),
-            queue_full.eq(q_count == 5),
-            # Close to SV behavior: request more when occupancy is 2 or 3.
-            low_water.eq((q_count == 2) | (q_count == 3)),
-        ]
-        
-        # source side: always drive from queue head
-        self.comb += [
-            self.source.valid.eq(q_count != 0),
-            self.source.data.eq(q0),
-        ]
-        
-        # sink side: request another 256-bit frame only when:
-        # - no frame already buffered
-        # - queue occupancy is low enough to accept a refill
+        # ------------------------------------------------------------------
+        # Burst / sync state.
         #
-        # This is the analog of SV din_req_data.
+        # armed_for_sync : after long idle, next burst should start with 5 syncs
+        # sync_count     : sync words still to emit for current burst
+        # burst_pending  : first data of a new burst has arrived, but output has
+        #                  not started yet (waiting for watermark or timeout)
+        # burst_started  : actively outputting sync/data for current burst
+        # ------------------------------------------------------------------
+        armed_for_sync = Signal(reset=1)
+        sync_count     = Signal(3)   # 0..5
+        burst_pending  = Signal()
+        burst_started  = Signal()
+        
+        # Startup wait counter while pending.
+        start_wait = Signal(max=start_wait_max + 1)
+        
+        # ------------------------------------------------------------------
+        # Idle tracking.
+        # ------------------------------------------------------------------
+        idle_count = Signal(max=idle_threshold + 1)
+        
+        fifo_empty    = Signal()
+        fifo_has_room = Signal()
         self.comb += [
-            self.sink.ready.eq((~frame_valid) & low_water),
+            fifo_empty.eq(word_fifo.level == 0),
+            fifo_has_room.eq(word_fifo.level < word_fifo_depth),
         ]
         
-        # -----------------------------
-        # Sequential behavior
-        # -----------------------------
+        fully_idle = Signal()
+        self.comb += fully_idle.eq(
+        (sync_count == 0) &
+            ~fb0_valid &
+            ~fb1_valid &
+            fifo_empty &
+            ~burst_pending &
+            ~burst_started
+        )
+        
+        # ------------------------------------------------------------------
+        # Start condition:
+        #   - if we already have a second frame buffered, great
+        #   - or if one full frame of words is already queued
+        #   - or after a short timeout, start anyway so tiny bursts don't stall
+        # ------------------------------------------------------------------
+        start_now = Signal()
+        self.comb += start_now.eq(
+            burst_pending & (
+                fb1_valid |
+                (word_fifo.level >= 8) |
+                (start_wait == start_wait_max)
+            )
+        )
+        
+        # ------------------------------------------------------------------
+        # Output path:
+        #   - emit sync words first
+        #   - then real FIFO data
+        # Only active once burst_started=1.
+        # ------------------------------------------------------------------
+        sending_sync = Signal()
+        sending_data = Signal()
+        self.comb += [
+            sending_sync.eq(burst_started & (sync_count != 0)),
+            sending_data.eq(burst_started & (sync_count == 0) & word_fifo.source.valid),
+            
+            self.source.valid.eq(sending_sync | sending_data),
+            self.source.data.eq(Mux(sending_sync, 0x66665555, word_fifo.source.data)),
+            
+            word_fifo.source.ready.eq(burst_started & (sync_count == 0) & self.source.ready),
+        ]
+        
+        # ------------------------------------------------------------------
+        # Accept a new 256-bit frame whenever fb1 is free.
+        # This gives us 2 full-frame buffers of elasticity.
+        # ------------------------------------------------------------------
+        self.comb += self.sink.ready.eq(~fb1_valid)
+        
+        # ------------------------------------------------------------------
+        # Feed words from fb0 into word_fifo.
+        # This can happen while sync is being emitted.
+        # ------------------------------------------------------------------
+        self.comb += [
+            word_fifo.sink.valid.eq(fb0_valid & fifo_has_room),
+            word_fifo.sink.data.eq(fb0[224:256]),
+        ]
+        
+        # ------------------------------------------------------------------
+        # Sequential logic
+        # ------------------------------------------------------------------
         self.sync += [
-            # ---------------------------------
-            # Track long idle
-            # ---------------------------------
-            If(queue_empty & ~frame_valid,
+            # --------------------------------------------------------------
+            # Re-arm sync after long true idle.
+            # --------------------------------------------------------------
+            If(fully_idle,
                If(idle_count < idle_threshold,
                   idle_count.eq(idle_count + 1)
                   ).Else(
-                      need_resync.eq(1)
+                      armed_for_sync.eq(1)
                   )
                ).Else(
                    idle_count.eq(0)
                ),
             
-            # ---------------------------------
-            # Drain one word to USB
-            # ---------------------------------
-            If(self.source.valid & self.source.ready,
-               q0.eq(q1),
-               q1.eq(q2),
-               q2.eq(q3),
-               q3.eq(q4),
-               q4.eq(0),
-               If(q_count != 0,
-                  q_count.eq(q_count - 1)
-                  )
-               ),
-            
-            # ---------------------------------
-            # Capture a mux frame when requested
-            # ---------------------------------
+            # --------------------------------------------------------------
+            # Capture incoming 256-bit frame.
+            #
+            # If pipeline was idle before this frame, mark burst_pending.
+            # --------------------------------------------------------------
             If(self.sink.valid & self.sink.ready,
-               frame_buf.eq(self.sink.data),
-               frame_valid.eq(1),
-               frame_idx.eq(0)
-               ),
-            
-            # ---------------------------------
-            # If we need resync and queue is empty, preload 5 sync words.
-            # This matches the "sync burst after long idle" behavior.
-            # ---------------------------------
-            If(need_resync & (q_count == 0) & ~frame_valid,
-               q0.eq(0x66665555),
-               q1.eq(0x66665555),
-               q2.eq(0x66665555),
-               q3.eq(0x66665555),
-               q4.eq(0x66665555),
-               q_count.eq(5),
-               need_resync.eq(0)
-               ),
-            
-            # ---------------------------------
-            # Expand buffered 256-bit frame into queue words.
-            # Only push when queue has space.
-            # Word order is MSB-first:
-            #   word0 = bits[255:224]
-            #   ...
-            #   word7 = bits[31:0]
-            # ---------------------------------
-            If(frame_valid & (q_count != 5),
-               Case(q_count, {
-                   0: [q0.eq(frame_buf[224:256])],
-                   1: [q1.eq(frame_buf[224:256])],
-                   2: [q2.eq(frame_buf[224:256])],
-                   3: [q3.eq(frame_buf[224:256])],
-                   4: [q4.eq(frame_buf[224:256])],
-               }),
-               q_count.eq(q_count + 1),
-               frame_buf.eq(frame_buf << 32),
-               If(frame_idx == 7,
-                  frame_valid.eq(0)
+               If(~fb0_valid & ~fb1_valid & ~burst_pending & ~burst_started & (sync_count == 0) & fifo_empty,
+                  burst_pending.eq(1),
+                  start_wait.eq(0)
+                  ),
+               
+               If(~fb0_valid,
+                  fb0.eq(self.sink.data),
+                  fb0_valid.eq(1),
+                  fb0_idx.eq(0)
                   ).Else(
-                      frame_idx.eq(frame_idx + 1)
+                      fb1.eq(self.sink.data),
+                      fb1_valid.eq(1)
                   )
+               ),
+            
+            # --------------------------------------------------------------
+            # While pending, wait a little for more buffered data.
+            # --------------------------------------------------------------
+            If(burst_pending & ~start_now,
+               If(start_wait != start_wait_max,
+                  start_wait.eq(start_wait + 1)
+                  )
+               ),
+            
+            # --------------------------------------------------------------
+            # Start the burst.
+            # Only here do we arm the 5 sync words.
+            # --------------------------------------------------------------
+            If(start_now,
+               burst_pending.eq(0),
+               burst_started.eq(1),
+               If(armed_for_sync,
+                  sync_count.eq(5),
+                  armed_for_sync.eq(0)
+                  )
+               ),
+            
+            # --------------------------------------------------------------
+            # Drain one sync word.
+            # --------------------------------------------------------------
+            If((sync_count != 0) & burst_started & self.source.ready,
+               sync_count.eq(sync_count - 1)
+               ),
+            
+            # --------------------------------------------------------------
+            # Advance fb0 as words are accepted into word_fifo.
+            # Promote fb1 immediately when fb0 finishes.
+            # --------------------------------------------------------------
+            If(word_fifo.sink.valid & word_fifo.sink.ready,
+               If(fb0_idx == 7,
+                  If(fb1_valid,
+                     fb0.eq(fb1),
+                     fb0_valid.eq(1),
+                     fb0_idx.eq(0),
+                     fb1_valid.eq(0)
+                     ).Else(
+                         fb0_valid.eq(0)
+                     )
+                  ).Else(
+                      fb0.eq(fb0 << 32),
+                      fb0_idx.eq(fb0_idx + 1)
+                  )
+               ),
+            
+            # --------------------------------------------------------------
+            # End burst when everything has drained.
+            # --------------------------------------------------------------
+            If(burst_started &
+               (sync_count == 0) &
+               ~fb0_valid &
+               ~fb1_valid &
+               fifo_empty,
+               burst_started.eq(0)
                )
         ]
-
+        
+        
+        
+        
+        
         
 # ---------------------------------------------------------------------------
 # PCILeechFIFO
@@ -1472,7 +1502,8 @@ class PCILeechFIFO(Module):
         # ===================================================================
         # TX PATH: mux + serialize → USB
         # ===================================================================
-        self.submodules.mux        = mux        = PCILeechMux(nports=8)
+        # if registered == 0 it seems we get 1374 for a single 4k page instead of 13b4 and stalls there too
+        self.submodules.mux        = mux        = PCILeechMux(nports=8,registered=1)
         self.submodules.serializer = serializer = MuxSerializer()
 
         
@@ -1481,7 +1512,7 @@ class PCILeechFIFO(Module):
         #self.comb += mux.rd_en.eq(serializer.sink.ready)
         
         # Connect mux output to serializer
-        if 1:
+        if 0:
             # with 2 deep fifo we can get 1,2,3 pages, with 128 deep fifo we can get 4 pages but not 5 (!)
             self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 128)
 
@@ -1501,7 +1532,7 @@ class PCILeechFIFO(Module):
                 mux.rd_en.eq(serializer.sink.ready),
             ]
         else:
-            self.submodules.txpipe = txpipe = MuxWordQueueTX(idle_threshold=64)
+            self.submodules.txpipe = txpipe = MuxWordQueueTX(idle_threshold=64, word_fifo_depth = 32, start_wait_max=16)
             
             self.comb += [
                 txpipe.sink.valid.eq(mux.valid),
