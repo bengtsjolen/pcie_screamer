@@ -91,7 +91,10 @@ class PCILeechMux(Module):
         dout_buf_valid = Signal()
         dout_buf_data  = Signal(256)
 
-        self.sync += en.eq(self.rd_en & ~ResetSignal())
+        if registered:
+            self.sync += en.eq(self.rd_en & ~ResetSignal())
+        else:
+            self.comb += en.eq(self.rd_en & ~ResetSignal())
         self.en_out = en  # expose for port ready gating
 
         # -------------------------------------------------------------------
@@ -119,10 +122,10 @@ class PCILeechMux(Module):
 
         # SV: p_req_data = rd_en (the global FT601-ready signal)
         for i in range(nports):
-            if registered:
-                self.comb += self.p_req[i].eq(en)
-            else:
-                self.comb += self.p_req[i].eq(self.rd_en)
+            #if registered:
+            #    self.comb += self.p_req[i].eq(en)
+            #else:
+            self.comb += self.p_req[i].eq(self.rd_en)
 
 
         # -------------------------------------------------------------------
@@ -196,8 +199,11 @@ class PCILeechMux(Module):
                 ),
 
                 # OVERFLOW: when frame emits, copy overflow slots to base positions
+                # ONLY when downstream actually consumes the frame (rd_en=1).
+                # Without this gate, the registered en lag can cause the overflow
+                # copy to overwrite a frame that was never consumed.
                 # (mirrors SV: if(dout_valid) data_reg[i] <= data_reg[7+i])
-                If(dout_valid,
+                If(dout_valid & self.rd_en,
                     *[If(idx_base > i,
                         data_reg[i].eq(data_reg[7+i]),
                         ctx_reg [i].eq(ctx_reg [7+i]),
@@ -267,7 +273,7 @@ class MuxSerializer(Module):
                    )
                 )
 
-class MuxSerializer(Module):
+class MuxSerializer2(Module):
     def __init__(self):
         self.sink   = stream.Endpoint([("data", 256)])
         self.source = stream.Endpoint([("data", 32)])
@@ -365,6 +371,19 @@ class MuxWordQueueTX(Module):
         
         fb1       = Signal(256)
         fb1_valid = Signal()
+
+        # heuristic for differing wat during dump start
+        fb0_word0 = Signal(32)
+        is_dump_start = Signal()
+        active_start_wait_max = Signal(12)
+        ctrl_start_wait_max = 8
+        dump_start_wait_max = 2048
+        
+        self.comb += [fb0_word0.eq(fb0[224:256]),
+                      is_dump_start.eq(fb0_word0 == 0xf2ffffef),
+                      active_start_wait_max.eq(Mux(is_dump_start,dump_start_wait_max,ctrl_start_wait_max))
+                      ]
+
         
         # ------------------------------------------------------------------
         # Burst / sync state.
@@ -381,7 +400,7 @@ class MuxWordQueueTX(Module):
         burst_started  = Signal()
         
         # Startup wait counter while pending.
-        start_wait = Signal(max=start_wait_max + 1)
+        start_wait = Signal(max=dump_start_wait_max + 1)
         
         # ------------------------------------------------------------------
         # Idle tracking.
@@ -416,7 +435,7 @@ class MuxWordQueueTX(Module):
             burst_pending & (
                 fb1_valid |
                 (word_fifo.level >= 8) |
-                (start_wait == start_wait_max)
+                (start_wait >= active_start_wait_max)
             )
         )
         
@@ -495,7 +514,7 @@ class MuxWordQueueTX(Module):
             # While pending, wait a little for more buffered data.
             # --------------------------------------------------------------
             If(burst_pending & ~start_now,
-               If(start_wait != start_wait_max,
+               If(start_wait != dump_start_wait_max,
                   start_wait.eq(start_wait + 1)
                   )
                ),
@@ -1503,7 +1522,7 @@ class PCILeechFIFO(Module):
         # TX PATH: mux + serialize → USB
         # ===================================================================
         # if registered == 0 it seems we get 1374 for a single 4k page instead of 13b4 and stalls there too
-        self.submodules.mux        = mux        = PCILeechMux(nports=8,registered=1)
+        self.submodules.mux        = mux        = PCILeechMux(nports=8,registered=0)
         self.submodules.serializer = serializer = MuxSerializer()
 
         
@@ -1512,9 +1531,9 @@ class PCILeechFIFO(Module):
         #self.comb += mux.rd_en.eq(serializer.sink.ready)
         
         # Connect mux output to serializer
-        if 0:
+        if 1:
             # with 2 deep fifo we can get 1,2,3 pages, with 128 deep fifo we can get 4 pages but not 5 (!)
-            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 128)
+            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 4)
 
             self.comb += [
                 # Mux writes frames into a small FIFO / skid buffer.
