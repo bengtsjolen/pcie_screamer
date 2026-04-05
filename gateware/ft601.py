@@ -96,6 +96,15 @@ class FT601Sync(Module):
 
         first_write = Signal()
 
+        # FT601 short-packet prevention counter (ft601_bug_workaround equivalent).
+        # When write_fifo empties during WRITE, inject sync words to keep the
+        # FT601 chip's internal TX buffer alive and prevent premature USB short
+        # packets.  Matches SV pcileech_com.sv ft601_bug_workaround behavior.
+        # Sync word is pre-swapped 0x66665555 → 0x55556666 because pcileech_fifo.py
+        # byte-swaps before writing to write_fifo, and FT601Sync outputs as-is.
+        SYNC_WORD = 0x55556666
+        sync_pad_count = Signal(max=33)  # 0..32
+
         self.comb += [
             wants_read.eq(~temptoread & ~pads.rxf_n),
             wants_write.eq((temptosend | write_fifo.source.valid) & (pads.txe_n == 0)),
@@ -135,6 +144,7 @@ class FT601Sync(Module):
                 oe_n.eq(1),
                 NextValue(cnt_write, 0),
                 NextValue(first_write, 1),
+                NextValue(sync_pad_count, 0),
                 NextState("WRITE"),
             ).Elif(wants_read,
                 oe_n.eq(0),
@@ -173,12 +183,22 @@ class FT601Sync(Module):
                 write_fifo.source.ready.eq(1),
                 NextValue(tempsendval, write_fifo.source.data),
                 NextValue(temptosend, 0),
+                NextValue(sync_pad_count, 0),
                 wr_n.eq(0),
             ).Else(
                 oe_n.eq(1),
-                wr_n.eq(1),
-                NextValue(temptosend, 0),
-                NextState("IDLE")
+                # FT601 bug workaround: inject sync words when write_fifo
+                # is empty to prevent FT601 chip TX buffer from draining
+                # and sending a premature USB short packet.
+                If(sync_pad_count < 32,
+                    data_w.eq(SYNC_WORD),
+                    wr_n.eq(0),
+                    NextValue(sync_pad_count, sync_pad_count + 1),
+                ).Else(
+                    wr_n.eq(1),
+                    NextValue(temptosend, 0),
+                    NextState("IDLE"),
+                )
             )
         )
 
