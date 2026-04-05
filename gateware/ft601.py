@@ -96,14 +96,12 @@ class FT601Sync(Module):
 
         first_write = Signal()
 
-        # FT601 short-packet prevention counter (ft601_bug_workaround equivalent).
-        # When write_fifo empties during WRITE, inject sync words to keep the
-        # FT601 chip's internal TX buffer alive and prevent premature USB short
-        # packets.  Matches SV pcileech_com.sv ft601_bug_workaround behavior.
-        # Sync word is pre-swapped 0x66665555 → 0x55556666 because pcileech_fifo.py
-        # byte-swaps before writing to write_fifo, and FT601Sync outputs as-is.
-        SYNC_WORD = 0x55556666
-        sync_pad_count = Signal(max=33)  # 0..32
+        # Drain-wait counter: when write_fifo empties during WRITE, wait
+        # a few cycles before going IDLE.  This gives the serializer pipeline
+        # time to refill write_fifo with the next mux frame (~16 cycles).
+        # Without this, momentary gaps between mux frames cause FT601 to go
+        # IDLE → chip sends USB short packet → transfer terminates early.
+        drain_wait = Signal(max=21)  # 0..20
 
         self.comb += [
             wants_read.eq(~temptoread & ~pads.rxf_n),
@@ -144,7 +142,7 @@ class FT601Sync(Module):
                 oe_n.eq(1),
                 NextValue(cnt_write, 0),
                 NextValue(first_write, 1),
-                NextValue(sync_pad_count, 0),
+                NextValue(drain_wait, 0),
                 NextState("WRITE"),
             ).Elif(wants_read,
                 oe_n.eq(0),
@@ -183,19 +181,17 @@ class FT601Sync(Module):
                 write_fifo.source.ready.eq(1),
                 NextValue(tempsendval, write_fifo.source.data),
                 NextValue(temptosend, 0),
-                NextValue(sync_pad_count, 0),
+                NextValue(drain_wait, 0),
                 wr_n.eq(0),
             ).Else(
+                # write_fifo empty — wait up to 20 cycles for pipeline to refill.
+                # Stay in WRITE (oe_n=1, wr_n=1, no actual write) so FT601 chip
+                # doesn't send a short packet yet.
                 oe_n.eq(1),
-                # FT601 bug workaround: inject sync words when write_fifo
-                # is empty to prevent FT601 chip TX buffer from draining
-                # and sending a premature USB short packet.
-                If(sync_pad_count < 32,
-                    data_w.eq(SYNC_WORD),
-                    wr_n.eq(0),
-                    NextValue(sync_pad_count, sync_pad_count + 1),
+                wr_n.eq(1),
+                If(drain_wait < 20,
+                    NextValue(drain_wait, drain_wait + 1),
                 ).Else(
-                    wr_n.eq(1),
                     NextValue(temptosend, 0),
                     NextState("IDLE"),
                 )
