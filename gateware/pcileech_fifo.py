@@ -1326,7 +1326,15 @@ class PCILeechFIFO(Module):
                 inactivity_base.eq(tickcount64),
             ).Elif(inactivity_fire,
                 inactivity_base.eq(tickcount64),
-                rw[16].eq(0)
+                # NOTE: The SV reference clears rw[16] here (one-shot timer).
+                # We intentionally DO NOT clear it.  In our implementation,
+                # the keepalive often arrives at USB before CplD data, causing
+                # a transfer split (short packet).  The remaining CplD data
+                # needs another keepalive to flush it.  Keeping the timer armed
+                # ensures it fires again after timer_ticks cycles, pushing any
+                # remaining data through the pipeline to USB.
+                # The host re-writes rw[16] before each operation anyway, and
+                # pcileech silently discards extra keepalive CMD responses.
             )
         ]
 
