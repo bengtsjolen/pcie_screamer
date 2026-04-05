@@ -838,7 +838,7 @@ class PCILeechFIFO(Module):
         # Matches ufrisk pcileech_tlps128_filter cfgtlp_filter=1 behavior.
         # ===================================================================
         self.submodules.tlp_rx_fifo = tlp_rx_fifo = SyncFIFO(
-            phy_layout(32), 256
+            phy_layout(32), 512
         )
         tlp_filter_bypass = Signal()  # wired to ~rw[202] after rw is defined
         # TLP filter state: track first beat and whether current TLP passes
@@ -893,8 +893,8 @@ class PCILeechFIFO(Module):
             )
         ]
         self.comb += self.tlp_rx_level.eq(Cat(
-            tlp_rx_fifo.level[0:8],  # [7:0]  fifo fill level
-            rx_seen_count[0:6],      # [13:8] beats reaching self.tlp_rx
+            tlp_rx_fifo.level[0:9],  # [8:0]  fifo fill level (9 bits for depth 512)
+            rx_seen_count[0:5],      # [13:9] beats reaching self.tlp_rx
             self.phy_source_seen,    # [14]   pcie_phy.source.valid fired (after CDC)
             self.phy_raw_rx_seen,    # [15]   m_axis_rx_tvalid fired (raw PCIe IP RX)
         ))
@@ -1307,12 +1307,22 @@ class PCILeechFIFO(Module):
             ),
         ]
 
-        # Update base: reset on CMD write (activity), advance on timer fire
+        # Update base: reset on TX activity (data flowing to host) or
+        # output buffer full, matching SV pcileech_fifo.sv line 396:
+        #   if ( dcom.com_din_wr_en | ~dcom.com_din_ready )
+        #       _cmd_timer_inactivity_base <= tickcount64;
+        # The SV resets when data is being SENT to host or the output
+        # buffer is full.  The old code incorrectly reset on USB RX
+        # activity (data FROM host), which meant the timer never fired
+        # while the host was sending MRd TLPs even though no data was
+        # flowing BACK to the host.
+        #
+        # tx_com_activity is driven later (after mux/serializer are defined)
+        # from:  mux.valid | ~mux_out_fifo.sink.ready
 
-        usb_com_activity = Signal()
-        self.comb += usb_com_activity.eq(self.usb_rx.valid)
+        tx_com_activity = Signal()
         self.sync += [
-            If(usb_com_activity,
+            If(tx_com_activity,
                 inactivity_base.eq(tickcount64),
             ).Elif(inactivity_fire,
                 inactivity_base.eq(tickcount64),
@@ -1532,8 +1542,11 @@ class PCILeechFIFO(Module):
         
         # Connect mux output to serializer
         if 1:
-            # with 2 deep fifo we can get 1,2,3 pages, with 128 deep fifo we can get 4 pages but not 5 (!)
-            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 4)
+            # Decouple mux from serializer with a deeper FIFO.
+            # The SV reference uses a ~2KB 256→32 async FIFO here.
+            # With depth 32, we get 32×32=1KB of buffering which absorbs
+            # FT601 bus turnaround stalls without backpressuring the mux.
+            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 32)
 
             self.comb += [
                 # Mux writes frames into a small FIFO / skid buffer.
@@ -1576,54 +1589,67 @@ class PCILeechFIFO(Module):
             serializer.source.ready.eq(self.usb_tx.ready),
         ]
 
+        # Drive the inactivity timer reset from TX activity
+        # (defined earlier as forward-declared signal tx_com_activity)
+        # Matches SV: dcom.com_din_wr_en | ~dcom.com_din_ready
+        # mux.valid = frame being emitted; serializer output = data reaching FT601
+        self.comb += tx_com_activity.eq(
+            (serializer.source.valid & serializer.source.ready) |
+            mux.valid
+        )
+
         # -------------------------------------------------------------------
-        # Mux port wiring — matches pcileech_fifo.sv port priority exactly:
+        # Mux port wiring — matches pcileech_fifo.sv port priority:
         #
-        # SV:  p0=loopback(tag=10), p1=CMD(tag=11), p2=CFG(tag=01), p3-p6=TLP(tag=00)
+        # SV (pcileech_fifo.sv lines 148-179):
+        #   p0=TLP(tag=00)  HIGHEST PRIORITY
+        #   p1=CFG(tag=01)
+        #   p2=LOOPBACK(tag=10)
+        #   p3=CMD(tag=11)  LOWEST PRIORITY
         #
-        # nibble = (p_ctx[1:0] << 2) | p_tag[1:0]
-        # Host filter: (nibble & 0x03) == (flags & 0x03)
-        #   TYPE_LOOP=0x02 → tag=0b10 → matches p0 nibble & 0x03 = 0x2
-        #   TYPE_CMD =0x03 → tag=0b11 → matches p1 nibble & 0x03 = 0x3
-        #   TYPE_CFG =0x01 → tag=0b01 → matches p2 nibble & 0x03 = 0x1
-        #   TYPE_TLP =0x00 → tag=0b00 → matches p3 nibble & 0x03 = 0x0
+        # In the SV mux, nibble = (p_ctx << 2) | port_number.
+        # bits[1:0] of nibble = port number = type tag.
+        # In our PCILeechMux, the tag is embedded in p_ctx directly
+        # (the mux doesn't add a port-number tag).  So the port number
+        # only affects scheduling priority, not the tag encoding.
+        #
+        # The host parses (nibble & 0x03) to determine the type:
+        #   0x00 = TLP, 0x01 = CFG, 0x02 = LOOP, 0x03 = CMD
         # -------------------------------------------------------------------
 
-        # p0: loopback — tag=0b10, ctx from stored loop_fifo.ctx
+        # p0: TLP RX (PCIe → host) — HIGHEST PRIORITY (matches SV p0)
+        # ctx nibble: bits[1:0]=TYPE_TLP=0b00, bit[2]=last, bit[3]=0
         self.comb += [
-            mux.p_din[0].eq(loop_fifo.source.data),
-            mux.p_ctx[0].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
-            mux.p_wr [0].eq(loop_fifo.source.valid & mux.p_req[0]),
-            loop_fifo.source.ready.eq(mux.p_req[0]),
-        ]
-
-        # p1: CMD response — tag=0b11, ctx=0b00
-        self.comb += [
-            mux.p_din[1].eq(cmd_tx_fifo.source.data),
-            mux.p_ctx[1].eq(0b0011),
-            mux.p_wr [1].eq(cmd_tx_fifo.source.valid & mux.p_req[1]),
-            cmd_tx_fifo.source.ready.eq(mux.p_req[1]),
-        ]
-
-        # p2: CFG response — tag=0b01, ctx=0b00
-        self.comb += [
-            mux.p_din[2].eq(cfg_tx_fifo.source.data),
-            mux.p_ctx[2].eq(0b0001),
-            mux.p_wr [2].eq(cfg_tx_fifo.source.valid & mux.p_req[2]),
-            cfg_tx_fifo.source.ready.eq(mux.p_req[2]),
-        ]
-
-        # p3: TLP RX (PCIe → host)
-        # ctx nibble encoding: bits[1:0]=TYPE_TLP=0b00, bit[2]=last, bit[3]=0
-        # CRITICAL: bits[1:0] MUST be 0b00 (TYPE_TLP) for ALL beats including last
-        # Previously last was incorrectly placed in bit[0], corrupting the type tag
-        self.comb += [
-            mux.p_din[3].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[3].eq(Cat(Constant(0b00, 2),           # bits[1:0] = TYPE_TLP tag
+            mux.p_din[0].eq(tlp_rx_fifo.source.dat),
+            mux.p_ctx[0].eq(Cat(Constant(0b00, 2),           # bits[1:0] = TYPE_TLP tag
                                 tlp_rx_fifo.source.last,     # bit[2] = last
                                 Constant(0, 1))),             # bit[3] = 0
-            mux.p_wr [3].eq(tlp_rx_fifo.source.valid & mux.p_req[3]),
-            tlp_rx_fifo.source.ready.eq(mux.p_req[3]),
+            mux.p_wr [0].eq(tlp_rx_fifo.source.valid & mux.p_req[0]),
+            tlp_rx_fifo.source.ready.eq(mux.p_req[0]),
+        ]
+
+        # p1: CFG response — tag=0b01, ctx=0b00
+        self.comb += [
+            mux.p_din[1].eq(cfg_tx_fifo.source.data),
+            mux.p_ctx[1].eq(0b0001),
+            mux.p_wr [1].eq(cfg_tx_fifo.source.valid & mux.p_req[1]),
+            cfg_tx_fifo.source.ready.eq(mux.p_req[1]),
+        ]
+
+        # p2: loopback — tag=0b10, ctx from stored loop_fifo.ctx
+        self.comb += [
+            mux.p_din[2].eq(loop_fifo.source.data),
+            mux.p_ctx[2].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
+            mux.p_wr [2].eq(loop_fifo.source.valid & mux.p_req[2]),
+            loop_fifo.source.ready.eq(mux.p_req[2]),
+        ]
+
+        # p3: CMD response — tag=0b11, ctx=0b00 — LOWEST PRIORITY
+        self.comb += [
+            mux.p_din[3].eq(cmd_tx_fifo.source.data),
+            mux.p_ctx[3].eq(0b0011),
+            mux.p_wr [3].eq(cmd_tx_fifo.source.valid & mux.p_req[3]),
+            cmd_tx_fifo.source.ready.eq(mux.p_req[3]),
         ]
 
         # p4-p7: stubs
