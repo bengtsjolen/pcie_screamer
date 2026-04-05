@@ -325,7 +325,7 @@ class PCIeSquirrel(SoCMini):
         self.add_csr("pcie_phy")
 
         # USB FT601 PHY ----------------------------------------------------------------------------
-        self.submodules.usb_phy = FT601Sync(platform.request("usb_fifo"), dw=32, timeout=1024)
+        self.submodules.usb_phy = FT601Sync(platform.request("usb_fifo"), dw=32, timeout=256)
 
         # USB Loopback (debug) ---------------------------------------------------------------------
         if with_loopback:

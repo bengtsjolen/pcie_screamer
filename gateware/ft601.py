@@ -9,9 +9,9 @@ from litex.soc.interconnect import stream
 from litex.soc.cores.usb_fifo import phy_description
 
 class FT601Sync(Module):
-    def __init__(self, pads, dw=32, timeout=1024):
+    def __init__(self, pads, dw=32, timeout=256):
         read_fifo = ClockDomainsRenamer({"write": "usb", "read": "sys"})(stream.AsyncFIFO(phy_description(dw), 128))
-        write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(stream.AsyncFIFO(phy_description(dw), 128))
+        write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(stream.AsyncFIFO(phy_description(dw), 1024))
 
         read_buffer = ClockDomainsRenamer("usb")(stream.SyncFIFO(phy_description(dw), 4))
         self.comb += read_buffer.source.connect(read_fifo.sink)
