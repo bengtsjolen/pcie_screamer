@@ -1573,20 +1573,68 @@ class PCILeechFIFO(Module):
             ]
             serializer=txpipe
 
-        # Connect serializer output to USB TX with byte-swap.
+        # Connect serializer output to USB TX with byte-swap and sync injection.
+        #
+        # FT601 short-packet prevention (ft601_bug_workaround equivalent):
+        # The SV reference (pcileech_com.sv line 198) injects 0x66665555 sync
+        # words whenever the FT601-side FIFO is nearly empty.  Without this,
+        # gaps in the serializer output cause the FT601 chip's internal TX
+        # buffer to drain → chip sends a USB short packet → USB bulk IN
+        # transfer terminates prematurely → host gets partial data.
+        #
+        # We implement this by tracking whether data recently flowed.  When
+        # the serializer goes quiet mid-burst, we inject sync words to keep
+        # the write_fifo (and thus the FT601 chip) fed.  The host's RX parser
+        # already strips sync words, so these are harmless.
+        #
         # FT601 swaps bytes on TX (pcileech_ft601.sv line 36), so we pre-swap
         # to cancel it out and deliver correct byte order to the host.
+
+        tx_out_data  = Signal(32)
+        tx_out_valid = Signal()
+
+        # Sync word injection state
+        recently_active = Signal(max=2048)
+        inject_sync     = Signal()
+
+        self.sync += [
+            If(serializer.source.valid & self.usb_tx.ready,
+                # Real data flowing — reset the injection counter.
+                # 1500 cycles ≈ 15 µs at 100 MHz, long enough to cover
+                # FT601 RX mode + bus turnaround + serializer gaps.
+                recently_active.eq(1500),
+            ).Elif((recently_active > 0) & self.usb_tx.ready,
+                recently_active.eq(recently_active - 1),
+            )
+        ]
+        self.comb += inject_sync.eq(~serializer.source.valid & (recently_active > 0))
+
+        # Mux real data with injected sync words
+        self.comb += [
+            If(serializer.source.valid,
+                tx_out_data.eq(serializer.source.data),
+                tx_out_valid.eq(1),
+            ).Elif(inject_sync,
+                tx_out_data.eq(0x66665555),
+                tx_out_valid.eq(1),
+            ).Else(
+                tx_out_data.eq(0),
+                tx_out_valid.eq(0),
+            ),
+            serializer.source.ready.eq(self.usb_tx.ready),
+        ]
+
+        # Byte-swap and drive USB TX
         tx_swapped = Signal(32)
         self.comb += tx_swapped.eq(Cat(
-            serializer.source.data[24:32],
-            serializer.source.data[16:24],
-            serializer.source.data[ 8:16],
-            serializer.source.data[ 0: 8],
+            tx_out_data[24:32],
+            tx_out_data[16:24],
+            tx_out_data[ 8:16],
+            tx_out_data[ 0: 8],
         ))
         self.comb += [
-            self.usb_tx.valid.eq(serializer.source.valid),
+            self.usb_tx.valid.eq(tx_out_valid),
             self.usb_tx.data .eq(tx_swapped),
-            serializer.source.ready.eq(self.usb_tx.ready),
         ]
 
         # Drive the inactivity timer reset from TX activity
