@@ -97,11 +97,12 @@ class FT601Sync(Module):
         first_write = Signal()
 
         # Drain-wait counter: when write_fifo empties during WRITE, wait
-        # a few cycles before going IDLE.  This gives the serializer pipeline
-        # time to refill write_fifo with the next mux frame (~16 cycles).
-        # Without this, momentary gaps between mux frames cause FT601 to go
-        # IDLE → chip sends USB short packet → transfer terminates early.
-        drain_wait = Signal(max=21)  # 0..20
+        # before going IDLE.  This gives the serializer pipeline AND the PCIe
+        # root complex time to deliver more data.  Without this, inter-CplD
+        # gaps from the root complex (1-5 µs) cause FT601 to send USB short
+        # packets, terminating the transfer prematurely.
+        # 1000 cycles = 10 µs at 100 MHz — covers typical inter-CplD gaps.
+        drain_wait = Signal(max=1001)  # 0..1000
 
         self.comb += [
             wants_read.eq(~temptoread & ~pads.rxf_n),
@@ -189,7 +190,7 @@ class FT601Sync(Module):
                 # doesn't send a short packet yet.
                 oe_n.eq(1),
                 wr_n.eq(1),
-                If(drain_wait < 20,
+                If(drain_wait < 1000,
                     NextValue(drain_wait, drain_wait + 1),
                 ).Else(
                     NextValue(temptosend, 0),

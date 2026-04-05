@@ -1289,20 +1289,30 @@ class PCILeechFIFO(Module):
         self.sync += tickcount64.eq(tickcount64 + 1)
 
         # Timer fires when: enabled, no CMD write this cycle, cmd_tx_fifo
-        # has space, and enough ticks have elapsed since base was set.
-        # Comparison: (inactivity_base + timer_ticks) < tickcount64
-        # Use subtraction to avoid 64+32 bit add: (tickcount64 - inactivity_base) > timer_ticks
+        # has space, enough ticks have elapsed since base was set, AND
+        # no TLP data is pending TX (MRd TLPs waiting to go to PCIe bus).
+        # The tlp_tx_pending guard prevents premature keepalives during the
+        # MRd→CplD round-trip: the timer doesn't fire while MRd TLPs are
+        # in the TX FIFO or for 2000 cycles after the last one drained
+        # (covers PCIe bus round-trip ~5-20 µs).
         inactivity_elapsed = Signal(64)
+        tlp_tx_cooldown = Signal(max=2001)
+        self.sync += [
+            If(tlp_tx_fifo.source.valid,
+                # TLP TX FIFO has data → keep cooldown armed
+                tlp_tx_cooldown.eq(2000),
+            ).Elif(tlp_tx_cooldown > 0,
+                tlp_tx_cooldown.eq(tlp_tx_cooldown - 1),
+            )
+        ]
+
         self.comb += [
             inactivity_elapsed.eq(tickcount64 - inactivity_base),
             inactivity_fire.eq(
                 timer_enable
                 & ~in_cmd_write
-                #& ~in_cmd_read
-                #& ~cmd_rx_fifo.source.valid
-                #& ~cfg_rx_fifo.source.valid
-                #& ~tlp_tx_fifo.sink.valid
                 & cmd_tx_fifo.sink.ready
+                & (tlp_tx_cooldown == 0)       # no pending MRd TLPs
                 & (inactivity_elapsed > timer_ticks)
             ),
         ]
@@ -1597,12 +1607,27 @@ class PCILeechFIFO(Module):
             serializer.source.ready.eq(self.usb_tx.ready),
         ]
 
-        # Drive the inactivity timer reset from TX activity
+        # Drive the inactivity timer reset from BOTH RX and TX activity
         # (defined earlier as forward-declared signal tx_com_activity)
-        # Matches SV: dcom.com_din_wr_en | ~dcom.com_din_ready
-        # mux.valid = frame being emitted; serializer output = data reaching FT601
+        #
+        # The SV reference resets only on TX activity:
+        #   if ( dcom.com_din_wr_en | ~dcom.com_din_ready )
+        # This works because the SV's deep pipeline hides the MRd→CplD
+        # round-trip latency.  In our shallower pipeline, there's a ~5-10 µs
+        # gap between when the host sends MRd TLPs (USB RX activity) and
+        # when CplD responses start flowing to USB (TX activity).  During
+        # this gap, the timer fires a premature keepalive that splits the
+        # USB transfer — the host gets a 52-byte keepalive as one transfer,
+        # then CplD data as a second transfer, then times out waiting for
+        # remaining data in a third transfer.
+        #
+        # By also resetting on USB RX activity, we suppress the timer
+        # during the MRd→CplD turnaround.  Once the host stops sending
+        # commands and CplDs start flowing, TX activity takes over.
+        # When both stop (all data delivered), the timer fires normally.
         self.comb += tx_com_activity.eq(
-            (serializer.source.valid & serializer.source.ready) |
+            self.usb_rx.valid |  # host→FPGA activity (commands, MRd TLPs)
+            (serializer.source.valid & serializer.source.ready) |  # FPGA→host data
             mux.valid
         )
 
