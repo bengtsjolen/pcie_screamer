@@ -173,9 +173,6 @@ class FT601Sync(Module):
                 data_w.eq(tempsendval),
                 wr_n.eq(0),
                 NextValue(temptosend, 0)
-            ).Elif(cnt_write > timeout,
-                oe_n.eq(0),
-                NextState("RDWAIT")
             ).Elif(write_fifo.source.valid,
                 oe_n.eq(1),
                 data_w.eq(write_fifo.source.data),
@@ -184,10 +181,20 @@ class FT601Sync(Module):
                 NextValue(temptosend, 0),
                 NextValue(drain_wait, 0),
                 wr_n.eq(0),
+            ).Elif(cnt_write > timeout,
+                # Only switch to READ when write_fifo is empty AND
+                # the RX timeout has expired.  This matches the SV reference
+                # pcileech_ft601.sv where TX_ACTIVE stays active as long as
+                # there's data — RX is only checked at IDLE or after TX
+                # naturally runs out of data.
+                # CRITICAL: the old code checked cnt_write BEFORE write_fifo,
+                # which forced a READ switch while TX data was still flowing.
+                # This caused the pipeline to stall → PCIe IP to drop TLPs.
+                oe_n.eq(0),
+                NextState("RDWAIT")
             ).Else(
-                # write_fifo empty — wait up to 20 cycles for pipeline to refill.
-                # Stay in WRITE (oe_n=1, wr_n=1, no actual write) so FT601 chip
-                # doesn't send a short packet yet.
+                # write_fifo empty, no RX timeout yet — wait for pipeline
+                # to refill before going IDLE.
                 oe_n.eq(1),
                 wr_n.eq(1),
                 If(drain_wait < 1000,
