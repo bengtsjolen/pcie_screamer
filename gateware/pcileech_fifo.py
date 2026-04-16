@@ -837,15 +837,13 @@ class PCILeechFIFO(Module):
         # CfgRd/CfgWr and other TLPs from enumeration are discarded.
         # Matches ufrisk pcileech_tlps128_filter cfgtlp_filter=1 behavior.
         # ===================================================================
-        # tlp_rx_fifo depth: ufrisk's reference uses a 256-entry 134-bit FIFO
-        # (fifo_134_134_clk2_rxfifo, ~4 KB) ahead of the TLP filter, plus a
-        # 256-entry 74-bit FIFO (fifo_74_74_clk1_bar_rd1) in the filter output
-        # path.  We merge those into a single 32-bit-wide FIFO here; 2048
-        # entries × 41 bits = ~8 KB, enough to decouple PCIe RX bursts from
-        # the downstream mux/serializer/USB path even when the USB side is
-        # briefly stalled during bus turnaround.  BRAM cost ≈ 3 × RAMB36.
+        # tlp_rx_fifo: depth kept modest because migen's stream.SyncFIFO maps
+        # to distributed (LUT) RAM — scaling this out to several KB blows the
+        # XC7A35T LUT-RAM budget.  If this ever needs to be deeper, switch it
+        # to `stream.SyncFIFO(..., buffered=True)` which uses synchronous-read
+        # memory and can be inferred as BRAM.
         self.submodules.tlp_rx_fifo = tlp_rx_fifo = SyncFIFO(
-            phy_layout(32), 2048
+            phy_layout(32), 512
         )
         tlp_filter_bypass = Signal()  # wired to ~rw[202] after rw is defined
         # TLP filter state: track first beat and whether current TLP passes
@@ -925,13 +923,9 @@ class PCILeechFIFO(Module):
                 rx_seen_count.eq(rx_seen_count + 1),
             )
         ]
-        # FIFO depth bumped to 2048 (level is 12 bits).  We pack the top 12
-        # bits of level (so the diagnostic shows 8× scaled fill — each LSB =
-        # 16 entries ≈ 64 bytes) plus the low 2 bits of a seen-count plus the
-        # two phy-seen bits, to keep the CMD register readout 16 bits wide.
         self.comb += self.tlp_rx_level.eq(Cat(
-            tlp_rx_fifo.level[4:16], # [11:0] fifo fill level / 16 (spans 0..2048)
-            rx_seen_count[0:2],      # [13:12] low bits of beats reaching tlp_rx
+            tlp_rx_fifo.level[0:9],  # [8:0]  fifo fill level (9 bits for depth 512)
+            rx_seen_count[0:5],      # [13:9] beats reaching self.tlp_rx
             self.phy_source_seen,    # [14]   pcie_phy.source.valid fired (after CDC)
             self.phy_raw_rx_seen,    # [15]   m_axis_rx_tvalid fired (raw PCIe IP RX)
         ))
@@ -1672,20 +1666,16 @@ class PCILeechFIFO(Module):
         
         # Connect mux output to serializer
         if 1:
-            # Decouple mux from serializer with a deep FIFO.
-            #
-            # Ufrisk's PCIeSquirrel reference uses fifo_256_32_clk2_comtx
-            # (256-bit input, depth 4096 = 128 KB) here.  The sizing is not
-            # arbitrary: a typical pcileech USB read is 0x1E000 ≈ 120 KB, and
-            # ufrisk holds a full USB transfer's worth of data staged before
-            # the serializer so the USB side never needs to wait on the PCIe
-            # pipeline mid-transfer.
-            #
-            # 2048 entries × 256 bits = 64 KB is a good compromise on the
-            # Artix-7 XC7A35T (16 × RAMB36 of 50 total, leaving room for the
-            # other FIFOs + PCIe hard-IP BRAMs).  Bump to 4096 for a full
-            # 128 KB match with ufrisk if BRAM budget permits.
-            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 2048)
+            # mux_out_fifo: kept shallow because migen's stream.SyncFIFO maps
+            # to distributed (LUT) RAM.  At 256 bits wide, every 4 entries
+            # consumes one RAMD64E cell; deep versions blow the LUT-RAM
+            # budget on the XC7A35T.  Ufrisk's equivalent (fifo_256_32_
+            # clk2_comtx, depth 4096 = 128 KB) is a Xilinx FIFO IP that
+            # maps to BRAM36.  If we want to match ufrisk's size here,
+            # switch to `stream.SyncFIFO(..., buffered=True)` (sync-read,
+            # BRAM-inferable) — that change is independent of the backpressure
+            # fix in the TLP filter and purely a performance tweak.
+            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 32)
 
             self.comb += [
                 # Mux writes frames into a small FIFO / skid buffer.

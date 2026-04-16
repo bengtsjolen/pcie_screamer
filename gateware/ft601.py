@@ -10,17 +10,14 @@ from litex.soc.cores.usb_fifo import phy_description
 
 class FT601Sync(Module):
     def __init__(self, pads, dw=32, timeout=256):
-        # FIFO depths chosen to match ufrisk's PCIeSquirrel reference:
-        #   - write_fifo (sys→usb): ufrisk uses fifo_32_32_clk1_comtx with depth 8192
-        #     (32 KB).  A typical pcileech USB read is 0x1E000 ≈ 120 KB; having tens
-        #     of KB of buffering here means FT601 can sustain a USB transfer across
-        #     transient upstream stalls (mux/CDC gaps, PCIe CplD inter-packet gaps)
-        #     without emitting a USB short-packet that terminates the host's read
-        #     early.
-        #   - read_fifo (usb→sys): RX traffic is low-rate (commands + MRd TLPs).
-        #     256 entries (1 KB) is plenty.
-        read_fifo = ClockDomainsRenamer({"write": "usb", "read": "sys"})(stream.AsyncFIFO(phy_description(dw), 256))
-        write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(stream.AsyncFIFO(phy_description(dw), 8192))
+        # Note: stream.AsyncFIFO in migen/LiteX uses async-read distributed RAM
+        # (RAMD64E).  Bumping these depths to ufrisk-equivalent sizes (ufrisk
+        # uses fifo_32_32_clk1_comtx with depth 8192 ≈ 32 KB in BRAM) blows
+        # the XC7A35T LUT-RAM budget.  Keeping originals; for deeper BRAM-
+        # backed versions switch to AsyncFIFOBuffered or a custom BRAM-backed
+        # async FIFO wrapper.
+        read_fifo = ClockDomainsRenamer({"write": "usb", "read": "sys"})(stream.AsyncFIFO(phy_description(dw), 128))
+        write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(stream.AsyncFIFO(phy_description(dw), 1024))
 
         read_buffer = ClockDomainsRenamer("usb")(stream.SyncFIFO(phy_description(dw), 4))
         self.comb += read_buffer.source.connect(read_fifo.sink)
