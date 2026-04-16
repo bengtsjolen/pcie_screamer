@@ -837,8 +837,15 @@ class PCILeechFIFO(Module):
         # CfgRd/CfgWr and other TLPs from enumeration are discarded.
         # Matches ufrisk pcileech_tlps128_filter cfgtlp_filter=1 behavior.
         # ===================================================================
+        # tlp_rx_fifo depth: ufrisk's reference uses a 256-entry 134-bit FIFO
+        # (fifo_134_134_clk2_rxfifo, ~4 KB) ahead of the TLP filter, plus a
+        # 256-entry 74-bit FIFO (fifo_74_74_clk1_bar_rd1) in the filter output
+        # path.  We merge those into a single 32-bit-wide FIFO here; 2048
+        # entries × 41 bits = ~8 KB, enough to decouple PCIe RX bursts from
+        # the downstream mux/serializer/USB path even when the USB side is
+        # briefly stalled during bus turnaround.  BRAM cost ≈ 3 × RAMB36.
         self.submodules.tlp_rx_fifo = tlp_rx_fifo = SyncFIFO(
-            phy_layout(32), 512
+            phy_layout(32), 2048
         )
         tlp_filter_bypass = Signal()  # wired to ~rw[202] after rw is defined
         # TLP filter state: track first beat and whether current TLP passes
@@ -868,20 +875,46 @@ class PCILeechFIFO(Module):
 
         
         # Gate TLP RX into FIFO: first beat requires Cpl/CplD, subsequent beats follow filter state
-        tlp_rx_gated_valid = Signal()
+        tlp_rx_pass_beat   = Signal()   # this beat passes the filter (want to keep)
+        tlp_rx_gated_valid = Signal()   # this beat will be written to the FIFO
         self.comb += [
-            # rw[202]=cfgtlp_filter_en: when 1 (default), only pass Cpl/CplD
-            # when 0, pass all TLPs (useful for debugging — set reset value to 0)
-            # tlp_filter_bypass=1 → pass all TLPs; =0 → only Cpl/CplD
-            tlp_rx_gated_valid.eq(self.tlp_rx.valid & 
+            # rw[202]=cfgtlp_filter_en: when 1 (default), only pass Cpl/CplD;
+            # when 0, pass all TLPs (useful for debugging — set reset value to 0).
+            # tlp_filter_bypass=1 → pass all TLPs; =0 → only Cpl/CplD.
+            tlp_rx_pass_beat.eq(
                 Mux(tlp_filter_bypass,
                     1,
                     Mux(tlp_filter_first, tlp_is_cpl, tlp_filter_pass))),
+            tlp_rx_gated_valid.eq(self.tlp_rx.valid & tlp_rx_pass_beat),
             tlp_rx_fifo.sink.valid.eq(tlp_rx_gated_valid),
             tlp_rx_fifo.sink.dat  .eq(self.tlp_rx.dat),
             tlp_rx_fifo.sink.be   .eq(self.tlp_rx.be),
             tlp_rx_fifo.sink.last .eq(self.tlp_rx.last),
-            self.tlp_rx.ready     .eq(tlp_rx_fifo.sink.ready),
+            # CRITICAL backpressure rule: only a TLP we actually want to keep
+            # may stall m_axis_rx when the FIFO is full.  A TLP that the
+            # filter is discarding MUST be consumed unconditionally — it
+            # never touches the FIFO, so FIFO fullness is irrelevant for it.
+            #
+            # The previous code wired ready = tlp_rx_fifo.sink.ready
+            # unconditionally, which meant a filtered (dropped) TLP
+            # arriving while the FIFO was full would still stall the
+            # PCIe IP's m_axis_rx.  Under sustained traffic this creates
+            # head-of-line blocking: every filtered TLP (CfgRd/CfgWr,
+            # MsgD, internal Xilinx completions, etc.) behind a burst
+            # of CplDs waits for downstream drain.  That pressure
+            # propagates into the IP's internal buffer, starves flow
+            # control credits back to the root complex, and causes
+            # outstanding MRds to hit the host's Completion Timeout.
+            #
+            # Matches ufrisk's pcileech_pcie_tlp_a7.sv, where the filter
+            # can always discard upstream regardless of the filter's
+            # output-FIFO state.
+            self.tlp_rx.ready.eq(
+                Mux(tlp_rx_pass_beat,
+                    tlp_rx_fifo.sink.ready,   # real CplD: stall until FIFO has room
+                    1,                         # filtered: consume and drop
+                )
+            ),
         ]
 
         # Diagnostic: expose tlp_rx_fifo level + rx_seen counter via CMD register
@@ -892,9 +925,13 @@ class PCILeechFIFO(Module):
                 rx_seen_count.eq(rx_seen_count + 1),
             )
         ]
+        # FIFO depth bumped to 2048 (level is 12 bits).  We pack the top 12
+        # bits of level (so the diagnostic shows 8× scaled fill — each LSB =
+        # 16 entries ≈ 64 bytes) plus the low 2 bits of a seen-count plus the
+        # two phy-seen bits, to keep the CMD register readout 16 bits wide.
         self.comb += self.tlp_rx_level.eq(Cat(
-            tlp_rx_fifo.level[0:9],  # [8:0]  fifo fill level (9 bits for depth 512)
-            rx_seen_count[0:5],      # [13:9] beats reaching self.tlp_rx
+            tlp_rx_fifo.level[4:16], # [11:0] fifo fill level / 16 (spans 0..2048)
+            rx_seen_count[0:2],      # [13:12] low bits of beats reaching tlp_rx
             self.phy_source_seen,    # [14]   pcie_phy.source.valid fired (after CDC)
             self.phy_raw_rx_seen,    # [15]   m_axis_rx_tvalid fired (raw PCIe IP RX)
         ))
@@ -1031,45 +1068,42 @@ class PCILeechFIFO(Module):
         cfg_cmd_valid = cfg_rx_fifo.source.valid
         cfg_addr_byte = Signal(16)
         cfg_cmd_read  = Signal()
+        cfg_f_rw      = Signal()
         self.comb += [
             cfg_addr_byte.eq(cfg_cmd[16:32]),
+            # Address bit 15 selects rw[] (1) vs ro[] (0), per
+            # pcileech_pcie_cfg_a7.sv: `wire f_rw = in_cmd_address_byte[15]`.
+            cfg_f_rw     .eq(cfg_addr_byte[15]),
             cfg_cmd_read .eq(cfg_cmd_valid & ~ResetSignal()),  # gate on reset to prevent spurious boot responses
             cfg_rx_fifo.source.ready.eq(1),
         ]
 
-        # CFG register readback — mirrors pcileech_pcie_cfg_a7.sv mapping.
-        # Handles both ro[] (READONLY) and rw[] (READWRITE) reads.
-        # All addresses are byte-addressed; we respond with a 16-bit value per read.
-        # Byte offset → bits:
-        #   0x000A: ro[85:80]  = pl_ltssm_state[5:0]
-        #   0x000C: ro[97:96]  = pl_sel_lnk_width, ro[98]=pl_phy_lnk_up, ro[102]=pl_sel_lnk_rate
-        #   0x0016: rw[191:176]= pl_directed_link_* + pl_transmit_hot_rst (read back rw value)
-        # Word index = byte_offset >> 1
-        cfg_word_index  = Signal(8)
-        cfg_ro_readback = Signal(16)
-        self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])  # byte_addr >> 1
-
-        # CFG register layout mirrors ufrisk pcileech_pcie_cfg_a7.sv ro[] exactly.
-        # ro[] is byte-addressed; pcileech reads 16 bits at a time with byteswap:
-        #   returned value = {ro[b+7:b], ro[b+15:b+8]} (lo byte first in FIFO)
-        # We build cfg_ro_readback[15:0] = ro[b+15:b] directly; the FIFO path
-        # bytswaps it correctly in cfg_tx_fifo.sink.data below.
+        # -------------------------------------------------------------------
+        # CFG register-space readback
+        # -------------------------------------------------------------------
+        # This block mirrors pcileech_pcie_cfg_a7.sv's ro[]/rw[] layout.
+        # pcileech selects between spaces using bit 15 of the address byte
+        # (f_rw): 0 ⇒ ro[], 1 ⇒ rw[].  Each 16-bit read returns
+        # {ro|rw}[addr_bit+:16], built from the full 384-bit ro[] / 704-bit
+        # rw[] vectors.
         #
-        # ro[85:80]  = pl_ltssm_state[5:0]      (byte 0x000a bits[5:0])
-        # ro[87:86]  = pl_rx_pm_state[1:0]       (byte 0x000a bits[7:6])
-        # ro[90:88]  = pl_tx_pm_state[2:0]       (byte 0x000b bits[2:0])
-        # ro[93:91]  = pl_initial_link_width[2:0] (byte 0x000b bits[5:3])
-        # ro[95:94]  = pl_lane_reversal[1:0]     (byte 0x000b bits[7:6])
-        # ro[97:96]  = pl_sel_lnk_width[1:0]     (byte 0x000c bits[1:0])
-        # ro[98]     = pl_phy_lnk_up              (byte 0x000c bit[2])
-        # ro[99]     = pl_link_gen2_cap           (byte 0x000c bit[3])
-        # ro[100]    = pl_link_partner_gen2_sup   (byte 0x000c bit[4])
-        # ro[101]    = pl_link_upcfg_cap          (byte 0x000c bit[5])
-        # ro[102]    = pl_sel_lnk_rate            (byte 0x000c bit[6])
-        # ro[103]    = pl_directed_change_done    (byte 0x000c bit[7])
+        # NOTE: we don't currently implement cfg_mgmt access (raw PCIe
+        # config space read/write through the Xilinx management interface)
+        # or the static-TLP-transmit feature, so those rw[] bits just
+        # read back their reset values.  That's sufficient for pcileech to
+        # enumerate the endpoint, read cfg_dcommand for MaxReadReq sizing,
+        # and drive the mainline memory-read path.
+        # -------------------------------------------------------------------
+        cfg_word_index  = Signal(8)
+        cfg_ro_rd       = Signal(16)
+        cfg_rw_rd       = Signal(16)
+        cfg_readback    = Signal(16)
+        # Byte address bits [14:1] → 16-bit word index (ignore bit 0 = alignment,
+        # bit 15 = f_rw).
+        self.comb += cfg_word_index.eq(cfg_addr_byte[1:9])
 
-        # Derive pl_initial_link_width (3-bit count) from pl_sel_lnk_width (2-bit encoded)
-        # sel=00→1, sel=01→2, sel=10→4
+        # Derive pl_initial_link_width (3-bit count) from pl_sel_lnk_width
+        # (2-bit encoded: 00→x1, 01→x2, 10→x4).
         initial_link_width = Signal(3)
         self.comb += Case(self.phy_lnk_width, {
             0b00: initial_link_width.eq(1),
@@ -1078,40 +1112,118 @@ class PCILeechFIFO(Module):
             "default": initial_link_width.eq(1),
         })
 
+        # ==== CFG ro[] readback (384 bits total = 24 × 16-bit words) ====
+        # Word layout matches pcileech_pcie_cfg_a7.sv ro[] assignments:
+        #   word  0 : ro[ 15:  0] = MAGIC (0x2301)
+        #   word  1 : ro[ 31: 16] = cfg_mgmt_rd/wr_en + zeros
+        #   word  2 : ro[ 47: 32] = bytecount low (384/8 = 48 = 0x0030)
+        #   word  3 : ro[ 63: 48] = bytecount high (0)
+        #   word  4 : ro[ 79: 64] = PCIe BDF {bus, dev, func}
+        #   word  5 : ro[ 95: 80] = pl_ltssm + pm_state + init_lnk_width + lane_rev
+        #   word  6 : ro[111: 96] = lnk_width + lnk_up + caps + rate + done + hot_rst
+        #   word  7 : ro[127:112] = slack + cfg_mgmt_rd_wr_done
+        #   word  8 : ro[143:128] = cfg_mgmt_do[15:0]
+        #   word  9 : ro[159:144] = cfg_mgmt_do[31:16]
+        #   word 10 : ro[175:160] = cfg_command
+        #   word 11 : ro[191:176] = AER + cfg_pcie_link_state + pmcsr
+        #   word 12 : ro[207:192] = cfg_dcommand              ← KEY for MaxReadReq
+        #   word 13 : ro[223:208] = cfg_dcommand2
+        #   word 14 : ro[239:224] = cfg_dstatus
+        #   word 15 : ro[255:240] = cfg_lcommand
+        #   word 16 : ro[271:256] = cfg_lstatus
+        #   word 17 : ro[287:272] = cfg_status
+        #   words 18+ : tx_buf_av, cfg_vc, interrupt, cfgrd_* — all zero here
         self.comb += Case(cfg_word_index, {
-            0:  cfg_ro_readback.eq(0x6745),         # byte 0x00: wMagicPCIe
-            4:  cfg_ro_readback.eq(self.phy_id),    # byte 0x08: real BDF from PCIe IP
-            # byte 0x000a: ro[87:80] = {pl_rx_pm_state[1:0], pl_ltssm[5:0]}
-            # byte 0x000b: ro[95:88] = {pl_lane_rev[1:0], pl_init_lnk_width[2:0], pl_tx_pm[2:0]}
-            # ufrisk observed: 000a1608 → value=0x1608, bytes={0x08,0x16}
-            #   byte0(0x000a)=0x16=pl_ltssm=22(L0), byte1(0x000b)=0x08=pl_init_lnk_width=1(x1)
-            # word5: ufrisk returns 0x1608: byte0=0x08=lnk_width, byte1=0x16=ltssm
-            5:  cfg_ro_readback.eq(Cat(
-                    Constant(0, 3),         # ro[90:88] pl_tx_pm_state = 0
-                    initial_link_width,     # ro[93:91] pl_initial_link_width (was self.phy_lnk_width[0:2])
-                    Constant(0, 2),         # ro[95:94] pl_lane_reversal = 0
-                    self.phy_ltssm[0:6],    # ro[85:80] bits[5:0] = ltssm
-                    Constant(0, 2),         # ro[87:86] pl_rx_pm_state = 0
+             0: cfg_ro_rd.eq(0x2301),                           # MAGIC (ro)
+             1: cfg_ro_rd.eq(0x0000),                           # cfg_mgmt_rd/wr_en (stubbed 0)
+             2: cfg_ro_rd.eq(0x0030),                           # bytecount lo = 48
+             3: cfg_ro_rd.eq(0x0000),                           # bytecount hi
+             4: cfg_ro_rd.eq(self.phy_id),                      # BDF
+             5: cfg_ro_rd.eq(Cat(
+                    self.phy_ltssm[0:6],    # ro[85:80] pl_ltssm_state
+                    Constant(0, 2),          # ro[87:86] pl_rx_pm_state
+                    Constant(0, 3),          # ro[90:88] pl_tx_pm_state
+                    initial_link_width,      # ro[93:91] pl_initial_link_width
+                    Constant(0, 2),          # ro[95:94] pl_lane_reversal
                 )),
-            # byte 0x000c: ro[103:96] = {directed_done,lnk_rate,upcfg,partner_gen2,gen2_cap,lnk_up,lnk_width[1:0]}
-            # ufrisk observed: 000c7c00 → value=0x7c00, bytes={0x00,0x7c}
-            #   byte0(0x000c)=0x7c=0b01111100: lnk_width=0b00,lnk_up=1,gen2=1,partner=1,upcfg=1,rate=1,done=0
-            # word6: ufrisk returns 0x7c00: byte0=0x00, byte1=0x7c=lnk_up+caps
-            # readback[7:0]=0, readback[15:8]=lnk_up/rate/caps byte
-            6:  cfg_ro_readback.eq(Cat(
-                    Constant(0, 8),         # byte 0x000d = 0 (low byte)
-                    self.phy_lnk_width[0:2],# ro[97:96] pl_sel_lnk_width
-                    self.phy_lnk_up,        # ro[98]    pl_phy_lnk_up
-                    Constant(1, 1),         # ro[99]    pl_link_gen2_cap = 1
-                    Constant(1, 1),         # ro[100]   pl_link_partner_gen2_supported = 1
-                    Constant(1, 1),         # ro[101]   pl_link_upcfg_cap = 1
-                    self.phy_lnk_rate,      # ro[102]   pl_sel_lnk_rate
-                    Constant(0, 1),         # ro[103]   pl_directed_change_done = 0
-            )),
-            11: cfg_ro_readback.eq(rw[176:192]),    # byte 0x16: pl_directed_link_*
-            12: cfg_ro_readback.eq(self.cfg_dcommand), # byte 0x18: cfg_dcommand
-            "default": cfg_ro_readback.eq(0),
+             6: cfg_ro_rd.eq(Cat(
+                    self.phy_lnk_width[0:2],# ro[97:96]  pl_sel_lnk_width
+                    self.phy_lnk_up,         # ro[98]     pl_phy_lnk_up
+                    Constant(1, 1),          # ro[99]     pl_link_gen2_cap
+                    Constant(1, 1),          # ro[100]    pl_link_partner_gen2_sup
+                    Constant(1, 1),          # ro[101]    pl_link_upcfg_cap
+                    self.phy_lnk_rate,       # ro[102]    pl_sel_lnk_rate
+                    Constant(0, 1),          # ro[103]    pl_directed_change_done
+                    Constant(0, 1),          # ro[104]    pl_received_hot_rst
+                    Constant(0, 7),          # ro[111:105] slack
+                )),
+             7: cfg_ro_rd.eq(0x0000),                           # slack + cfg_mgmt_rd_wr_done (0)
+             8: cfg_ro_rd.eq(0x0000),                           # cfg_mgmt_do[15:0]
+             9: cfg_ro_rd.eq(0x0000),                           # cfg_mgmt_do[31:16]
+            10: cfg_ro_rd.eq(0x0000),                           # cfg_command (stub 0)
+            11: cfg_ro_rd.eq(0x0000),                           # AER/link_state/pmcsr
+            12: cfg_ro_rd.eq(self.cfg_dcommand),                # ★ cfg_dcommand ★
+            13: cfg_ro_rd.eq(0x0000),                           # cfg_dcommand2
+            14: cfg_ro_rd.eq(0x0000),                           # cfg_dstatus
+            15: cfg_ro_rd.eq(0x0000),                           # cfg_lcommand
+            16: cfg_ro_rd.eq(0x0000),                           # cfg_lstatus
+            17: cfg_ro_rd.eq(0x0000),                           # cfg_status
+            "default": cfg_ro_rd.eq(0x0000),
         })
+
+        # ==== CFG rw[] readback (704 bits total = 44 × 16-bit words) ====
+        # Word layout matches pcileech_pcie_cfg_a7.sv rw[] initialvalues task:
+        #   word  0 : rw[ 15:  0] = MAGIC (0x6745)
+        #   word  1 : rw[ 31: 16] = rd/wr/wait/static_tlp/status_cl enables (all 0)
+        #   word  2 : rw[ 47: 32] = bytecount low (704/8 = 88 = 0x0058)
+        #   word  3 : rw[ 63: 48] = bytecount high
+        #   words 4–7 : rw[127: 64] = cfg_dsn = 0x0000_0001_0100_0A35 (little-endian)
+        #   words 8–9 : rw[159:128] = cfg_mgmt_di (0)
+        #   word 10   : rw[175:160] = cfg_mgmt_dwaddr + flags; reset has byte_en=0xf (bits 175:172)
+        #   word 11   : rw[191:176] = pl_directed_link_*; reset → 0x0048
+        #               (bit 179 pl_directed_link_speed=1 → +0x08,
+        #                bit 182 pl_upstream_prefer_deemph=1 → +0x40)
+        #   word 12   : rw[207:192] = cfg_interrupt_* (0)
+        #   word 13   : rw[223:208] = cfg_pm_*/turnoff_ok + rx_np_ok + rx_np_req + tx_cfg_gnt
+        #               reset → bits 217..219 = 1 → 0x0E00
+        #   words 14–26: TLP_STATIC DWORDs (unused → 0)
+        #   words 27–28: TLP_STATIC_TLP_RETRANSMIT_COUNT
+        #   words 29–30: CFGSPACE_STATUS_CLEAR TIMER (default 62500 = 0xF424)
+        #
+        # We currently do NOT implement CFG writes, so rw[] reads always return
+        # the reset values above.  That's intentional: pcileech only *reads*
+        # rw[] during enumeration to sanity-check the bitstream.  When we later
+        # want to expose raw-config-space access via cfg_mgmt_rd_en, we'll
+        # need to add a proper rw[] register file with writable bits and
+        # process writes from `in_cmd_write & cfg_f_rw`.
+        self.comb += Case(cfg_word_index, {
+             0: cfg_rw_rd.eq(0x6745),       # rw MAGIC
+             1: cfg_rw_rd.eq(0x0000),
+             2: cfg_rw_rd.eq(0x0058),       # bytecount lo = 88
+             3: cfg_rw_rd.eq(0x0000),
+             # cfg_dsn little-endian: 0x0000_0001_0100_0A35
+             4: cfg_rw_rd.eq(0x0A35),
+             5: cfg_rw_rd.eq(0x0100),
+             6: cfg_rw_rd.eq(0x0001),
+             7: cfg_rw_rd.eq(0x0000),
+             8: cfg_rw_rd.eq(0x0000),       # cfg_mgmt_di
+             9: cfg_rw_rd.eq(0x0000),
+            10: cfg_rw_rd.eq(0xF000),       # cfg_mgmt_byte_en=0xf at bits 175:172
+            11: cfg_rw_rd.eq(0x0048),       # pl_directed_link_speed=1 + pl_upstream_prefer_deemph=1
+            12: cfg_rw_rd.eq(0x0000),
+            13: cfg_rw_rd.eq(0x0E00),       # rx_np_ok=rx_np_req=tx_cfg_gnt=1
+            # TLP_STATIC region + timer: all zero / defaults
+            29: cfg_rw_rd.eq(0xF424),       # CFGSPACE_STATUS_CLEAR TIMER lo = 62500 & 0xFFFF
+            30: cfg_rw_rd.eq(0x0000),       # CFGSPACE_STATUS_CLEAR TIMER hi
+            "default": cfg_rw_rd.eq(0x0000),
+        })
+
+        # Select ro[] vs rw[] per f_rw (address bit 15).
+        self.comb += If(cfg_f_rw,
+            cfg_readback.eq(cfg_rw_rd),
+        ).Else(
+            cfg_readback.eq(cfg_ro_rd),
+        )
 
         self.comb += [
             # Response format per DeviceFPGA_ConfigRead parser:
@@ -1119,8 +1231,8 @@ class PCILeechFIFO(Module):
             #   dwData[31:16] = value (byte-swapped per SV convention)
             cfg_tx_fifo.sink.valid.eq(cfg_cmd_read),
             cfg_tx_fifo.sink.data .eq(Cat(
-                cfg_ro_readback[0:8], cfg_ro_readback[8:16],  # X[15:0]  = value (lo byte, hi byte)
-                cfg_addr_byte[0:8],   cfg_addr_byte[8:16],    # X[31:16] = addr (lo byte, hi byte)
+                cfg_readback[0:8],  cfg_readback[8:16],   # X[15:0]  = value (lo byte, hi byte)
+                cfg_addr_byte[0:8], cfg_addr_byte[8:16],  # X[31:16] = addr (lo byte, hi byte)
             )),
             cfg_tx_fifo.sink.last .eq(1),
         ]
@@ -1560,11 +1672,20 @@ class PCILeechFIFO(Module):
         
         # Connect mux output to serializer
         if 1:
-            # Decouple mux from serializer with a deeper FIFO.
-            # The SV reference uses a ~2KB 256→32 async FIFO here.
-            # With depth 32, we get 32×32=1KB of buffering which absorbs
-            # FT601 bus turnaround stalls without backpressuring the mux.
-            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 32)
+            # Decouple mux from serializer with a deep FIFO.
+            #
+            # Ufrisk's PCIeSquirrel reference uses fifo_256_32_clk2_comtx
+            # (256-bit input, depth 4096 = 128 KB) here.  The sizing is not
+            # arbitrary: a typical pcileech USB read is 0x1E000 ≈ 120 KB, and
+            # ufrisk holds a full USB transfer's worth of data staged before
+            # the serializer so the USB side never needs to wait on the PCIe
+            # pipeline mid-transfer.
+            #
+            # 2048 entries × 256 bits = 64 KB is a good compromise on the
+            # Artix-7 XC7A35T (16 × RAMB36 of 50 total, leaving room for the
+            # other FIFOs + PCIe hard-IP BRAMs).  Bump to 4096 for a full
+            # 128 KB match with ufrisk if BRAM budget permits.
+            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 2048)
 
             self.comb += [
                 # Mux writes frames into a small FIFO / skid buffer.

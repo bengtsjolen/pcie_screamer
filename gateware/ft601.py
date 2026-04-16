@@ -10,8 +10,17 @@ from litex.soc.cores.usb_fifo import phy_description
 
 class FT601Sync(Module):
     def __init__(self, pads, dw=32, timeout=256):
-        read_fifo = ClockDomainsRenamer({"write": "usb", "read": "sys"})(stream.AsyncFIFO(phy_description(dw), 128))
-        write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(stream.AsyncFIFO(phy_description(dw), 1024))
+        # FIFO depths chosen to match ufrisk's PCIeSquirrel reference:
+        #   - write_fifo (sys→usb): ufrisk uses fifo_32_32_clk1_comtx with depth 8192
+        #     (32 KB).  A typical pcileech USB read is 0x1E000 ≈ 120 KB; having tens
+        #     of KB of buffering here means FT601 can sustain a USB transfer across
+        #     transient upstream stalls (mux/CDC gaps, PCIe CplD inter-packet gaps)
+        #     without emitting a USB short-packet that terminates the host's read
+        #     early.
+        #   - read_fifo (usb→sys): RX traffic is low-rate (commands + MRd TLPs).
+        #     256 entries (1 KB) is plenty.
+        read_fifo = ClockDomainsRenamer({"write": "usb", "read": "sys"})(stream.AsyncFIFO(phy_description(dw), 256))
+        write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(stream.AsyncFIFO(phy_description(dw), 8192))
 
         read_buffer = ClockDomainsRenamer("usb")(stream.SyncFIFO(phy_description(dw), 4))
         self.comb += read_buffer.source.connect(read_fifo.sink)
@@ -154,13 +163,12 @@ class FT601Sync(Module):
         )
 
         fsm.act("WRITE",
-            If(wants_read,
-                NextValue(cnt_write, cnt_write + 1),
-            ),
             NextValue(first_write, 0),
 
             rd_n.eq(1),
             If(pads.txe_n,
+                # Host can't accept more: stash the pending word and bounce
+                # back to IDLE.  IDLE will decide TX vs RX on re-entry.
                 oe_n.eq(1),
                 wr_n.eq(1),
                 write_fifo.source.ready.eq(0),
@@ -174,6 +182,9 @@ class FT601Sync(Module):
                 wr_n.eq(0),
                 NextValue(temptosend, 0)
             ).Elif(write_fifo.source.valid,
+                # Active write beat — push a FIFO word to FT601 and reset
+                # drain_wait so a transient empty FIFO state doesn't
+                # prematurely exit WRITE.
                 oe_n.eq(1),
                 data_w.eq(write_fifo.source.data),
                 write_fifo.source.ready.eq(1),
@@ -181,20 +192,17 @@ class FT601Sync(Module):
                 NextValue(temptosend, 0),
                 NextValue(drain_wait, 0),
                 wr_n.eq(0),
-            ).Elif(cnt_write > timeout,
-                # Only switch to READ when write_fifo is empty AND
-                # the RX timeout has expired.  This matches the SV reference
-                # pcileech_ft601.sv where TX_ACTIVE stays active as long as
-                # there's data — RX is only checked at IDLE or after TX
-                # naturally runs out of data.
-                # CRITICAL: the old code checked cnt_write BEFORE write_fifo,
-                # which forced a READ switch while TX data was still flowing.
-                # This caused the pipeline to stall → PCIe IP to drop TLPs.
-                oe_n.eq(0),
-                NextState("RDWAIT")
             ).Else(
-                # write_fifo empty, no RX timeout yet — wait for pipeline
-                # to refill before going IDLE.
+                # write_fifo is empty (source.valid==0 ⇒ FIFO read-side level==0).
+                # Hold in WRITE for up to `drain_wait_max` cycles waiting for
+                # more upstream data.  This matches ufrisk's architecture:
+                # pcileech_ft601.sv TX_ACTIVE does NOT transition directly to
+                # RX; it only leaves via TX_COOLDOWN → IDLE.  Any RX servicing
+                # happens only after IDLE is re-entered.
+                #
+                # drain_wait_max = 1000 cycles ≈ 10 µs @ 100 MHz — covers
+                # typical inter-CplD gaps from the PCIe root complex and the
+                # sys→usb CDC latency through the AsyncFIFO.
                 oe_n.eq(1),
                 wr_n.eq(1),
                 If(drain_wait < 1000,
