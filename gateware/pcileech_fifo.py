@@ -222,39 +222,46 @@ class PCILeechMux(Module):
 # ---------------------------------------------------------------------------
 class MuxSerializer(Module):
     # ---------------------------------------------------------------------
-    # CRITICAL: sync words (0x66665555 × 5) must be emitted ONLY at the
-    # start of a USB burst — they delimit the start of a frame sequence
-    # for pcileech's host-side parser.
+    # Sync words (0x66665555 × 5) are emitted at the start of every USB
+    # burst — pcileech scans for them to locate the start of a frame
+    # sequence after each bulk-in transfer.  Mid-burst phantom sync words
+    # must NOT appear, or pcileech resyncs and discards completion tags.
     #
-    # Previous implementation re-entered IDLE whenever SEND ran out of
-    # frames (count==0 with no back-to-back sink data), and IDLE re-emitted
-    # 5 sync words the next time a frame arrived.  That injected phantom
-    # sync words MID-STREAM on any 1-cycle pipeline gap, which pcileech
-    # interpreted as a new frame sequence — throwing away the preceding
-    # tag's remaining completions and stalling forever waiting for data
-    # it had already been sent.
+    # Control flow:
     #
-    # Symptom: deterministic stall on 10-page dumps (pipeline gap occurs
-    # reliably) but not 9 (which happens to stream back-to-back).
+    #   IDLE   — waiting for first frame after cold reset or burst start.
+    #            First frame triggers RESYNC (sync preamble) then SEND.
+    #   RESYNC — emits 5 × 0x66665555.  Clears need_sync latch on exit.
+    #   SEND   — emits 8 × 32-bit words from the buffered 256-bit frame.
+    #            At count==0, grabs the next frame back-to-back if
+    #            available, else parks in WAIT.
+    #   WAIT   — silent hold during a mid-burst pipeline gap.  Resumes
+    #            SEND with no sync.  If need_sync was re-asserted via
+    #            start_sync (new USB burst), jumps to RESYNC instead.
     #
-    # Fix: separate "cold start" (IDLE → RESYNC → SEND, emits sync) from
-    # "mid-burst pause" (SEND → WAIT → SEND, no sync).  IDLE is now
-    # entered only at reset.  Any stall during an active burst parks in
-    # WAIT, which silently waits for the next frame and then resumes
-    # sending without re-emitting sync.
+    # `start_sync` is a 1-cycle external pulse (driven by the burst FSM's
+    # rising edge of burst_gate) that latches need_sync=1, requesting a
+    # fresh sync preamble before the next frame — exactly matching
+    # ufrisk's pcileech_com behaviour of prefixing 5 sync words to every
+    # USB bulk-in transfer.
     # ---------------------------------------------------------------------
     def __init__(self):
-        self.sink   = stream.Endpoint([("data", 256)])
-        self.source = stream.Endpoint([("data", 32)])
+        self.sink       = stream.Endpoint([("data", 256)])
+        self.source     = stream.Endpoint([("data", 32)])
+        self.start_sync = Signal()   # 1-cycle pulse: request sync at next frame
 
-        buf   = Signal(256)
-        count = Signal(3)
-        rsync = Signal(3)
+        buf       = Signal(256)
+        count     = Signal(3)
+        rsync     = Signal(3)
+        need_sync = Signal(reset=1)  # 1 at reset so the very first burst gets sync
 
         self.submodules.fsm = fsm = FSM(reset_state="IDLE")
 
-        # IDLE: cold start (reset).  First frame triggers full RESYNC to
-        # emit the 5 × 0x66665555 preamble that pcileech scans for.
+        # Latch need_sync when the burst FSM signals the start of a new
+        # USB burst.  Cleared inside RESYNC once the preamble is complete.
+        self.sync += If(self.start_sync, need_sync.eq(1))
+
+        # IDLE: waiting for the first frame of a burst.  Always emits sync.
         fsm.act("IDLE",
                 self.sink.ready.eq(1),
                 If(self.sink.valid,
@@ -269,6 +276,7 @@ class MuxSerializer(Module):
                 self.source.data.eq(0x66665555),
                 If(self.source.ready,
                    If(rsync == 0,
+                      NextValue(need_sync, 0),
                       NextState("SEND"),
                       ).Else(
                           NextValue(rsync, rsync - 1),
@@ -280,19 +288,17 @@ class MuxSerializer(Module):
                 self.source.data.eq(buf[224:256]),
                 If(self.source.ready,
                    If(count == 0,
-                      # Last word of current frame sent — try to grab the
-                      # next frame immediately (back-to-back, no sync).
+                      # End of current frame — grab the next one back-to-back
+                      # if available.
                       self.sink.ready.eq(1),
                       If(self.sink.valid,
                          NextValue(buf,   self.sink.data),
                          NextValue(count, 7),
-                         # Stay in SEND
+                         # Stay in SEND.  Even if a new USB burst started
+                         # mid-SEND (need_sync latched), we are clearly
+                         # still streaming continuously, so no sync here.
                          ).Else(
-                             # No frame available RIGHT NOW, but we are
-                             # mid-burst.  Park in WAIT (NOT IDLE) so the
-                             # next frame resumes streaming without
-                             # re-emitting the sync preamble, which would
-                             # corrupt pcileech's frame-boundary detection.
+                             # Mid-burst pause — park silently in WAIT.
                              NextState("WAIT"),
                          )
                       ).Else(
@@ -301,16 +307,22 @@ class MuxSerializer(Module):
                       )
                    )
                 )
-        # WAIT: mid-burst pause.  Source is silent (valid=0).  Hand the
-        # sink.ready upstream so a new frame can be accepted the instant
-        # it becomes available, then resume SEND with no resync.
+        # WAIT: pipeline silent.  When the next frame arrives, resume SEND
+        # directly — unless need_sync has been re-asserted by the burst
+        # FSM (indicating a new USB transfer has started), in which case
+        # we emit a fresh sync preamble first.
         fsm.act("WAIT",
                 self.source.valid.eq(0),
                 self.sink.ready.eq(1),
                 If(self.sink.valid,
                    NextValue(buf,   self.sink.data),
                    NextValue(count, 7),
-                   NextState("SEND"),
+                   If(need_sync,
+                      NextValue(rsync, 4),
+                      NextState("RESYNC"),
+                      ).Else(
+                          NextState("SEND"),
+                      )
                    )
                 )
 
@@ -1869,6 +1881,19 @@ class PCILeechFIFO(Module):
                 serializer.sink.valid.eq(mux_out_fifo.source.valid & burst_gate),
                 serializer.sink.data .eq(mux_out_fifo.source.data),
                 mux_out_fifo.source.ready.eq(serializer.sink.ready & burst_gate),
+            ]
+
+            # Burst-start pulse: rising edge of burst_gate marks the start
+            # of a new USB bulk-in transfer.  The serializer uses this to
+            # emit a fresh 5 × 0x66665555 sync preamble — ufrisk does the
+            # same on every Bi, and pcileech's host parser relies on it
+            # to align frame boundaries across USB transfer boundaries.
+            burst_gate_prev   = Signal()
+            burst_start_pulse = Signal()
+            self.sync += burst_gate_prev.eq(burst_gate)
+            self.comb += [
+                burst_start_pulse.eq(burst_gate & ~burst_gate_prev),
+                serializer.start_sync.eq(burst_start_pulse),
             ]
 
             # Diagnostic hooks (optional, wired to read-only status regs if needed)
