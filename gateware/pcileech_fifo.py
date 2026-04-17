@@ -728,6 +728,28 @@ class PCILeechFIFO(Module):
         self.diag_rx_tlp_seen     = Signal(16)  # count of m_axis_rx.last & valid (TLPs delivered by IP)
         self.diag_tx_err_drop_cnt = Signal(16)  # sticky count of tx_err_drop pulses
 
+        # TLP RX analysis diagnostics. Help distinguish between
+        #   (a) IP delivered all 160 CplDs but our pipeline lost 9
+        #   (b) IP only delivered 151 CplDs (RC didn't send more)
+        #   (c) the 151 number contains non-CplD TLPs
+        #
+        # diag_tlp_rx_cpl_count    : count of CplD TLPs arriving at tlp_rx
+        #                            (last-event count for TLPs whose first-beat
+        #                             byte0 matched CplD type 0x4a / 0x4b or Cpl 0x0a).
+        # diag_tlp_rx_other_count  : count of non-Cpl/CplD TLPs at tlp_rx
+        #                            (TLPs the filter dropped).
+        # diag_tlp_rx_fifo_peak    : high-water-mark of tlp_rx_fifo.level.
+        #                            If this never approaches 2048, we never
+        #                            backpressured the IP and the 9 missing
+        #                            CplDs are lost upstream of our fabric.
+        # diag_tlp_rx_stall_cnt    : number of pcie-domain cycles where
+        #                            tlp_rx.valid & ~tlp_rx.ready (i.e. we
+        #                            actively stalled m_axis_rx).
+        self.diag_tlp_rx_cpl_count   = Signal(16)
+        self.diag_tlp_rx_other_count = Signal(16)
+        self.diag_tlp_rx_fifo_peak   = Signal(16)
+        self.diag_tlp_rx_stall_cnt   = Signal(16)
+
         rxfifo_in_seen   = Signal(16)
         rxfifo_out_seen  = Signal(16)
         mux_p3_wr_seen   = Signal(16)
@@ -991,6 +1013,51 @@ class PCILeechFIFO(Module):
             If(self.tlp_rx.valid & self.tlp_rx.ready,
                 rx_seen_count.eq(rx_seen_count + 1),
             )
+        ]
+
+        # -------------------------------------------------------------------
+        # TLP-RX analysis counters (all in self.sync = sys domain, same as
+        # tlp_rx stream after CDC inside pcie_phy).
+        #
+        #   cpl_count   : +1 on the "last" beat of a TLP whose first beat
+        #                 identified as Cpl/CplD (tlp_filter_pass=1).
+        #   other_count : +1 on the "last" beat of a TLP whose first beat
+        #                 did NOT match Cpl/CplD (tlp_filter_pass=0).
+        #   fifo_peak   : running max of tlp_rx_fifo.level (sat 16 bits).
+        #   stall_cnt   : +1 every cycle the IP asserts valid while we hold
+        #                 ready=0 (backpressure applied to m_axis_rx).
+        #
+        # "last" detection: tlp_rx.last & valid & ready edge.
+        # tlp_filter_first = 1 ⇒ next beat is first-of-TLP; at last beat,
+        # tlp_filter_pass holds the first-beat classification.
+        # -------------------------------------------------------------------
+        tlp_rx_last_edge = Signal()
+        self.comb += tlp_rx_last_edge.eq(
+            self.tlp_rx.valid & self.tlp_rx.ready & self.tlp_rx.last
+        )
+
+        # first-beat match: the *current* beat is a first-beat (tlp_filter_first=1)
+        # and tlp_is_cpl is a pass. For single-beat TLPs, first-beat and last
+        # coincide, so we need to check both conditions at the last edge.
+        # Use tlp_filter_pass (latched from first-beat) for multi-beat TLPs,
+        # OR (tlp_filter_first & tlp_is_cpl) for single-beat TLPs.
+        first_and_cpl = Signal()
+        self.comb += first_and_cpl.eq(tlp_filter_first & tlp_is_cpl)
+
+        self.sync += [
+            If(tlp_rx_last_edge,
+                If(tlp_filter_pass | first_and_cpl,
+                    self.diag_tlp_rx_cpl_count.eq(self.diag_tlp_rx_cpl_count + 1),
+                ).Else(
+                    self.diag_tlp_rx_other_count.eq(self.diag_tlp_rx_other_count + 1),
+                )
+            ),
+            If(tlp_rx_fifo.level > self.diag_tlp_rx_fifo_peak,
+                self.diag_tlp_rx_fifo_peak.eq(tlp_rx_fifo.level),
+            ),
+            If(self.tlp_rx.valid & ~self.tlp_rx.ready,
+                self.diag_tlp_rx_stall_cnt.eq(self.diag_tlp_rx_stall_cnt + 1),
+            ),
         ]
         # Diagnostic layout: fifo depth is now 2048 so `level` is 11 bits.
         # Use the top 3 bits of the level (i.e. level >> 8) so the 16-bit
@@ -1696,9 +1763,20 @@ class PCILeechFIFO(Module):
             61: ro_readback.eq(self.diag_ser_out_seen),    # 0x007a
             62: ro_readback.eq(self.diag_usbtx_seen),      # 0x007c
 
-            63: ro_readback.eq(self.diag_tx_tlp_seen),     # 0x007e: MRds/CfgWr etc we sent
-            64: ro_readback.eq(self.diag_rx_tlp_seen),     # 0x0080: TLPs the IP delivered (CplDs + others)
-            65: ro_readback.eq(self.diag_tx_err_drop_cnt), # 0x0082: IP-side TX drops (should be 0)
+            63: ro_readback.eq(self.diag_tx_tlp_seen),      # 0x007e: MRds/CfgWr etc we sent
+            64: ro_readback.eq(self.diag_rx_tlp_seen),      # 0x0080: TLPs the IP delivered (CplDs + others)
+            65: ro_readback.eq(self.diag_tx_err_drop_cnt),  # 0x0082: IP-side TX drops (should be 0)
+
+            # ------------------------------------------------------------
+            # RX-side TLP analysis (all counts are at tlp_rx = post-CDC,
+            # post-StrideConverter, post-BEFilter).  Compare the totals to
+            # narrow down where 9 CplDs go missing in a 10-page dump.
+            # ------------------------------------------------------------
+            66: ro_readback.eq(self.diag_tlp_rx_cpl_count),   # 0x0084: Cpl/CplD TLPs that reached tlp_rx
+            67: ro_readback.eq(self.diag_tlp_rx_other_count), # 0x0086: non-Cpl TLPs the filter dropped
+            68: ro_readback.eq(self.diag_tlp_rx_fifo_peak),   # 0x0088: tlp_rx_fifo high-water mark (max level)
+            69: ro_readback.eq(self.diag_tlp_rx_stall_cnt),   # 0x008a: cycles m_axis_rx was back-pressured
+
             
         })
 

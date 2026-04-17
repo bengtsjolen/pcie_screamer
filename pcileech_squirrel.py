@@ -318,24 +318,14 @@ class PCIeSquirrel(SoCMini):
         pcie_phy.config["Extended_Tag_Field"]   = "true"
         pcie_phy.config["Extended_Tag_Default"] = "true"
 
-        # CRITICAL: advertise FINITE CplD credits.
-        #
-        # With Cpl_Finite=false (the LitePCIe/Xilinx default) the IP advertises
-        # INFINITE CplD credits.  The root complex then fires 16 CplDs
-        # back-to-back per 4 KB MRd at ~500 MB/s.  Our USB-bound drain is only
-        # ~40 MB/s, so we backpressure constantly via tready.  The IP's ~4 KB
-        # internal CplD RX buffer fills up and any CplD that arrives while
-        # it's full is silently DROPPED inside the hard IP (no error signal
-        # reaches m_axis_rx — confirmed by rx_tlp_seen = 151 for a 10-page
-        # dump, with tx_err_drop = 0 and every byte conserved downstream of
-        # m_axis_rx).
-        #
-        # Setting Cpl_Finite=true makes the IP advertise its actual CplD
-        # buffer size in credits, so the RC throttles itself based on how
-        # fast we return credits (which we do as we drain).  No more overruns,
-        # no more drops.  Throughput drops to match our drain rate, which is
-        # exactly what we want.
-        pcie_phy.config["Cpl_Finite"] = "true"
+        # NOTE: Cpl_Finite=true was tried — Vivado refuses to set it while
+        #   Buf_Opt_BMA=true:
+        #     [IP_Flow 19-3374] An attempt to modify the value of disabled
+        #     parameter 'Cpl_Finite' from 'false' to 'true' has been ignored.
+        # ufrisk's reference design also uses Cpl_Finite=false with
+        # Buf_Opt_BMA=true, so this is NOT the difference between their
+        # design (works) and ours (drops 9 CplDs on 10-page dump).
+        # Leaving Cpl_Finite at the default (false) deliberately.
 
         # Force GTP placement to X0Y2 (Vivado defaults to X0Y3 for this package)
         platform.toolchain.pre_optimize_commands.append(
