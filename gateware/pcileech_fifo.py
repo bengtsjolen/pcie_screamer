@@ -837,13 +837,21 @@ class PCILeechFIFO(Module):
         # CfgRd/CfgWr and other TLPs from enumeration are discarded.
         # Matches ufrisk pcileech_tlps128_filter cfgtlp_filter=1 behavior.
         # ===================================================================
-        # tlp_rx_fifo: depth kept modest because migen's stream.SyncFIFO maps
-        # to distributed (LUT) RAM — scaling this out to several KB blows the
-        # XC7A35T LUT-RAM budget.  If this ever needs to be deeper, switch it
-        # to `stream.SyncFIFO(..., buffered=True)` which uses synchronous-read
-        # memory and can be inferred as BRAM.
+        # tlp_rx_fifo: BRAM-backed (buffered=True) so we can afford a deep
+        # buffer.  Ufrisk's equivalent (fifo_134_134_clk2) is a 128-bit,
+        # ~1024-deep BRAM FIFO sized so that m_axis_rx never needs to be
+        # stalled during a full CplD burst.  Our PCILeechFIFO uses a 32-bit
+        # bus after the StrideConverter, so we need ~4x more entries for
+        # the same effective buffering.
+        #
+        # 2048 entries × (32 + 4 + 1) ≈ 9 KB → 2-3 BRAM36 tiles.
+        # Using buffered=True switches migen from SyncFIFO(fwft=True,
+        # async_read=True) to SyncFIFOBuffered (sync-read) which Vivado
+        # infers as BRAM, not distributed LUT RAM.  This is critical —
+        # the shallow 512-entry distributed-RAM version blows the LUT-RAM
+        # budget long before it helps throughput.
         self.submodules.tlp_rx_fifo = tlp_rx_fifo = SyncFIFO(
-            phy_layout(32), 512
+            phy_layout(32), 2048, buffered=True
         )
         tlp_filter_bypass = Signal()  # wired to ~rw[202] after rw is defined
         # TLP filter state: track first beat and whether current TLP passes
@@ -923,9 +931,13 @@ class PCILeechFIFO(Module):
                 rx_seen_count.eq(rx_seen_count + 1),
             )
         ]
+        # Diagnostic layout: fifo depth is now 2048 so `level` is 11 bits.
+        # Use the top 3 bits of the level (i.e. level >> 8) so the 16-bit
+        # readback remains useful as a fullness indicator (0..7 in units of 256).
         self.comb += self.tlp_rx_level.eq(Cat(
-            tlp_rx_fifo.level[0:9],  # [8:0]  fifo fill level (9 bits for depth 512)
-            rx_seen_count[0:5],      # [13:9] beats reaching self.tlp_rx
+            tlp_rx_fifo.level[8:11], # [2:0]  fifo fill level (top 3 bits of 11-bit level)
+            tlp_rx_fifo.level[0:8],  # [10:3] fifo fill level (low 8 bits)
+            rx_seen_count[0:3],      # [13:11] beats reaching self.tlp_rx
             self.phy_source_seen,    # [14]   pcie_phy.source.valid fired (after CDC)
             self.phy_raw_rx_seen,    # [15]   m_axis_rx_tvalid fired (raw PCIe IP RX)
         ))
@@ -1220,13 +1232,23 @@ class PCILeechFIFO(Module):
         )
 
         self.comb += [
-            # Response format per DeviceFPGA_ConfigRead parser:
-            #   dwData[15:0]  = _byteswap_ushort(wAddr | flags_C000)  → address echo
-            #   dwData[31:16] = value (byte-swapped per SV convention)
+            # Response format mirrors pcileech_pcie_cfg_a7.sv lines 348-349:
+            #   out_data[31:16] <= in_cmd_address_byte;                    // addr echo, as-is
+            #   out_data[15:0]  <= {in_cmd_data_in[7:0], in_cmd_data_in[15:8]};  // value BYTESWAPPED
+            #
+            # Laid out MSB-first, the 32-bit word is:
+            #   [31:24] addr_hi  [23:16] addr_lo  [15:8] val_lo  [7:0] val_hi
+            #
+            # Observed: ufrisk emits 0x80164800 for addr=0x8016, value=0x0048
+            # ⇒ bits[31:24]=0x80 (addr_hi), [23:16]=0x16 (addr_lo),
+            #    bits[15:8]=0x48 (val_lo),  [7:0]=0x00 (val_hi)
+            #
+            # Cat(a,b,c,d) in Migen is LSB-first: bits[7:0]=a, [15:8]=b, etc.
+            # So we need Cat(val_hi, val_lo, addr_lo, addr_hi).
             cfg_tx_fifo.sink.valid.eq(cfg_cmd_read),
             cfg_tx_fifo.sink.data .eq(Cat(
-                cfg_readback[0:8],  cfg_readback[8:16],   # X[15:0]  = value (lo byte, hi byte)
-                cfg_addr_byte[0:8], cfg_addr_byte[8:16],  # X[31:16] = addr (lo byte, hi byte)
+                cfg_readback[8:16],  cfg_readback[0:8],   # [15:0]  = value byteswapped
+                cfg_addr_byte[0:8],  cfg_addr_byte[8:16], # [31:16] = addr (lo byte first)
             )),
             cfg_tx_fifo.sink.last .eq(1),
         ]
@@ -1632,9 +1654,14 @@ class PCILeechFIFO(Module):
         self.comb += [
             If(in_cmd_read,
                 cmd_tx_valid.eq(1),
+                # Match SV pcileech_fifo.sv line 380-381:
+                #   _cmd_tx_din[31:16] <= in_cmd_address_byte;
+                #   _cmd_tx_din[15:0]  <= {in_cmd_data_in[7:0], in_cmd_data_in[15:8]};
+                # i.e. value is BYTESWAPPED into the low 16 bits.
+                # Migen Cat is LSB-first → Cat(val_hi, val_lo, addr_lo, addr_hi).
                 cmd_tx_data .eq(Cat(
-                    readback[0:8], readback[8:16],
-                    in_addr_byte[0:8], in_addr_byte[8:16],
+                    readback[8:16],  readback[0:8],      # [15:0] = value byteswapped
+                    in_addr_byte[0:8], in_addr_byte[8:16],  # [31:16] = addr as-is
                 )),
             ).Elif(inactivity_fire,
                 cmd_tx_valid.eq(1),
@@ -1666,16 +1693,22 @@ class PCILeechFIFO(Module):
         
         # Connect mux output to serializer
         if 1:
-            # mux_out_fifo: kept shallow because migen's stream.SyncFIFO maps
-            # to distributed (LUT) RAM.  At 256 bits wide, every 4 entries
-            # consumes one RAMD64E cell; deep versions blow the LUT-RAM
-            # budget on the XC7A35T.  Ufrisk's equivalent (fifo_256_32_
-            # clk2_comtx, depth 4096 = 128 KB) is a Xilinx FIFO IP that
-            # maps to BRAM36.  If we want to match ufrisk's size here,
-            # switch to `stream.SyncFIFO(..., buffered=True)` (sync-read,
-            # BRAM-inferable) — that change is independent of the backpressure
-            # fix in the TLP filter and purely a performance tweak.
-            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO([("data", 256)], 32)
+            # mux_out_fifo: BRAM-backed (buffered=True) so we can afford real
+            # depth.  Ufrisk's fifo_256_32_clk2_comtx is 256b × 4096 = 128 KB
+            # of BRAM, sized so the mux→serializer boundary never stalls
+            # during a burst.
+            #
+            # We use 512 entries = 16 KB = ~4 BRAM36 tiles.  That's enough
+            # to absorb an entire 5-page CplD dump at typical rates without
+            # ever backpressuring the mux, while staying well inside the
+            # XC7A35T's BRAM budget (50 tiles).
+            #
+            # IMPORTANT: buffered=True is required.  With the default
+            # (async_read=True), migen allocates distributed RAM (RAMD64E)
+            # which blows the LUT-RAM budget at this width × depth.
+            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO(
+                [("data", 256)], 512, buffered=True
+            )
 
             self.comb += [
                 # Mux writes frames into a small FIFO / skid buffer.

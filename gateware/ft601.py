@@ -10,14 +10,18 @@ from litex.soc.cores.usb_fifo import phy_description
 
 class FT601Sync(Module):
     def __init__(self, pads, dw=32, timeout=256):
-        # Note: stream.AsyncFIFO in migen/LiteX uses async-read distributed RAM
-        # (RAMD64E).  Bumping these depths to ufrisk-equivalent sizes (ufrisk
-        # uses fifo_32_32_clk1_comtx with depth 8192 ≈ 32 KB in BRAM) blows
-        # the XC7A35T LUT-RAM budget.  Keeping originals; for deeper BRAM-
-        # backed versions switch to AsyncFIFOBuffered or a custom BRAM-backed
-        # async FIFO wrapper.
-        read_fifo = ClockDomainsRenamer({"write": "usb", "read": "sys"})(stream.AsyncFIFO(phy_description(dw), 128))
-        write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(stream.AsyncFIFO(phy_description(dw), 1024))
+        # NOTE on sizing: migen's AsyncFIFO uses a synchronous-read port
+        # (see migen/genlib/fifo.py: rdport = storage.get_port(clock_domain="read"),
+        # no async_read=True) so it CAN infer BRAM.  If the design needs
+        # a deeper write_fifo to match ufrisk (fifo_32_32_clk1_comtx ≈ 8192
+        # entries × 32b ≈ 32 KB = 8 BRAM36), bump the depth directly.  The
+        # critical buffers for the 5-page-dump stall live in PCILeechFIFO
+        # (tlp_rx_fifo, mux_out_fifo) — those use buffered=True to force
+        # BRAM inference.
+        read_fifo  = ClockDomainsRenamer({"write": "usb", "read": "sys"})(
+            stream.AsyncFIFO(phy_description(dw), 128))
+        write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(
+            stream.AsyncFIFO(phy_description(dw), 1024))
 
         read_buffer = ClockDomainsRenamer("usb")(stream.SyncFIFO(phy_description(dw), 4))
         self.comb += read_buffer.source.connect(read_fifo.sink)
