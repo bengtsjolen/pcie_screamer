@@ -933,8 +933,16 @@ class PCILeechFIFO(Module):
         # infers as BRAM, not distributed LUT RAM.  This is critical —
         # the shallow 512-entry distributed-RAM version blows the LUT-RAM
         # budget long before it helps throughput.
+        #
+        # Bumped to 8192 after a 10-page dump hit diag_tlp_rx_fifo_peak=2049
+        # with diag_tlp_rx_stall_cnt=24099 (241 µs of m_axis_rx back-pressure).
+        # 8192×37 b ≈ 37 KB → ~9 BRAM36 tiles; xc7a35t has 50, so plenty of
+        # headroom.  This should absorb the entire 10-MRd burst of CplDs
+        # (~43 KB) without ever stalling m_axis_rx, eliminating any risk of
+        # the Xilinx IP silently dropping inside its tiny internal CplD
+        # buffer when Buf_Opt_BMA=true / Cpl_Finite=false.
         self.submodules.tlp_rx_fifo = tlp_rx_fifo = SyncFIFO(
-            phy_layout(32), 2048, buffered=True
+            phy_layout(32), 8192, buffered=True
         )
         tlp_filter_bypass = Signal()  # wired to ~rw[202] after rw is defined
         # TLP filter state: track first beat and whether current TLP passes
@@ -942,12 +950,25 @@ class PCILeechFIFO(Module):
         tlp_filter_pass   = Signal(reset=0)   # current TLP passes filter
         # First DWORD bits[31:25] = {Fmt[2:0], Type[4:3]} — check Cpl/CplD
         tlp_is_cpl = Signal()
-        # PCIe IP delivers byte0 (TLP type) at tdata[7:0], so dat[7:0] = byte0.
-        # byte0 = {R, Fmt[2:0], Type[4:0]}. Cpl=0x0a (fmt=000,type=01010),
-        # CplD=0x4a (fmt=010,type=01010). Check bits[7:1] = {Fmt[2:0],Type[4:3]}:
+        # IMPORTANT byte-order note: Xilinx pcie_7x AXI-Stream uses
+        # "DWORDs in little-endian position, bytes within each DWORD in
+        # BIG-endian order".  That is: byte 0 of the TLP (fmt/type) sits
+        # at tdata[31:24] — NOT tdata[7:0].  Same convention as ufrisk's
+        # pcileech_pcie_tlp_a7.sv line 181:
+        #     (tlps_in.tdata[31:25] == 7'b0100101)   // CplD
+        #
+        # Earlier we wrote this check against dat[1:8] (assuming byte0 at LSB),
+        # which NEVER matched (confirmed by diag_tlp_rx_cpl_count=0 while
+        # 151 TLPs did reach the FIFO).  The filter effectively passed
+        # everything only because rw[202] (cfgtlp_filter_en) was 0 at
+        # runtime — i.e. the filter was bypassed.
+        #
+        # byte0 = {R, Fmt[2:0], Type[4:0]}.  Cpl=0x0a (fmt=000, type=01010),
+        # CplD=0x4a (fmt=010, type=01010).  Check bits[7:1]={Fmt[2:0],Type[4:3]}
+        # at tdata[31:25]:
         self.comb += tlp_is_cpl.eq(
-            (self.tlp_rx.dat[1:8] == 0b0000101) |   # Cpl  byte0[7:1]=0b0000101
-            (self.tlp_rx.dat[1:8] == 0b0100101)     # CplD byte0[7:1]=0b0100101
+            (self.tlp_rx.dat[25:32] == 0b0000101) |   # Cpl  byte0[7:1]=0b0000101
+            (self.tlp_rx.dat[25:32] == 0b0100101)     # CplD byte0[7:1]=0b0100101
         )
         self.sync += [
             If(self.tlp_rx.valid & self.tlp_rx.ready,
