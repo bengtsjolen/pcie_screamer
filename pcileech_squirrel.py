@@ -311,16 +311,31 @@ class PCIeSquirrel(SoCMini):
         pcie_phy.config["Class_Code_Base"] = "02"
         pcie_phy.config["Class_Code_Sub"] = "00"
 
-        # Advertise 8-bit (256) tag support — matches ufrisk's PCIeSquirrel gateware.
-        # Without this, the IP advertises only 5-bit (32) tags in DEVCAP, but the
-        # pcileech host-tool's tag allocator runs an 8-bit counter.  Beyond ~32
-        # outstanding MRds the host reuses tag IDs that the device interprets as
-        # the old in-flight tag, completions get routed to wrong requests, and
-        # the transfer deadlocks.  Empirically we work up to 9 × 4 KB pages
-        # (~144 MRds) and stall at 10 pages (160 MRds); enabling extended tags
-        # lets pcileech use the full 8-bit tag space.
+        # Advertise 8-bit (256) tag support — matches ufrisk's PCIeSquirrel
+        # gateware.  Not strictly required for the current MRRS=4096/MPS=256
+        # pattern (only 10 tags in flight for a 10-page dump) but harmless and
+        # matches the reference design.
         pcie_phy.config["Extended_Tag_Field"]   = "true"
         pcie_phy.config["Extended_Tag_Default"] = "true"
+
+        # CRITICAL: advertise FINITE CplD credits.
+        #
+        # With Cpl_Finite=false (the LitePCIe/Xilinx default) the IP advertises
+        # INFINITE CplD credits.  The root complex then fires 16 CplDs
+        # back-to-back per 4 KB MRd at ~500 MB/s.  Our USB-bound drain is only
+        # ~40 MB/s, so we backpressure constantly via tready.  The IP's ~4 KB
+        # internal CplD RX buffer fills up and any CplD that arrives while
+        # it's full is silently DROPPED inside the hard IP (no error signal
+        # reaches m_axis_rx — confirmed by rx_tlp_seen = 151 for a 10-page
+        # dump, with tx_err_drop = 0 and every byte conserved downstream of
+        # m_axis_rx).
+        #
+        # Setting Cpl_Finite=true makes the IP advertise its actual CplD
+        # buffer size in credits, so the RC throttles itself based on how
+        # fast we return credits (which we do as we drain).  No more overruns,
+        # no more drops.  Throughput drops to match our drain rate, which is
+        # exactly what we want.
+        pcie_phy.config["Cpl_Finite"] = "true"
 
         # Force GTP placement to X0Y2 (Vivado defaults to X0Y3 for this package)
         platform.toolchain.pre_optimize_commands.append(
