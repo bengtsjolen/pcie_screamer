@@ -619,6 +619,21 @@ class PCIeSquirrel(SoCMini):
                     pcileech_fifo.diag_tx_err_drop_cnt.eq(tx_err_sync.o),
                 ]
 
+                # FT601 usb-domain diag counters → sys via CDC, exposed on
+                # PCILeechFIFO diag registers (regs 70/71/72 = 0x008c/8e/90).
+                ft601_filler_sync = BusSynchronizer(16, "usb", "sys")
+                ft601_wrn0_sync   = BusSynchronizer(16, "usb", "sys")
+                ft601_txen_sync   = BusSynchronizer(16, "usb", "sys")
+                self.submodules += ft601_filler_sync, ft601_wrn0_sync, ft601_txen_sync
+                self.comb += [
+                    ft601_filler_sync.i.eq(self.usb_phy.diag_filler_emit),
+                    ft601_wrn0_sync  .i.eq(self.usb_phy.diag_wrn0_accept),
+                    ft601_txen_sync  .i.eq(self.usb_phy.diag_txen_high),
+                    pcileech_fifo.diag_ft601_filler_emit.eq(ft601_filler_sync.o),
+                    pcileech_fifo.diag_ft601_wrn0_accept.eq(ft601_wrn0_sync.o),
+                    pcileech_fifo.diag_ft601_txen_high  .eq(ft601_txen_sync.o),
+                ]
+
             
             # PCIe reset driven by CMD register file.
             # rw[200] starts at 1 (core held in reset at startup).

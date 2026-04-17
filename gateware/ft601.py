@@ -160,6 +160,36 @@ class FT601Sync(Module):
         sync_idle      = Signal(max=sync_idle_max + 1)
         sync_remaining = Signal(max=sync_words_max + 1)
 
+        # ----------------------------------------------------------------
+        # Diagnostic counters (exposed via attributes for upstream CDC).
+        # Count in the usb domain; upstream resyncs into sys.
+        #
+        #   diag_filler_emit : # of sync-word writes the filler has driven.
+        #   diag_wrn0_accept : # of cycles with wr_n=0 AND txe_n=0 (FT601
+        #                      actually sampled a DW).  Sum of real-data
+        #                      beats + filler beats (+ temptosend replays).
+        #   diag_txen_high   : # of usb-clk cycles observed with txe_n=1
+        #                      (chip-full back-pressure from FT601).
+        #
+        # Subtracting real data sent (= usbtx_seen) from diag_wrn0_accept
+        # tells us exactly how many filler+replay beats reached FT601.  If
+        # that difference is zero after a dump, the filler never fired.
+        # ----------------------------------------------------------------
+        self.diag_filler_emit = Signal(16)
+        self.diag_wrn0_accept = Signal(16)
+        self.diag_txen_high   = Signal(16)
+        self.sync.usb += [
+            If((sync_remaining != 0) & (wr_n == 0) & (pads.txe_n == 0),
+                self.diag_filler_emit.eq(self.diag_filler_emit + 1),
+            ),
+            If((wr_n == 0) & (pads.txe_n == 0),
+                self.diag_wrn0_accept.eq(self.diag_wrn0_accept + 1),
+            ),
+            If(pads.txe_n,
+                self.diag_txen_high.eq(self.diag_txen_high + 1),
+            ),
+        ]
+
         self.comb += [
             wants_read.eq(~temptoread & ~pads.rxf_n),
             wants_write.eq((temptosend | write_fifo.source.valid) & (pads.txe_n == 0)),

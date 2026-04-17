@@ -750,6 +750,23 @@ class PCILeechFIFO(Module):
         self.diag_tlp_rx_fifo_peak   = Signal(16)
         self.diag_tlp_rx_stall_cnt   = Signal(16)
 
+        # FT601 write-side diagnostics (driven from top via CDC from usb dom).
+        # Help answer "where are the 824 missing bytes when 14-page dumps stall":
+        #
+        # diag_ft601_filler_emit : # of sync-word (0x66665555) writes the
+        #                          filler branch drove.  If 0 after a stalled
+        #                          dump → filler never fired, FT601 module is
+        #                          going to IDLE too fast.
+        # diag_ft601_wrn0_accept : # of usb-clk cycles with wr_n=0 AND txe_n=0,
+        #                          i.e. DWs FT601 actually sampled from us.
+        #                          Should equal ~diag_usbtx_seen + filler_emit.
+        # diag_ft601_txen_high   : # of usb-clk cycles observed with txe_n=1.
+        #                          Non-zero means FT601 pushed back on us
+        #                          (chip IN buffer full).
+        self.diag_ft601_filler_emit = Signal(16)
+        self.diag_ft601_wrn0_accept = Signal(16)
+        self.diag_ft601_txen_high   = Signal(16)
+
         rxfifo_in_seen   = Signal(16)
         rxfifo_out_seen  = Signal(16)
         mux_p3_wr_seen   = Signal(16)
@@ -1797,6 +1814,10 @@ class PCILeechFIFO(Module):
             67: ro_readback.eq(self.diag_tlp_rx_other_count), # 0x0086: non-Cpl TLPs the filter dropped
             68: ro_readback.eq(self.diag_tlp_rx_fifo_peak),   # 0x0088: tlp_rx_fifo high-water mark (max level)
             69: ro_readback.eq(self.diag_tlp_rx_stall_cnt),   # 0x008a: cycles m_axis_rx was back-pressured
+
+            70: ro_readback.eq(self.diag_ft601_filler_emit),  # 0x008c: FT601 sync-word filler beats driven
+            71: ro_readback.eq(self.diag_ft601_wrn0_accept),  # 0x008e: FT601 wr_n=0 & txe_n=0 accepted beats
+            72: ro_readback.eq(self.diag_ft601_txen_high),    # 0x0090: usb-dom cycles with txe_n=1 (chip full)
 
             
         })
