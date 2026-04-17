@@ -127,6 +127,39 @@ class FT601Sync(Module):
         drain_wait_max = 10000
         drain_wait = Signal(max=drain_wait_max + 1)
 
+        # ----------------------------------------------------------------
+        # Sync-word filler — mirrors ufrisk's pcileech_ft601.sv lines 87-99.
+        #
+        # Why this exists: FT601 in 245-Sync mode buffers writes into an
+        # internal IN endpoint FIFO and only ships USB packets when the
+        # buffer fills to a 1024-byte boundary OR SIWU# is asserted (low).
+        # We hold SIWU# high (matching the LiteX reference + ufrisk).  If
+        # the FPGA stops writing mid-packet, the tail bytes get stranded
+        # inside FT601 — observed as a 14-page MemRd dump pushing 17371 DW
+        # to FT601 but the host only receiving 68660 of the 69484 bytes
+        # before its 5 s read times out (824 B = ~3 CplDs stuck).
+        #
+        # Ufrisk's solution: after the data queue stays empty for 15 clk
+        # cycles, REINJECT 5 × 0x66665555 sync words.  These drain to the
+        # FT601 chip and keep its IN buffer monotonically filling until it
+        # naturally crosses a 1024-B USB packet boundary and ships.
+        # Because the filler runs forever (whenever queue is idle), no
+        # tail can ever stay stranded for long.
+        #
+        # We do the same: a small counter (sync_idle_max=15) ticks while
+        # WRITE has no real data; on overflow we arm `sync_remaining=5`
+        # and the WRITE state emits five sync words from a new branch
+        # below.  Real data ALWAYS preempts sync filler (the existing
+        # `write_fifo.source.valid` Elif branch sits before the new sync
+        # branch in the FSM), so filler costs USB bandwidth only when
+        # the pipeline is genuinely idle — and even then only briefly,
+        # because drain_wait keeps counting through the filler too and
+        # eventually returns the FSM to IDLE so RX can be serviced.
+        sync_idle_max  = 15
+        sync_words_max = 5
+        sync_idle      = Signal(max=sync_idle_max + 1)
+        sync_remaining = Signal(max=sync_words_max + 1)
+
         self.comb += [
             wants_read.eq(~temptoread & ~pads.rxf_n),
             wants_write.eq((temptosend | write_fifo.source.valid) & (pads.txe_n == 0)),
@@ -198,21 +231,44 @@ class FT601Sync(Module):
             ).Elif(write_fifo.source.valid,
                 # Active write beat — push a FIFO word to FT601 and reset
                 # drain_wait so a transient empty FIFO state doesn't
-                # prematurely exit WRITE.
+                # prematurely exit WRITE.  Real data ALSO cancels any
+                # pending sync filler: the next sync re-arms after another
+                # 15 cycles of idle.
                 oe_n.eq(1),
                 data_w.eq(write_fifo.source.data),
                 write_fifo.source.ready.eq(1),
                 NextValue(tempsendval, write_fifo.source.data),
                 NextValue(temptosend, 0),
                 NextValue(drain_wait, 0),
+                NextValue(sync_idle, 0),
+                NextValue(sync_remaining, 0),
+                wr_n.eq(0),
+            ).Elif(sync_remaining != 0,
+                # Sync-word filler beat — emit 0x66665555 (five times in a
+                # row when armed).  Does NOT reset drain_wait, so the FSM
+                # still eventually returns to IDLE for RX servicing even
+                # if the pipeline stays idle indefinitely.
+                oe_n.eq(1),
+                data_w.eq(0x66665555),
+                NextValue(tempsendval, 0x66665555),
+                NextValue(temptosend, 0),
+                NextValue(sync_remaining, sync_remaining - 1),
+                NextValue(sync_idle, 0),
                 wr_n.eq(0),
             ).Else(
-                # write_fifo is empty (source.valid==0 ⇒ FIFO read-side level==0).
-                # Hold in WRITE for up to `drain_wait_max` cycles waiting for
-                # more upstream data.  This matches ufrisk's architecture:
-                # pcileech_ft601.sv TX_ACTIVE does NOT transition directly to
-                # RX; it only leaves via TX_COOLDOWN → IDLE.  Any RX servicing
-                # happens only after IDLE is re-entered.
+                # write_fifo is empty (source.valid==0 ⇒ FIFO read-side level==0)
+                # AND no sync words pending.  Two things happen here:
+                #
+                #   1. sync_idle counts up; on reaching sync_idle_max we
+                #      arm a fresh batch of 5 sync words (next cycle the
+                #      sync-emit Elif above will fire).  This is exactly
+                #      ufrisk's data_cooldown_count==15 behavior — keeps
+                #      FT601's IN buffer monotonically filling so partial
+                #      USB packets can't stall.
+                #
+                #   2. drain_wait counts up regardless of sync activity;
+                #      on reaching drain_wait_max we leave for IDLE so
+                #      RX (incoming pcileech commands) can be serviced.
                 #
                 # drain_wait_max = 10000 cycles = 100 µs @ 100 MHz — spans
                 # any realistic PCIe root-complex credit-refill round-trip
@@ -221,10 +277,18 @@ class FT601Sync(Module):
                 # mid-burst when a single gap exceeds the timeout.
                 oe_n.eq(1),
                 wr_n.eq(1),
+                If(sync_idle == sync_idle_max,
+                    NextValue(sync_remaining, sync_words_max),
+                    NextValue(sync_idle, 0),
+                ).Else(
+                    NextValue(sync_idle, sync_idle + 1),
+                ),
                 If(drain_wait < drain_wait_max,
                     NextValue(drain_wait, drain_wait + 1),
                 ).Else(
                     NextValue(temptosend, 0),
+                    NextValue(sync_idle, 0),
+                    NextValue(sync_remaining, 0),
                     NextState("IDLE"),
                 )
             )
