@@ -720,6 +720,14 @@ class PCILeechFIFO(Module):
         self.diag_rxfifo_out_seen= Signal(16)
         self.diag_mux_p3_wr_seen = Signal(16)
 
+        # Extra PCIe-IP edge counters (driven from top-level sys domain).
+        # Help distinguish whether the 10-page-dump stall is upstream
+        # (insufficient MRds sent) or at/inside the Xilinx IP (completions
+        # lost).
+        self.diag_tx_tlp_seen     = Signal(16)  # count of s_axis_tx.last & valid & ready (TLPs we sent)
+        self.diag_rx_tlp_seen     = Signal(16)  # count of m_axis_rx.last & valid (TLPs delivered by IP)
+        self.diag_tx_err_drop_cnt = Signal(16)  # sticky count of tx_err_drop pulses
+
         rxfifo_in_seen   = Signal(16)
         rxfifo_out_seen  = Signal(16)
         mux_p3_wr_seen   = Signal(16)
@@ -1687,6 +1695,10 @@ class PCILeechFIFO(Module):
             60: ro_readback.eq(self.diag_mux_p3_wr_seen),  # 0x0078
             61: ro_readback.eq(self.diag_ser_out_seen),    # 0x007a
             62: ro_readback.eq(self.diag_usbtx_seen),      # 0x007c
+
+            63: ro_readback.eq(self.diag_tx_tlp_seen),     # 0x007e: MRds/CfgWr etc we sent
+            64: ro_readback.eq(self.diag_rx_tlp_seen),     # 0x0080: TLPs the IP delivered (CplDs + others)
+            65: ro_readback.eq(self.diag_tx_err_drop_cnt), # 0x0082: IP-side TX drops (should be 0)
             
         })
 

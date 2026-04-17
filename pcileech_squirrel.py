@@ -14,7 +14,7 @@ import argparse
 
 from migen import *
 from migen.genlib.resetsync import AsyncResetSynchronizer
-from migen.genlib.cdc import MultiReg
+from migen.genlib.cdc import MultiReg, BusSynchronizer
 
 from litex.build.generic_platform import *
 from litex.soc.cores.clock import *
@@ -565,8 +565,52 @@ class PCIeSquirrel(SoCMini):
                        usbtx_seen.eq(usbtx_seen + 1)
                        ),
                 ]
-                
-                
+
+                # --- Extra PCIe-IP edge counters ------------------------------
+                # Count in the pcie clock domain (where the IP signals live),
+                # then CDC-resync the 16-bit counter value into sys.
+                #
+                # tx_tlp_cnt_pcie : # of TLPs we handed to the IP (MRds/CfgRds/CfgWrs)
+                # rx_tlp_cnt_pcie : # of TLPs the IP delivered to us   (CplDs + others)
+                # tx_err_cnt_pcie : # of tx_err_drop pulses from the IP
+                #
+                # Expected for a 10-page dump at MPS=256:
+                #   * tx_tlp_cnt >= 160 (MRds) + a handful (CfgRd/CfgWr init)
+                #   * rx_tlp_cnt >= 160 (CplDs) + init responses
+                # If tx_tlp_cnt < 160 the host never issued enough MRds.
+                # If tx_tlp_cnt >= 160 but rx_tlp_cnt < 160 the IP (or RC) lost CplDs.
+                # If tx_err_cnt > 0 the IP dropped TLPs we tried to send.
+                tx_tlp_cnt_pcie = Signal(16)
+                rx_tlp_cnt_pcie = Signal(16)
+                tx_err_cnt_pcie = Signal(16)
+                self.sync.pcie += [
+                    If(self.pcie_phy.s_axis_tx_tvalid
+                       & self.pcie_phy.s_axis_tx_tready
+                       & self.pcie_phy.s_axis_tx_tlast,
+                       tx_tlp_cnt_pcie.eq(tx_tlp_cnt_pcie + 1)
+                       ),
+                    If(self.pcie_phy.m_axis_rx_tvalid
+                       & self.pcie_phy.m_axis_rx_tlast,
+                       rx_tlp_cnt_pcie.eq(rx_tlp_cnt_pcie + 1)
+                       ),
+                    If(self.pcie_phy.tx_err_drop,
+                       tx_err_cnt_pcie.eq(tx_err_cnt_pcie + 1)
+                       ),
+                ]
+
+                tx_tlp_sync = BusSynchronizer(16, "pcie", "sys")
+                rx_tlp_sync = BusSynchronizer(16, "pcie", "sys")
+                tx_err_sync = BusSynchronizer(16, "pcie", "sys")
+                self.submodules += tx_tlp_sync, rx_tlp_sync, tx_err_sync
+                self.comb += [
+                    tx_tlp_sync.i.eq(tx_tlp_cnt_pcie),
+                    rx_tlp_sync.i.eq(rx_tlp_cnt_pcie),
+                    tx_err_sync.i.eq(tx_err_cnt_pcie),
+                    pcileech_fifo.diag_tx_tlp_seen    .eq(tx_tlp_sync.o),
+                    pcileech_fifo.diag_rx_tlp_seen    .eq(rx_tlp_sync.o),
+                    pcileech_fifo.diag_tx_err_drop_cnt.eq(tx_err_sync.o),
+                ]
+
             
             # PCIe reset driven by CMD register file.
             # rw[200] starts at 1 (core held in reset at startup).
