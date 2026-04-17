@@ -1144,7 +1144,14 @@ class PCILeechFIFO(Module):
              1: cfg_ro_rd.eq(0x0000),                           # cfg_mgmt_rd/wr_en (stubbed 0)
              2: cfg_ro_rd.eq(0x0030),                           # bytecount lo = 48
              3: cfg_ro_rd.eq(0x0000),                           # bytecount hi
-             4: cfg_ro_rd.eq(self.phy_id),                      # BDF
+             # BDF: ufrisk stores bus at ro[71:64] (low byte) and
+             # {device, function} at ro[79:72] (high byte), see
+             # pcileech_pcie_cfg_a7.sv lines 112-113.  LitePCIe's
+             # self.id = Cat(function, device, bus) packs bus at [15:8],
+             # so we need to byte-swap it before feeding it to cfg_ro_rd
+             # for the response formatter to emit bus as USB wire byte 2
+             # (observed as 0x00081600 on ufrisk for bus 0x16).
+             4: cfg_ro_rd.eq(Cat(self.phy_id[8:16], self.phy_id[0:8])),  # BDF (byte-swapped to match ufrisk layout)
              5: cfg_ro_rd.eq(Cat(
                     self.phy_ltssm[0:6],    # ro[85:80] pl_ltssm_state
                     Constant(0, 2),          # ro[87:86] pl_rx_pm_state
