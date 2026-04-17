@@ -1637,11 +1637,23 @@ class PCILeechFIFO(Module):
             readback.eq(ro_readback)
         )
 
-        # CMD TX response format (matches pcileech_fifo.sv lines 361-365):
-        #   [31:16] = in_cmd_address_byte  (echoed back)
-        #   [15:0]  = {data_in[7:0], data_in[15:8]}  (byte-swapped 16-bit value)
-        # CMD TX response: either a real CMD read response or an inactivity
-        # timer keepalive.  CMD reads take priority.
+        # CMD TX response.  Either a real CMD read response or an
+        # inactivity keepalive.  CMD reads take priority.
+        #
+        # IMPORTANT byte-order note:
+        # ufrisk's SV reference (pcileech_fifo.sv lines 380-381) does:
+        #   _cmd_tx_din[31:16] <= in_cmd_address_byte;
+        #   _cmd_tx_din[15:0]  <= {in_cmd_data_in[7:0], in_cmd_data_in[15:8]};
+        # i.e. a byte-swap on the value half.
+        # BUT our ro[]/rw[] register map is already laid out in
+        # *wire byte order* (e.g. ro_readback at word 5 is
+        # Cat(0x00, DEVICE_ID) so the low byte of the 16b slice
+        # lands on the correct USB byte).  So we must NOT apply an
+        # extra swap here — the wire already comes out matching
+        # ufrisk (e.g. 0x000a0400).  The explicit swap only applies
+        # to the *cfg_readback* path (see above), where the values
+        # are stored in natural 16-bit form and need swapping to
+        # reach ufrisk's wire ordering (e.g. 0x80164800).
         #
         # Keepalive data: looks like a CMD read of ro[0] (magic=0xab89).
         # pcileech parses it as a normal CMD frame, doesn't match any
@@ -1654,14 +1666,9 @@ class PCILeechFIFO(Module):
         self.comb += [
             If(in_cmd_read,
                 cmd_tx_valid.eq(1),
-                # Match SV pcileech_fifo.sv line 380-381:
-                #   _cmd_tx_din[31:16] <= in_cmd_address_byte;
-                #   _cmd_tx_din[15:0]  <= {in_cmd_data_in[7:0], in_cmd_data_in[15:8]};
-                # i.e. value is BYTESWAPPED into the low 16 bits.
-                # Migen Cat is LSB-first → Cat(val_hi, val_lo, addr_lo, addr_hi).
                 cmd_tx_data .eq(Cat(
-                    readback[8:16],  readback[0:8],      # [15:0] = value byteswapped
-                    in_addr_byte[0:8], in_addr_byte[8:16],  # [31:16] = addr as-is
+                    readback[0:8],     readback[8:16],       # [15:0]  = value (wire-order, no swap)
+                    in_addr_byte[0:8], in_addr_byte[8:16],   # [31:16] = addr  (lo byte first)
                 )),
             ).Elif(inactivity_fire,
                 cmd_tx_valid.eq(1),
