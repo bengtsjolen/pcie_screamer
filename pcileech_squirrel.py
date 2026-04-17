@@ -570,16 +570,20 @@ class PCIeSquirrel(SoCMini):
                 # Count in the pcie clock domain (where the IP signals live),
                 # then CDC-resync the 16-bit counter value into sys.
                 #
-                # tx_tlp_cnt_pcie : # of TLPs we handed to the IP (MRds/CfgRds/CfgWrs)
-                # rx_tlp_cnt_pcie : # of TLPs the IP delivered to us   (CplDs + others)
-                # tx_err_cnt_pcie : # of tx_err_drop pulses from the IP
+                # tx_tlp_cnt_pcie : # of TLPs we handed to the IP
+                #                   (MRds/MWrs; CfgRd/CfgWr use cfg_mgmt, not s_axis_tx)
+                # rx_tlp_cnt_pcie : # of TLPs the IP delivered (CplDs etc.)
+                # tx_err_cnt_pcie : # of tx_err_drop pulses
                 #
-                # Expected for a 10-page dump at MPS=256:
-                #   * tx_tlp_cnt >= 160 (MRds) + a handful (CfgRd/CfgWr init)
-                #   * rx_tlp_cnt >= 160 (CplDs) + init responses
-                # If tx_tlp_cnt < 160 the host never issued enough MRds.
-                # If tx_tlp_cnt >= 160 but rx_tlp_cnt < 160 the IP (or RC) lost CplDs.
-                # If tx_err_cnt > 0 the IP dropped TLPs we tried to send.
+                # TX uses valid & ready & last — AXI-S guarantees this is a
+                # single-cycle transfer event per TLP.
+                #
+                # RX uses valid & ready & last via rx_datapath.sink, because
+                # m_axis_rx_tready isn't directly exposed in pcie_phy.  Using
+                # just (valid & last) would over-count whenever we backpressure
+                # (IP holds valid & last high until tready comes back).
+                rx_sink = self.pcie_phy.rx_datapath.sink  # pcie domain
+
                 tx_tlp_cnt_pcie = Signal(16)
                 rx_tlp_cnt_pcie = Signal(16)
                 tx_err_cnt_pcie = Signal(16)
@@ -589,8 +593,7 @@ class PCIeSquirrel(SoCMini):
                        & self.pcie_phy.s_axis_tx_tlast,
                        tx_tlp_cnt_pcie.eq(tx_tlp_cnt_pcie + 1)
                        ),
-                    If(self.pcie_phy.m_axis_rx_tvalid
-                       & self.pcie_phy.m_axis_rx_tlast,
+                    If(rx_sink.valid & rx_sink.ready & rx_sink.last,
                        rx_tlp_cnt_pcie.eq(rx_tlp_cnt_pcie + 1)
                        ),
                     If(self.pcie_phy.tx_err_drop,
