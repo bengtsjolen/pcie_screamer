@@ -311,6 +311,17 @@ class PCIeSquirrel(SoCMini):
         pcie_phy.config["Class_Code_Base"] = "02"
         pcie_phy.config["Class_Code_Sub"] = "00"
 
+        # Advertise 8-bit (256) tag support — matches ufrisk's PCIeSquirrel gateware.
+        # Without this, the IP advertises only 5-bit (32) tags in DEVCAP, but the
+        # pcileech host-tool's tag allocator runs an 8-bit counter.  Beyond ~32
+        # outstanding MRds the host reuses tag IDs that the device interprets as
+        # the old in-flight tag, completions get routed to wrong requests, and
+        # the transfer deadlocks.  Empirically we work up to 9 × 4 KB pages
+        # (~144 MRds) and stall at 10 pages (160 MRds); enabling extended tags
+        # lets pcileech use the full 8-bit tag space.
+        pcie_phy.config["Extended_Tag_Field"]   = "true"
+        pcie_phy.config["Extended_Tag_Default"] = "true"
+
         # Force GTP placement to X0Y2 (Vivado defaults to X0Y3 for this package)
         platform.toolchain.pre_optimize_commands.append(
             "set_property LOC GTPE2_CHANNEL_X0Y2 [get_cells "
