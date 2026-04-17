@@ -1729,10 +1729,93 @@ class PCILeechFIFO(Module):
                 mux_out_fifo.sink.valid.eq(mux.valid),
                 mux_out_fifo.sink.data.eq(mux.dout),
                 mux.rd_en.eq(mux_out_fifo.sink.ready),
-
-                # Serializer reads whole frames from the FIFO.
-                mux_out_fifo.source.connect(serializer.sink),
             ]
+
+            # ---------------------------------------------------------------
+            # BURST-START GATE
+            # ---------------------------------------------------------------
+            # The FT601 chip (in 245-Sync FIFO mode) terminates a USB transfer
+            # by sending a short packet whenever WR_N has been inactive for
+            # more than a brief internal timeout (~µs).  If our TX pipeline
+            # has any gap while the host's bulk-in is active, the host sees
+            # a short packet and declares the transfer complete — even if
+            # more data is coming.
+            #
+            # At the start of a memory-read response there is a natural gap:
+            #   * the host-injected LOOPBACK probe is processed in ~50 ns
+            #     (CMD byte-frame → loop_fifo → mux → mux_out_fifo), but
+            #   * the MRd CplD round-trip through the PCIe root complex
+            #     takes 1–5 µs before the first CplD reaches tlp_rx_fifo.
+            #
+            # Without gating, the serializer immediately drains the single
+            # loopback frame (52 bytes on the wire) and then sits idle for
+            # µs while PCIe catches up — the FT601 chip auto-flushes a short
+            # packet and the transfer splits in half.
+            #
+            # ufrisk avoids this with ~128 KB of upstream buffering
+            # (fifo_256_32_clk2_comtx = 256b × 4096).  Our mux_out_fifo is
+            # 16 KB (256b × 512) — plenty, but only if we hold the serializer
+            # until enough frames have accumulated to bridge the PCIe gap.
+            #
+            # The gate opens when EITHER:
+            #   1. mux_out_fifo.level >= BURST_FILL  (16 frames ≈ 1.28 µs of
+            #      sustainable TX ≫ any realistic serializer/CDC hiccup), OR
+            #   2. the warmup timer (BURST_WARMUP, 50 µs @ 100 MHz) expires
+            #      as a fallback for genuinely small single-frame responses
+            #      (CMD/CFG probes).
+            #
+            # Once open, the gate stays open until the FIFO has been empty
+            # for BURST_SETTLE (64 sys cycles) continuously — at which point
+            # the burst is truly over and the FT601 is allowed to drain and
+            # emit its final short packet to terminate the transfer.
+            # ---------------------------------------------------------------
+            BURST_FILL    = 16        # frames to accumulate before opening
+            BURST_WARMUP  = 5000      # 50 µs fallback timer @ 100 MHz
+            BURST_SETTLE  = 64        # empty-cycles before closing the gate
+
+            burst_gate  = Signal()
+            burst_timer = Signal(max=max(BURST_WARMUP, BURST_SETTLE) + 1)
+
+            self.submodules.burst_fsm = burst_fsm = FSM(reset_state="FILL")
+            burst_fsm.act("FILL",
+                # Serializer held in IDLE — mux_out_fifo accumulates frames.
+                If(mux_out_fifo.source.valid,
+                    NextValue(burst_timer, burst_timer + 1),
+                ).Else(
+                    NextValue(burst_timer, 0),
+                ),
+                If((mux_out_fifo.level >= BURST_FILL) | (burst_timer >= BURST_WARMUP),
+                    NextValue(burst_timer, 0),
+                    NextState("DRAIN"),
+                ),
+            )
+            burst_fsm.act("DRAIN",
+                burst_gate.eq(1),
+                # Stay in DRAIN until the FIFO has been empty for BURST_SETTLE
+                # consecutive sys cycles — this absorbs momentary under-runs
+                # caused by mux-frame boundaries / CDC jitter without
+                # prematurely closing the gate mid-burst.
+                If(~mux_out_fifo.source.valid,
+                    NextValue(burst_timer, burst_timer + 1),
+                    If(burst_timer >= BURST_SETTLE,
+                        NextValue(burst_timer, 0),
+                        NextState("FILL"),
+                    ),
+                ).Else(
+                    NextValue(burst_timer, 0),
+                ),
+            )
+
+            # Gated connection: serializer only sees data when burst_gate is 1.
+            self.comb += [
+                serializer.sink.valid.eq(mux_out_fifo.source.valid & burst_gate),
+                serializer.sink.data .eq(mux_out_fifo.source.data),
+                mux_out_fifo.source.ready.eq(serializer.sink.ready & burst_gate),
+            ]
+
+            # Diagnostic hooks (optional, wired to read-only status regs if needed)
+            self.burst_gate  = burst_gate
+            self.burst_timer = burst_timer
         elif 0:
             self.comb += [
                 serializer.sink.valid.eq(mux.valid),
