@@ -1741,21 +1741,32 @@ class PCILeechFIFO(Module):
             # a short packet and declares the transfer complete — even if
             # more data is coming.
             #
-            # At the start of a memory-read response there is a natural gap:
-            #   * the host-injected LOOPBACK probe is processed in ~50 ns
-            #     (CMD byte-frame → loop_fifo → mux → mux_out_fifo), but
-            #   * the MRd CplD round-trip through the PCIe root complex
-            #     takes 1–5 µs before the first CplD reaches tlp_rx_fifo.
+            # Two gap sources need to be absorbed:
             #
-            # Without gating, the serializer immediately drains the single
-            # loopback frame (52 bytes on the wire) and then sits idle for
-            # µs while PCIe catches up — the FT601 chip auto-flushes a short
-            # packet and the transfer splits in half.
+            #   (A) START-OF-BURST gap: the host-injected LOOPBACK probe is
+            #       processed in ~50 ns (CMD byte-frame → loop_fifo → mux →
+            #       mux_out_fifo), but the MRd CplD round-trip through the
+            #       PCIe root complex takes 1–5 µs before the first CplD
+            #       reaches tlp_rx_fifo.  Without gating, the serializer
+            #       immediately drains the single loopback frame (52 bytes
+            #       on the wire) and then sits idle for µs while PCIe
+            #       catches up — FT601 auto-flushes a short packet, the
+            #       transfer splits in half.
             #
-            # ufrisk avoids this with ~128 KB of upstream buffering
+            #   (B) MID-BURST gap: under sustained backpressure (multi-page
+            #       reads), PCIe flow-control credits between our
+            #       tlp_rx_fifo and the root complex open inter-CplD gaps
+            #       that can exceed FT601's drain_wait (100 µs).  If the
+            #       burst gate closes during such a gap, new data arriving
+            #       after the gate closes has to re-fill BURST_FILL frames
+            #       before the gate reopens — which adds even MORE delay
+            #       on top of the FT601 drain timeout, making a mid-burst
+            #       split nearly certain for 10+ page dumps.
+            #
+            # ufrisk avoids all of this with ~128 KB of upstream buffering
             # (fifo_256_32_clk2_comtx = 256b × 4096).  Our mux_out_fifo is
-            # 16 KB (256b × 512) — plenty, but only if we hold the serializer
-            # until enough frames have accumulated to bridge the PCIe gap.
+            # 16 KB (256b × 512) — plenty at steady state, but only if the
+            # gate stays open through mid-burst gaps.
             #
             # The gate opens when EITHER:
             #   1. mux_out_fifo.level >= BURST_FILL  (16 frames ≈ 1.28 µs of
@@ -1765,13 +1776,16 @@ class PCILeechFIFO(Module):
             #      (CMD/CFG probes).
             #
             # Once open, the gate stays open until the FIFO has been empty
-            # for BURST_SETTLE (64 sys cycles) continuously — at which point
-            # the burst is truly over and the FT601 is allowed to drain and
-            # emit its final short packet to terminate the transfer.
+            # for BURST_SETTLE (500 µs) continuously.  This is 5× longer
+            # than FT601's drain_wait (100 µs), so by the time the gate
+            # closes the FT601 has already exited WRITE and emitted its
+            # short packet — guaranteeing the gate closure never affects
+            # an in-progress transfer, only end-of-burst cleanup.  New
+            # bursts then enter FILL and re-prime from scratch.
             # ---------------------------------------------------------------
             BURST_FILL    = 16        # frames to accumulate before opening
             BURST_WARMUP  = 5000      # 50 µs fallback timer @ 100 MHz
-            BURST_SETTLE  = 64        # empty-cycles before closing the gate
+            BURST_SETTLE  = 50000     # 500 µs empty → gate closes (end-of-burst)
 
             burst_gate  = Signal()
             burst_timer = Signal(max=max(BURST_WARMUP, BURST_SETTLE) + 1)
@@ -1791,10 +1805,13 @@ class PCILeechFIFO(Module):
             )
             burst_fsm.act("DRAIN",
                 burst_gate.eq(1),
-                # Stay in DRAIN until the FIFO has been empty for BURST_SETTLE
-                # consecutive sys cycles — this absorbs momentary under-runs
-                # caused by mux-frame boundaries / CDC jitter without
-                # prematurely closing the gate mid-burst.
+                # Stay in DRAIN through any mid-burst gap shorter than
+                # BURST_SETTLE.  Under PCIe credit exhaustion during a
+                # large multi-page read, inter-CplD gaps can be tens of µs;
+                # we MUST keep the gate open so data resumes flowing the
+                # instant a new CplD lands in mux_out_fifo.  BURST_SETTLE
+                # is sized well above FT601 drain_wait so the gate only
+                # closes AFTER the transfer has genuinely ended.
                 If(~mux_out_fifo.source.valid,
                     NextValue(burst_timer, burst_timer + 1),
                     If(burst_timer >= BURST_SETTLE,

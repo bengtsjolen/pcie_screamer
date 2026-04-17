@@ -109,10 +109,23 @@ class FT601Sync(Module):
         # Drain-wait counter: when write_fifo empties during WRITE, wait
         # before going IDLE.  This gives the serializer pipeline AND the PCIe
         # root complex time to deliver more data.  Without this, inter-CplD
-        # gaps from the root complex (1-5 µs) cause FT601 to send USB short
-        # packets, terminating the transfer prematurely.
-        # 1000 cycles = 10 µs at 100 MHz — covers typical inter-CplD gaps.
-        drain_wait = Signal(max=1001)  # 0..1000
+        # gaps from the root complex cause FT601 to send USB short packets,
+        # terminating the transfer prematurely.
+        #
+        # Under sustained backpressure (large multi-page reads), PCIe flow
+        # control credits between tlp_rx_fifo and the root complex introduce
+        # gaps that can be tens of µs.  We need drain_wait ≫ any realistic
+        # inter-CplD gap, or the transfer splits mid-burst and pcileech waits
+        # for completion tags that never arrive.
+        #
+        # Observed: 9-page dumps work with 1000 cycles; 10-page dumps stall
+        # because one gap exceeds 10 µs → short packet → missing CplDs.
+        #
+        # 10000 cycles = 100 µs @ 100 MHz — spans any realistic root-complex
+        # credit refill round-trip, while still small enough to terminate
+        # small probe responses (52-byte CFG/CMD reads) quickly at end-of-burst.
+        drain_wait_max = 10000
+        drain_wait = Signal(max=drain_wait_max + 1)
 
         self.comb += [
             wants_read.eq(~temptoread & ~pads.rxf_n),
@@ -201,12 +214,14 @@ class FT601Sync(Module):
                 # RX; it only leaves via TX_COOLDOWN → IDLE.  Any RX servicing
                 # happens only after IDLE is re-entered.
                 #
-                # drain_wait_max = 1000 cycles ≈ 10 µs @ 100 MHz — covers
-                # typical inter-CplD gaps from the PCIe root complex and the
-                # sys→usb CDC latency through the AsyncFIFO.
+                # drain_wait_max = 10000 cycles = 100 µs @ 100 MHz — spans
+                # any realistic PCIe root-complex credit-refill round-trip
+                # (tens of µs under sustained backpressure from multi-page
+                # reads).  Smaller values cause the transfer to split
+                # mid-burst when a single gap exceeds the timeout.
                 oe_n.eq(1),
                 wr_n.eq(1),
-                If(drain_wait < 1000,
+                If(drain_wait < drain_wait_max,
                     NextValue(drain_wait, drain_wait + 1),
                 ).Else(
                     NextValue(temptosend, 0),
