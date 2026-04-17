@@ -160,6 +160,25 @@ class FT601Sync(Module):
         sync_idle      = Signal(max=sync_idle_max + 1)
         sync_remaining = Signal(max=sync_words_max + 1)
 
+        # Idle-side filler timer: counts usb-clk cycles spent in IDLE with
+        # no real data.  When it saturates at sync_idle_max, IDLE forces a
+        # WRITE re-entry with sync_remaining=5 armed, so filler fires even
+        # when wants_write would otherwise be 0 (no real data pending).
+        #
+        # First attempt had sync_idle accumulation *only* in the WRITE Else
+        # branch, which meant: once FT601 raised txe_n even briefly
+        # (observed 234 µs of txen_high during a 14-page dump), FSM bounced
+        # to IDLE and got stuck there since `wants_write` checks only real
+        # data.  Result: diag_ft601_filler_emit = 0 despite 824 B stranded
+        # in FT601.  Adding an independent IDLE timer that re-arms the
+        # filler mirrors ufrisk's IDLE → TX_WAIT1 transition on
+        # `data_queue_count > 0`: his data_cooldown_count continuously
+        # refills the queue with sync words, so his IDLE always finds
+        # something to send.  We approximate by having IDLE directly kick
+        # the FSM back to WRITE for a new filler batch every 15 idle
+        # cycles (provided txe_n=0).
+        idle_filler_timer = Signal(max=sync_idle_max + 1)
+
         # ----------------------------------------------------------------
         # Diagnostic counters (exposed via attributes for upstream CDC).
         # Count in the usb domain; upstream resyncs into sys.
@@ -230,12 +249,34 @@ class FT601Sync(Module):
                 NextValue(cnt_write, 0),
                 NextValue(first_write, 1),
                 NextValue(drain_wait, 0),
+                NextValue(idle_filler_timer, 0),
                 NextState("WRITE"),
             ).Elif(wants_read,
                 oe_n.eq(0),
+                NextValue(idle_filler_timer, 0),
                 NextState("RDWAIT")
+            ).Elif((idle_filler_timer == sync_idle_max) & (pads.txe_n == 0),
+                # No real data, no RX, idle long enough, chip accepts
+                # writes: re-enter WRITE with sync_remaining=5 armed so
+                # WRITE's Elif(sync_remaining!=0) branch will emit a
+                # batch of filler sync words.  Then WRITE's Else branch
+                # will count drain_wait up to max and bounce us back
+                # here, forming a continuous filler loop like ufrisk's.
+                oe_n.eq(1),
+                NextValue(cnt_write, 0),
+                NextValue(first_write, 1),
+                NextValue(drain_wait, 0),
+                NextValue(sync_remaining, sync_words_max),
+                NextValue(sync_idle, 0),
+                NextValue(idle_filler_timer, 0),
+                NextState("WRITE"),
             ).Else(
                 oe_n.eq(1),
+                # Saturate at sync_idle_max — don't wrap, wait for
+                # either wants_write/wants_read or txe_n=0 to fire.
+                If(idle_filler_timer < sync_idle_max,
+                    NextValue(idle_filler_timer, idle_filler_timer + 1),
+                ),
             )
         )
 
