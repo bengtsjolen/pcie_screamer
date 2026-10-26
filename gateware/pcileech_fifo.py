@@ -1897,16 +1897,17 @@ class PCILeechFIFO(Module):
             # of BRAM, sized so the mux→serializer boundary never stalls
             # during a burst.
             #
-            # We use 512 entries = 16 KB = ~4 BRAM36 tiles.  That's enough
-            # to absorb an entire 5-page CplD dump at typical rates without
-            # ever backpressuring the mux, while staying well inside the
-            # XC7A35T's BRAM budget (50 tiles).
+            # We use 2048 entries = 64 KB = ~15 BRAM36 tiles, matching
+            # ufrisk's fifo_256_32_clk2_comtx.  This is sized to hold the
+            # host's full outstanding read window (MAX_SIZE_RX = 112 KB)
+            # so the USB stream does not starve between PCIe completion
+            # bursts, while staying inside the XC7A35T's BRAM budget.
             #
             # IMPORTANT: buffered=True is required.  With the default
             # (async_read=True), migen allocates distributed RAM (RAMD64E)
             # which blows the LUT-RAM budget at this width × depth.
             self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO(
-                [("data", 256)], 512, buffered=True
+                [("data", 256)], 2048, buffered=True
             )
 
             self.comb += [
@@ -1948,10 +1949,10 @@ class PCILeechFIFO(Module):
             #       on top of the FT601 drain timeout, making a mid-burst
             #       split nearly certain for 10+ page dumps.
             #
-            # ufrisk avoids all of this with ~128 KB of upstream buffering
-            # (fifo_256_32_clk2_comtx = 256b × 4096).  Our mux_out_fifo is
-            # 16 KB (256b × 512) — plenty at steady state, but only if the
-            # gate stays open through mid-burst gaps.
+            # ufrisk avoids all of this with ~64 KB of upstream buffering
+            # (fifo_256_32_clk2_comtx = 256b × 2048).  Our mux_out_fifo
+            # matches that size, so the gate can stay open through
+            # mid-burst gaps.
             #
             # The gate opens when EITHER:
             #   1. mux_out_fifo.level >= BURST_FILL  (16 frames ≈ 1.28 µs of

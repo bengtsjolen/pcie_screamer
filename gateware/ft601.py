@@ -21,7 +21,7 @@ class FT601Sync(Module):
         read_fifo  = ClockDomainsRenamer({"write": "usb", "read": "sys"})(
             stream.AsyncFIFO(phy_description(dw), 128))
         write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(
-            stream.AsyncFIFO(phy_description(dw), 1024))
+            stream.AsyncFIFO(phy_description(dw), 8192))
 
         read_buffer = ClockDomainsRenamer("usb")(stream.SyncFIFO(phy_description(dw), 4))
         self.comb += read_buffer.source.connect(read_fifo.sink)
