@@ -651,7 +651,7 @@ class MuxWordQueueTX(Module):
 #   self.pcie_rst_subsys = Signal()   # → subsystem reset
 # ---------------------------------------------------------------------------
 class PCILeechFIFO(Module):
-    def __init__(self):
+    def __init__(self, mux_out_fifo_depth=2048, tlp_rx_fifo_depth=2048):
         # USB side — 32-bit word streams
         self.usb_rx = stream.Endpoint([("data", 32)])   # words arriving from host
         self.usb_tx = stream.Endpoint([("data", 32)])   # words going to host
@@ -941,7 +941,7 @@ class PCILeechFIFO(Module):
         self.submodules.tlp64_to_128 = tlp64_to_128 = TLP64To128Packer()
         self.submodules.tlp128_filter = tlp128_filter = TLP128Filter()
         self.submodules.tlp_rx_fifo = tlp_rx_fifo = SyncFIFO(
-            TLP128_LAYOUT, 2048, buffered=True
+            TLP128_LAYOUT, tlp_rx_fifo_depth, buffered=True
         )
         tlp_filter_bypass = Signal()
         self.comb += [
@@ -978,10 +978,11 @@ class PCILeechFIFO(Module):
             ),
         ]
 
-        # Diagnostic layout: 128-bit FIFO level (depth 2048) plus seen bits.
+        # Diagnostic layout: 128-bit FIFO level plus seen bits.  The level
+        # width follows the configured FIFO depth (10 bits for 512 entries,
+        # 11 bits for 1024/2048 entries).
         self.comb += self.tlp_rx_level.eq(Cat(
-            tlp_rx_fifo.level[8:11],
-            tlp_rx_fifo.level[0:8],
+            tlp_rx_fifo.level,
             rx_seen_count[0:3],
             self.phy_source_seen,
             self.phy_raw_rx_seen,
@@ -1786,7 +1787,7 @@ class PCILeechFIFO(Module):
             # (async_read=True), migen allocates distributed RAM (RAMD64E)
             # which blows the LUT-RAM budget at this width × depth.
             self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO(
-                [("data", 256)], 2048, buffered=True
+                [("data", 256)], mux_out_fifo_depth, buffered=True
             )
 
             self.comb += [

@@ -9,7 +9,8 @@ from litex.soc.interconnect import stream
 from litex.soc.cores.usb_fifo import phy_description
 
 class FT601Sync(Module):
-    def __init__(self, pads, dw=32, timeout=256):
+    def __init__(self, pads, dw=32, timeout=256,
+                 read_fifo_depth=128, write_fifo_depth=8192):
         # NOTE on sizing: migen's AsyncFIFO uses a synchronous-read port
         # (see migen/genlib/fifo.py: rdport = storage.get_port(clock_domain="read"),
         # no async_read=True) so it CAN infer BRAM.  If the design needs
@@ -19,9 +20,9 @@ class FT601Sync(Module):
         # (tlp_rx_fifo, mux_out_fifo) — those use buffered=True to force
         # BRAM inference.
         read_fifo  = ClockDomainsRenamer({"write": "usb", "read": "sys"})(
-            stream.AsyncFIFO(phy_description(dw), 128))
+            stream.AsyncFIFO(phy_description(dw), read_fifo_depth))
         write_fifo = ClockDomainsRenamer({"write": "sys", "read": "usb"})(
-            stream.AsyncFIFO(phy_description(dw), 8192))
+            stream.AsyncFIFO(phy_description(dw), write_fifo_depth))
 
         read_buffer = ClockDomainsRenamer("usb")(stream.SyncFIFO(phy_description(dw), 4))
         self.comb += read_buffer.source.connect(read_fifo.sink)

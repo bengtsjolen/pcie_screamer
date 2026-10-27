@@ -62,26 +62,45 @@ Removing the FT601 for an on-chip SoC stream would therefore free
 BUFG. That is enough headroom for a small VexRiscv plus a modest local
 RAM, especially if the write FIFO is not needed at full depth.
 
+## Presets
+
+These are the named configurations exposed by `--fifo-preset`:
+
+| Preset | mux_out | TLP RX | FT601 write | FT601 read | BRAM | 1G MiB/s | 2G valid MiB/s | Use |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `large` | 2048 | 2048 | 8192 | 128 | 41.5 | 147-149 | 143.4 | maximum performance |
+| `medium` | 1024 | 2048 | 4096 | 128 | 30.5 | 137.4 | 133.3 | best reduced-BRAM balance |
+| `mini` | 1024 | 2048 | 1024 | 128 | 27.5 | 100.8 | 102.2 | smallest fully functional |
+
+`mini` uses the 1024-word FT601 write FIFO. The 512-word variant
+(Hybrid F below) is marginally smaller but fails the 2 GiB dump.
+
 ## FIFO depth sweep
 
 All measurements use PCILeech 4.17.8.49, USB 3.0 (5000 Mbps), the same
 1 GiB range and the same 2 GiB range as `PERFORMANCE.md`. “Functional”
 means PCILeech could connect, the 4 KiB VESA ROM region matched the old
-ufrisk dump, and a 1 GiB dump completed with 0 failed pages. 2 GiB always
-has 40960 known memory-map holes.
+ufrisk dump, and a 1 GiB dump completed with 0 failed pages. The 2 GiB
+range always has 40960 known memory-map holes, so a working run reports
+about 40960 failed pages there.
 
 The default/large configuration is **mux_out 2048, TLP RX 2048,
-FT601 write 8192**. Every other row changes one or more of those values
-relative to this default.
+FT601 write 8192**. The depths are independent; there is no fixed ratio
+between the 256-bit mux FIFO and the 32-bit FT601 FIFO (the 4x entry
+difference in the defaults is just 64 KiB vs 32 KiB). “Half” and
+“Quarter” below scale all default parameters by 2x and 4x respectively.
 
-| Name | mux_out | TLP RX | FT601 write | BRAM | Δ BRAM | LUTs | FFs | 1G MiB/s | 2G valid MiB/s | 1G failed | Functional |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Large (default) | 2048 | 2048 | 8192 | 41.5 | 0 | 4,674 | 4,944 | **147.1** | **143.4** | 0 | yes |
-| Hybrid B | 1024 | 2048 | 4096 | 30.5 | -11.0 | 4,645 | 4,933 | **137.4** | **133.3** | 0 | yes |
-| Medium | 1024 | 1024 | 4096 | 27.0 | -14.5 | 4,638 | 4,929 | 109.4 | 106.2 | 2 | degraded |
-| Hybrid A | 2048 | 512 | 8192 | 36.0 | -5.5 | 4,688 | 4,936 | invalid | invalid | 236,443 | no |
-| Hybrid C | 512 | 2048 | 2048 | 25.0 | -16.5 | 4,645 | 4,923 | 90.0 | 90.9 | 9 | degraded |
-| Small | 512 | 512 | 1024 | 18.5 | -23.0 | 4,694 | 4,907 | n/a | n/a | n/a | no (connect fails) |
+| Name | mux_out | TLP RX | FT601 write | BRAM | Δ BRAM | LUTs | FFs | 1G MiB/s | 2G valid MiB/s | 1G failed | 2G failed | Functional |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Large (default) | 2048 | 2048 | 8192 | 41.5 | 0 | 4,674 | 4,944 | **147.1** | **143.4** | 0 | 40960 | yes |
+| Hybrid A | 2048 | 512 | 8192 | 36.0 | -5.5 | 4,688 | 4,936 | invalid | invalid | 236,443 | 484,141 | no |
+| Hybrid B | 1024 | 2048 | 4096 | 30.5 | -11.0 | 4,645 | 4,933 | **137.4** | **133.3** | 0 | 40960 | yes (`medium`) |
+| Hybrid D | 1024 | 2048 | 2048 | 28.5 | -13.0 | 4,657 | 4,925 | 119.6 | 111.3 | 0 | 40960 | yes |
+| Hybrid E | 1024 | 2048 | 1024 | 27.5 | -14.0 | 4,673 | 4,917 | 100.8 | 102.2 | 0 | 40960 | yes (`mini`) |
+| Hybrid F | 1024 | 2048 | 512 | 27.0 | -14.5 | 4,667 | 4,909 | 94.3 | 74.5 | 0 | 406,871 | no (2G fails) |
+| Half | 1024 | 1024 | 4096 | 27.0 | -14.5 | 4,638 | 4,929 | 109.4 | 106.2 | 2 | 40961 | degraded |
+| Hybrid C | 512 | 2048 | 2048 | 25.0 | -16.5 | 4,645 | 4,923 | 90.0 | 90.9 | 9 | 40979 | degraded |
+| Quarter | 512 | 512 | 1024 | 18.5 | -23.0 | 4,694 | 4,907 | n/a | n/a | n/a | n/a | no (connect fails) |
 
 Notes:
 
@@ -89,20 +108,38 @@ Notes:
   test, but under load it lost most completions: 1 GiB read 25,701 of
   262,144 pages and 2 GiB read 40,147 of 524,288. The PCILeech speed
   display is meaningless when pages fail.
-* **Small** (all FIFOs minimum) responds on the CMD path, but PCILeech
+* **Quarter** (all FIFOs minimum) responds on the CMD path, but PCILeech
   cannot complete initialization. 18.5 tiles is too small for the init
   burst.
-* **Medium** is the slowest working configuration (109 MiB/s) and had 2
-  failed pages on 1 GiB. Reducing the TLP RX FIFO to 1024 is the main
-  cause: Hybrid B keeps the same output FIFOs as Medium but restores the
-  RX FIFO to 2048 and recovers to 137 MiB/s with 0 failed pages.
-* **Hybrid B** is the best low-BRAM option: 30.5/50 tiles (61%), ~137
-  MiB/s on 1 GiB, 0 failed pages, VESA match. It saves 11 BRAM tiles at
-  a cost of ~7% steady-state throughput.
+* **Half** is the slowest 1 GiB working configuration (109 MiB/s) and had
+  2 failed pages. Reducing the TLP RX FIFO to 1024 is the main cause:
+  Hybrid B keeps the same output FIFOs as Half but restores the RX FIFO to
+  2048 and recovers to 137 MiB/s with 0 failed pages.
+* **Hybrid B** is the `medium` preset: 30.5/50 tiles (61%), ~137 MiB/s
+  on 1 GiB, 0 failed pages, VESA match. It saves 11 BRAM tiles at a cost
+  of ~7% steady-state throughput.
+* **Hybrid E** is the `mini` preset: 27.5/50 tiles (55%), ~101 MiB/s,
+  0 failed pages. This is the smallest fully functional configuration;
+  the extra 0.5 tile for the 1024-word write FIFO is worth it over the
+  512-word Hybrid F.
+* **Hybrid F** (512-word write FIFO) works on 1 GiB but loses most of the
+  2 GiB dump (117,417 pages read, 406,871 failed). 512 words is not a
+  safe minimum.
+* At a fixed mux 1024 / RX 2048, the FT601 write FIFO dominates
+  performance: 512 words = 94.3 MiB/s (fails 2G), 1024 = 100.8 MiB/s,
+  2048 = 119.6 MiB/s, 4096 = 137.4 MiB/s. The original 1024-word FIFO
+  was functional but was indeed a major throughput bottleneck; 4096 is
+  the best reduced-BRAM value and 8192 remains best for full performance.
+* **Hybrid D** (1024-frame mux FIFO + 2048-word write FIFO, RX 2048)
+  works and has 0 failed pages, but drops to 119.6 MiB/s on 1 GiB. The
+  write FIFO can be 2048 words, but 4096 is the better performance/BRAM
+  trade-off.
 * **Hybrid C** (512-frame mux FIFO + 2048-word write FIFO, RX 2048)
   connects and passes VESA, but is too aggressive: 1 GiB drops to
   90.0 MiB/s with 9 failed pages and 2 GiB has 40979 failed (19 beyond
-  the known holes). Both output FIFOs need more depth than this.
+  the known holes). Since Hybrid D works with the same 2048-word write
+  FIFO but a 1024-frame mux FIFO, the 512-frame mux FIFO is the main
+  cause of the C failures.
 * The output FIFOs can be reduced to 1024 frames + 4096 words as long as
   the 128-bit TLP RX FIFO stays at 2048. The RX FIFO is the first thing
   that breaks when reduced; below Hybrid B, the output FIFOs also start
@@ -110,26 +147,28 @@ Notes:
 
 ## Building a custom FIFO configuration
 
-The top level exposes the FIFO depths directly:
+Select a named preset:
+
+```sh
+./venv/bin/python pcileech_squirrel.py --build --fifo-preset medium
+./venv/bin/python pcileech_squirrel.py --build --fifo-preset mini
+```
+
+The preset values are listed in the table above; the default is `large`.
+Individual depth options override the preset for experimentation:
 
 ```sh
 ./venv/bin/python pcileech_squirrel.py --build \
-    --mux-fifo-depth 1024 \
-    --tlp-rx-fifo-depth 2048 \
-    --ft601-write-fifo-depth 4096
+    --fifo-preset medium \
+    --mux-fifo-depth 512 \
+    --ft601-write-fifo-depth 2048
 ```
 
-`--ft601-read-fifo-depth` is also available (default 128). The defaults
-are the large configuration:
-
-* `--mux-fifo-depth 2048`
-* `--tlp-rx-fifo-depth 2048`
-* `--ft601-write-fifo-depth 8192`
-* `--ft601-read-fifo-depth 128`
-
-Use power-of-two depths for predictable BRAM inference. After changing
-FIFO depths, rebuild, flash, and rescan the PCIe device. The benchmark
-script records the performance:
+The individual options are `--mux-fifo-depth`, `--tlp-rx-fifo-depth`,
+`--ft601-write-fifo-depth` and `--ft601-read-fifo-depth`. Use
+power-of-two depths for predictable BRAM inference. After changing FIFO
+depths, rebuild, flash, and rescan the PCIe device. The benchmark script
+records the performance:
 
 ```sh
 ./bench-pcileech.sh <label> 1G 2G

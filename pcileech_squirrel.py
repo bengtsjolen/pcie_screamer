@@ -293,7 +293,9 @@ class _CRG(Module):
 
 class PCIeSquirrel(SoCMini):
 
-    def __init__(self, platform, with_analyzer=False, with_loopback=False):
+    def __init__(self, platform, with_analyzer=False, with_loopback=False,
+                 mux_out_fifo_depth=2048, tlp_rx_fifo_depth=2048,
+                 ft601_write_fifo_depth=8192, ft601_read_fifo_depth=128):
         sys_clk_freq = int(100e6)
 
         SoCMini.__init__(self, platform, sys_clk_freq,
@@ -341,7 +343,11 @@ class PCIeSquirrel(SoCMini):
         self.add_csr("pcie_phy")
 
         # USB FT601 PHY ----------------------------------------------------------------------------
-        self.submodules.usb_phy = FT601Sync(platform.request("usb_fifo"), dw=32, timeout=256)
+        self.submodules.usb_phy = FT601Sync(
+            platform.request("usb_fifo"), dw=32, timeout=256,
+            read_fifo_depth=ft601_read_fifo_depth,
+            write_fifo_depth=ft601_write_fifo_depth,
+        )
 
         # USB Loopback (debug) ---------------------------------------------------------------------
         if with_loopback:
@@ -354,7 +360,10 @@ class PCIeSquirrel(SoCMini):
 
         # PCILeech FIFO ----------------------------------------------------------------------------
         else:
-            self.submodules.pcileech_fifo = pcileech_fifo = PCILeechFIFO()
+            self.submodules.pcileech_fifo = pcileech_fifo = PCILeechFIFO(
+                mux_out_fifo_depth=mux_out_fifo_depth,
+                tlp_rx_fifo_depth=tlp_rx_fifo_depth,
+            )
 
             # USB PHY <--> PCILeechFIFO
             # usb_phy.source = words from FT601 (host→FPGA)
@@ -740,6 +749,28 @@ class PCIeSquirrel(SoCMini):
 
 # Build --------------------------------------------------------------------------------------------
 
+FIFO_PRESETS = {
+    "large": {
+        "mux_fifo_depth":           2048,
+        "tlp_rx_fifo_depth":        2048,
+        "ft601_write_fifo_depth":   8192,
+        "ft601_read_fifo_depth":    128,
+    },
+    "medium": {
+        "mux_fifo_depth":           1024,
+        "tlp_rx_fifo_depth":        2048,
+        "ft601_write_fifo_depth":   4096,
+        "ft601_read_fifo_depth":    128,
+    },
+    "mini": {
+        "mux_fifo_depth":           1024,
+        "tlp_rx_fifo_depth":        2048,
+        "ft601_write_fifo_depth":   1024,
+        "ft601_read_fifo_depth":    128,
+    },
+}
+
+
 def main():
     parser = argparse.ArgumentParser(description="PCIe Screamer Squirrel Gateware")
     parser.add_argument("--with-analyzer", action="store_true", help="Enable LiteScope analyzer")
@@ -747,12 +778,32 @@ def main():
     parser.add_argument("--build",         action="store_true", help="Build bitstream")
     parser.add_argument("--load",          action="store_true", help="Load via JTAG")
     parser.add_argument("--flash",         action="store_true", help="Flash to SPI flash")
+    parser.add_argument("--fifo-preset", choices=sorted(FIFO_PRESETS), default="large",
+                        help="FIFO size preset (default: large)")
+    parser.add_argument("--mux-fifo-depth", type=lambda x: int(x, 0), default=None,
+                        help="override mux_out_fifo depth in 256-bit frames")
+    parser.add_argument("--tlp-rx-fifo-depth", type=lambda x: int(x, 0), default=None,
+                        help="override 128-bit TLP RX FIFO depth")
+    parser.add_argument("--ft601-write-fifo-depth", type=lambda x: int(x, 0), default=None,
+                        help="override FT601 sys->usb write FIFO depth in 32-bit words")
+    parser.add_argument("--ft601-read-fifo-depth", type=lambda x: int(x, 0), default=None,
+                        help="override FT601 usb->sys read FIFO depth in 32-bit words")
     args = parser.parse_args()
+
+    fifo = dict(FIFO_PRESETS[args.fifo_preset])
+    for key in fifo:
+        override = getattr(args, key)
+        if override is not None:
+            fifo[key] = override
 
     platform = Platform()
     soc      = PCIeSquirrel(platform,
                             with_analyzer=args.with_analyzer,
-                            with_loopback=args.with_loopback)
+                            with_loopback=args.with_loopback,
+                            mux_out_fifo_depth=fifo["mux_fifo_depth"],
+                            tlp_rx_fifo_depth=fifo["tlp_rx_fifo_depth"],
+                            ft601_write_fifo_depth=fifo["ft601_write_fifo_depth"],
+                            ft601_read_fifo_depth=fifo["ft601_read_fifo_depth"])
     builder  = Builder(soc, csr_csv="test/csr.csv")
     builder.build(run=args.build)
 

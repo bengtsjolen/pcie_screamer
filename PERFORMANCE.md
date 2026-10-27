@@ -311,6 +311,11 @@ These cheap fixes were tested and made no measurable difference:
 All were reverted. The final design uses the 128-bit RX path, which keeps
 the design simple and extensible and closes the gap to ~1.5-3%.
 
+## FPGA resource use
+
+See [RESOURCES.md](RESOURCES.md) for the current XC7A35T utilization, the
+FT601 controller cost, and the measured FIFO-depth/performance trade-offs.
+
 ## Reproducing a run
 
 Use the script in the repository root:
