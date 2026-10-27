@@ -36,14 +36,18 @@ The cleaned large build was verified with PCILeech 4.17.8.49:
 - 2 GiB: 147.83 MiB/s valid, 483328/524288 pages, 40960 known holes.
 - VESA ROM `0x3f000-0x40000`: SHA-256
   `5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db`,
-  matching the ufrisk reference.
+  matching the ufrisk reference `PciLeech/binary/v4.17.5/out-ufrisk-4.14.bin`.
 - Bitstream: `pcie_squirrel-cleanup-rx128.bin`, SHA-256
   `33848540d0efaacbd975321ff99ea14108051451be81c75fb5eb44f9e9e2297b`.
 
-The build reports WNS -1.421 ns / 103 failing endpoints on PCIe
-clock-domain reset paths. The existing false-path commands are emitted
-before clock creation and appear to be discarded; this constraint issue is
-outside the cleanup scope and is not timing closure.
+The build reports WNS -1.421 ns and 103 failing setup endpoints across
+PCIe clock-domain crossing paths (mostly MultiReg/CDC and BME-timer paths;
+the WNS path is reset recovery). The three inter-clock false-path commands
+in `pcileech_squirrel.py:177-179` are emitted before clock creation and
+therefore match no clocks; the `*pclk_sel` and post-clock `mr_ff`/`ars_ff`
+false paths are unaffected. This is a pre-existing constraint issue outside
+the cleanup scope; the design is not timing-closed. There is also a
+WPWS -0.007 ns pulse-width violation on one endpoint.
 
 ## Where the BRAM goes (approximate)
 
@@ -92,6 +96,9 @@ These are the named configurations exposed by `--fifo-preset`:
 `mini` uses the 1024-word FT601 write FIFO. The 512-word variant
 (Hybrid F below) is marginally smaller but fails the 2 GiB dump.
 
+The preset throughput values predate the diagnostic cleanup; see Cleanup
+verification for the cleaned large build.
+
 ## FIFO depth sweep
 
 All measurements use PCILeech 4.17.8.49, USB 3.0 (5000 Mbps), the same
@@ -108,7 +115,8 @@ difference in the defaults is just 64 KiB vs 32 KiB). “Half” and
 “Quarter” below scale all default parameters by 2x and 4x respectively.
 
 The LUT/FF columns in this sweep were measured before the diagnostic
-cleanup; use the Current utilization table for the cleaned build.
+cleanup; use the Current utilization table for the cleaned build. The
+throughput columns in this sweep also predate the cleanup.
 
 | Name | mux_out | TLP RX | FT601 write | BRAM | Δ BRAM | LUTs | FFs | 1G MiB/s | 2G valid MiB/s | 1G failed | 2G failed | Functional |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
