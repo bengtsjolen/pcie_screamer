@@ -19,10 +19,11 @@ _io = [
     ("user_btn", 0, Pins("AB3"), IOStandard("LVCMOS33")),
     ("user_btn", 1, Pins("AA5"), IOStandard("LVCMOS33")),
 
-    # Serial (undocumented but present?)
+    # Serial on the FT4232H channel-B UART: FPGA TX -> FTDI RXD is G22,
+    # FPGA RX <- FTDI TXD is G21 (traced on the board)
     ("serial", 0,
-        Subsignal("tx", Pins("T1")),
-        Subsignal("rx", Pins("U1")),
+        Subsignal("tx", Pins("G22")),
+        Subsignal("rx", Pins("G21")),
         IOStandard("LVCMOS33"),
     ),
 
