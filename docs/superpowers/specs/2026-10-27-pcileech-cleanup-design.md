@@ -116,7 +116,8 @@ The following are unused or unreachable in the active build:
 - 64-to-128-bit TLP RX packing/filtering and 32-to-64-bit TX packing.
 - PCILeech mux, serializer, CFG/loopback/CMD handling, and wire protocol.
 - MSI generation and PCIe link/BME setup.
-- PCIe timeout detection and automatic recovery reset.
+- PCIe timeout detection and the existing watchdog pulse. The pulse is not
+  wired to `pcie_rst_n` in this build; automatic recovery is inactive.
 - Optional loopback and LiteScope analyzer builds.
 
 The only externally visible cleanup effect is that custom diagnostic readbacks

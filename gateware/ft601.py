@@ -170,7 +170,7 @@ class FT601Sync(Module):
         # branch, which meant: once FT601 raised txe_n even briefly
         # (observed 234 µs of txen_high during a 14-page dump), FSM bounced
         # to IDLE and got stuck there since `wants_write` checks only real
-        # data.  Result: diag_ft601_filler_emit = 0 despite 824 B stranded
+        # data.  Result: the diagnostic filler counter read zero despite 824 B stranded
         # in FT601.  Adding an independent IDLE timer that re-arms the
         # filler mirrors ufrisk's IDLE → TX_WAIT1 transition on
         # `data_queue_count > 0`: his data_cooldown_count continuously

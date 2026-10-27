@@ -376,7 +376,8 @@ class PCILeechFIFO(Module):
         self.rx_axis_seen = Signal()
         self.tx_err_drop  = Signal()
 
-        # Timeout / automatic PCIe reset output.
+        # Timeout watchdog output. This is a hook: the current top level does
+        # not wire it to the PCIe reset, so automatic core reset is inactive.
         self.force_pcie_reset = Signal()
         
 
@@ -509,7 +510,7 @@ class PCILeechFIFO(Module):
         ]
 
         # -------------------------------------------------------------------
-        # PCIe timeout / recovery
+        # PCIe timeout detector (force_pcie_reset is currently a hook)
         # -------------------------------------------------------------------
         TIMEOUT_CYCLES = 200_000_000  # 2 seconds at 100 MHz sys clock
 
@@ -539,7 +540,9 @@ class PCILeechFIFO(Module):
                 ),
             ),
 
-            # Automatic PCIe reset pulse after timeout.
+            # Recovery pulse after timeout. The top level does not currently
+            # connect force_pcie_reset to pcie_rst_n; wiring it is a separate
+            # functional change.
             If(reset_holdoff != 0,
                 self.force_pcie_reset.eq(1),
                 reset_holdoff.eq(reset_holdoff - 1),

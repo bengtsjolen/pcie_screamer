@@ -36,7 +36,8 @@ The cleaned large build was verified with PCILeech 4.17.8.49:
 - 2 GiB: 147.83 MiB/s valid, 483328/524288 pages, 40960 known holes.
 - VESA ROM `0x3f000-0x40000`: SHA-256
   `5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db`,
-  matching the ufrisk reference `PciLeech/binary/v4.17.5/out-ufrisk-4.14.bin`.
+  matching the ufrisk reference
+  `$HOME/Code/FPGA/PciLeech/binary/v4.17.5/out-ufrisk-4.14.bin`.
 - Bitstream: `pcie_squirrel-cleanup-rx128.bin`, SHA-256
   `33848540d0efaacbd975321ff99ea14108051451be81c75fb5eb44f9e9e2297b`.
 
@@ -48,6 +49,10 @@ therefore match no clocks; the `*pclk_sel` and post-clock `mr_ff`/`ars_ff`
 false paths are unaffected. This is a pre-existing constraint issue outside
 the cleanup scope; the design is not timing-closed. There is also a
 WPWS -0.007 ns pulse-width violation on one endpoint.
+
+The timeout watchdog's `force_pcie_reset` pulse is not wired to `pcie_rst_n`;
+automatic PCIe recovery is inactive in this build (pre-existing). The watchdog
+remains as a future hook.
 
 ## Where the BRAM goes (approximate)
 

@@ -233,7 +233,8 @@ class PCIeSquirrel(SoCMini):
             # Hold PCIe core in reset until host clears rw[200] via CMD write.
             # pcie_phy.pcie_rst_n feeds i_sys_rst_n on the IP — active low.
 
-            # FIXME: without this we cannot reset ip ?!?
+            # Automatic timeout reset is not wired: pcie_rst_n is driven only
+            # by pcie_rst_core (rw[200]); force_pcie_reset is a future hook.
             self.comb += self.pcie_phy.pcie_rst_n.eq(~pcileech_fifo.pcie_rst_core)
             
             # Wire PCIe PHY status signals for PCIE register space responses
