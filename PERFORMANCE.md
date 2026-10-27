@@ -65,6 +65,37 @@ holes) on this machine, so both "raw" (requested range) and "valid"
 PCILeech's own progress line is listed separately; it is not the same
 measurement.
 
+## Theoretical limits
+
+These are interface/protocol ceilings, not expected benchmark results.
+
+| Stage | Calculation | Limit |
+|-------|-------------|-------|
+| PCIe Gen2 x1 raw | 5 GT/s × 1 lane × 8/10 | 500 MB/s |
+| PCIe TLP payload, 256 B CplD | 256 B / (256 + 12 B header + 4 B LCRC + 2 B seq + ~8 B framing) | ~455 MB/s |
+| FT601 USB3 Gen1 raw | 5 Gbps × 8/10 | 500 MB/s |
+| FT601 maximum | FTDI spec, 32-bit FIFO at 100 MHz | **400 MB/s** |
+| PCILeech mux framing | 7 data words per 8-word / 256-bit frame | 400 × 7/8 = 350 MB/s |
+| PCILeech + 256 B CplD overhead | 350 × ~0.91 | **~318 MB/s ≈ 303 MiB/s** |
+
+* The observed CplDs carry 256 B of payload because the root complex uses
+  a 256 B maximum payload size. With 4 KiB CplDs the TLP efficiency would
+  be ~99% and the combined ceiling ~347 MB/s.
+* The 100 MHz, 64-bit internal path (800 MB/s) and the PCIe user interface
+  (64-bit at 125 MHz, 1 GB/s) are not the limiting interfaces.
+* Sync words and keepalive frames are small and not included above.
+* The measured 139-149 MiB/s is about 46-49% of the ~303 MiB/s
+  protocol/framing ceiling.
+
+### Memory bandwidth is not the limit
+
+The host has tens to hundreds of GB/s of DRAM bandwidth. A ~150 MB/s DMA
+read is well below 1% of that, so DRAM bandwidth and self-DMA congestion
+are negligible. Self-DMA also does not copy the data twice: the FPGA reads
+host DRAM over PCIe and the same data leaves over USB. The remaining gap
+is dominated by completion latency, outstanding-request depth, and host
+software pacing.
+
 ## Results
 
 ### Our gateware
