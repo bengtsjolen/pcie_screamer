@@ -14,14 +14,12 @@ import argparse
 
 from migen import *
 from migen.genlib.resetsync import AsyncResetSynchronizer
-from migen.genlib.cdc import MultiReg, BusSynchronizer
 
 from litex.build.generic_platform import *
 from litex.soc.cores.clock import *
 from litex.soc.integration.soc_core import *
 from litex.soc.integration.builder import *
 from litex.soc.interconnect import stream
-from litex.soc.interconnect.stream import StrideConverter
 
 from litepcie.phy.s7pciephy import S7PCIEPHY
 from litepcie.common import phy_layout
@@ -107,166 +105,6 @@ class TLP32To64Packer(Module):
             # (Could set sink.ready=1 here too — doesn't matter since
             #  sink.valid=0 means no handshake either way.)
         )
-
-class TLP64To32Unpacker(Module):
-    def __init__(self, swap_words=False):
-        self.sink   = sink   = stream.Endpoint(phy_layout(64))
-        self.source = source = stream.Endpoint(phy_layout(32))
-        
-        # Buffered 64-bit beat.
-        lo_dat   = Signal(32)
-        hi_dat   = Signal(32)
-        lo_be    = Signal(4)
-        hi_be    = Signal(4)
-        lo_v     = Signal()
-        hi_v     = Signal()
-        beat_last = Signal()
-        
-        self.submodules.fsm = fsm = FSM(reset_state="LOAD")
-        
-        self.comb += [
-            sink.ready.eq(0),
-            source.valid.eq(0),
-            source.dat.eq(0),
-            source.be.eq(0),
-            source.last.eq(0),
-        ]
-        
-        # Accept exactly one 64-bit beat.
-        fsm.act("LOAD",
-                sink.ready.eq(1),
-                If(sink.valid & sink.ready,
-                   If(swap_words,
-                      NextValue(lo_dat, sink.dat[32:64]),
-                      NextValue(lo_be,  sink.be[4:8]),
-                      NextValue(hi_dat, sink.dat[0:32]),
-                      NextValue(hi_be,  sink.be[0:4]),
-                      NextValue(lo_v,   sink.be[4:8] != 0),
-                      NextValue(hi_v,   sink.be[0:4] != 0),
-                      ).Else(
-                          NextValue(lo_dat, sink.dat[0:32]),
-                          NextValue(lo_be,  sink.be[0:4]),
-                          NextValue(hi_dat, sink.dat[32:64]),
-                          NextValue(hi_be,  sink.be[4:8]),
-                          NextValue(lo_v,   sink.be[0:4] != 0),
-                          NextValue(hi_v,   sink.be[4:8] != 0),
-                      ),
-                   NextValue(beat_last, sink.last),
-                   If(swap_words,
-                      If(sink.be[4:8] != 0,
-                         NextState("EMIT_LO")
-                         ).Elif(sink.be[0:4] != 0,
-                                NextState("EMIT_HI")
-                                )
-                      ).Else(
-                          If(sink.be[0:4] != 0,
-                             NextState("EMIT_LO")
-                             ).Elif(sink.be[4:8] != 0,
-                                    NextState("EMIT_HI")
-                                    )
-                      )
-                   )
-                )
-        
-        # Emit first 32-bit word.
-        fsm.act("EMIT_LO",
-                source.valid.eq(1),
-                source.dat.eq(lo_dat),
-                source.be.eq(lo_be),
-                source.last.eq(beat_last & ~hi_v),
-                If(source.ready,
-                   If(hi_v,
-                      NextState("EMIT_HI")
-                      ).Else(
-                          NextState("LOAD")
-                      )
-                   )
-                )
-        
-        # Emit second 32-bit word.
-        fsm.act("EMIT_HI",
-                source.valid.eq(1),
-                source.dat.eq(hi_dat),
-                source.be.eq(hi_be),
-                source.last.eq(beat_last),
-                If(source.ready,
-                   NextState("LOAD")
-                   )
-                )
-
-class StrideConverterBEFilter(Module):
-    """Strip ghost words (be=0) from a StrideConverter 64→32 output.
-
-    Inserts 1 cycle of latency.  Correctly moves the 'last' flag from
-    a ghost word back onto the preceding real word.
-
-    Connect:  StrideConverter.source → BEFilter.sink
-              BEFilter.source → downstream (pcileech_fifo.tlp_rx)
-    """
-    def __init__(self):
-        self.sink   = sink   = stream.Endpoint(phy_layout(32))
-        self.source = source = stream.Endpoint(phy_layout(32))
-
-        # Pipeline register
-        buf_dat  = Signal(32)
-        buf_be   = Signal(4)
-        buf_last = Signal()
-
-        # Combinational peek at the incoming word
-        is_ghost = Signal()
-        self.comb += is_ghost.eq(sink.valid & (sink.be == 0))
-
-        self.submodules.fsm = fsm = FSM(reset_state="EMPTY")
-
-        # ---- EMPTY: buffer has no word, not producing output ----
-        fsm.act("EMPTY",
-            source.valid.eq(0),
-            # Accept any real (non-ghost) word into the buffer.
-            # Ghost-when-empty shouldn't happen in normal operation,
-            # but if it does, just consume and stay empty.
-            sink.ready.eq(1),
-            If(sink.valid & ~is_ghost,
-                NextValue(buf_dat,  sink.dat),
-                NextValue(buf_be,   sink.be),
-                NextValue(buf_last, sink.last),
-                NextState("FULL"),
-            )
-        )
-
-        # ---- FULL: present the buffered word, peek at the next ----
-        fsm.act("FULL",
-            source.valid.eq(1),
-            source.dat .eq(buf_dat),
-            source.be  .eq(buf_be),
-            # Merge ghost's 'last' into our output combinationally:
-            # if the very next word is a ghost (be=0, last=1), we set
-            # last=1 on THIS word and discard the ghost.
-            source.last.eq(buf_last | is_ghost),
-
-            If(source.ready,
-                # Output word accepted — advance the pipeline.
-                sink.ready.eq(1),
-                If(is_ghost,
-                    # Ghost consumed (its last was merged above).
-                    # Nothing real to buffer → go empty.
-                    NextState("EMPTY"),
-                ).Elif(sink.valid,
-                    # Real word: latch into buffer, stay full.
-                    NextValue(buf_dat,  sink.dat),
-                    NextValue(buf_be,   sink.be),
-                    NextValue(buf_last, sink.last),
-                    # NextState stays "FULL" implicitly
-                ).Else(
-                    # No new word available — drain buffer, go empty.
-                    NextState("EMPTY"),
-                )
-            ).Else(
-                # Downstream stalled — hold everything.
-                sink.ready.eq(0),
-            )
-        )
-
-        
 
 # CRG ----------------------------------------------------------------------------------------------
 
@@ -389,234 +227,6 @@ class PCIeSquirrel(SoCMini):
                 tlp_tx_conv.source.connect(self.pcie_phy.sink),
             ]
 
-            if 1:
-                txsink_dbg0      = Signal(64)
-                txsink_dbg1      = Signal(64)
-                txsink_dbg_be0   = Signal(8)
-                txsink_dbg_be1   = Signal(8)
-                txsink_dbg_last0 = Signal()
-                txsink_dbg_last1 = Signal()
-                txsink_dbg_seen  = Signal()
-                txsink_dbg_armed = Signal(reset=1)
-                txsink_dbg_count = Signal(2)
-            
-                self.sync += [
-                    If(ResetSignal(),
-                       txsink_dbg0.eq(0),
-                       txsink_dbg1.eq(0),
-                       txsink_dbg_be0.eq(0),
-                       txsink_dbg_be1.eq(0),
-                       txsink_dbg_last0.eq(0),
-                       txsink_dbg_last1.eq(0),
-                       txsink_dbg_seen.eq(0),
-                       txsink_dbg_armed.eq(1),
-                       txsink_dbg_count.eq(0),
-                       ).Elif(txsink_dbg_armed & self.pcie_phy.sink.valid & self.pcie_phy.sink.ready,
-                              txsink_dbg_seen.eq(1),
-                              Case(txsink_dbg_count, {
-                                  0: [
-                                      txsink_dbg0.eq(self.pcie_phy.sink.dat),
-                                      txsink_dbg_be0.eq(self.pcie_phy.sink.be),
-                                      txsink_dbg_last0.eq(self.pcie_phy.sink.last),
-                                  ],
-                                  1: [
-                                    txsink_dbg1.eq(self.pcie_phy.sink.dat),
-                                      txsink_dbg_be1.eq(self.pcie_phy.sink.be),
-                                      txsink_dbg_last1.eq(self.pcie_phy.sink.last),
-                                      txsink_dbg_armed.eq(0),
-                                  ],
-                              }),
-                              If(txsink_dbg_count != 1,
-                                 txsink_dbg_count.eq(txsink_dbg_count + 1)
-                                 )
-                            )
-                ]
-
-
-                self.comb += [
-                    pcileech_fifo.txsink_dbg0.eq(txsink_dbg0),
-                    pcileech_fifo.txsink_dbg1.eq(txsink_dbg1),
-                    pcileech_fifo.txsink_dbg_be0.eq(txsink_dbg_be0),
-                    pcileech_fifo.txsink_dbg_be1.eq(txsink_dbg_be1),
-                    pcileech_fifo.txsink_dbg_last0.eq(txsink_dbg_last0),
-                    pcileech_fifo.txsink_dbg_last1.eq(txsink_dbg_last1),
-                    pcileech_fifo.txsink_dbg_flags.eq(Cat(
-                        txsink_dbg_seen,    # bit 0
-                        txsink_dbg_armed,   # bit 1
-                        txsink_dbg_count,   # bits 3:2
-                        Constant(0, 12),
-                    )),
-                ]
-
-            if 1:
-                rx_dbg0 = Signal(64)
-                rx_dbg1 = Signal(64)
-                rx_dbg2 = Signal(64)
-                rx_dbg3 = Signal(64)
-                rx_dbg4 = Signal(64)
-                rx_dbg5 = Signal(64)
-                rx_dbg6 = Signal(64)
-                rx_dbg7 = Signal(64)
-
-                rx_be0 = Signal(8)
-                rx_be1 = Signal(8)
-                rx_be2 = Signal(8)
-                rx_be3 = Signal(8)
-                rx_be4 = Signal(8)
-                rx_be5 = Signal(8)
-                rx_be6 = Signal(8)
-                rx_be7 = Signal(8)
-
-                rx_lasts = Signal(8)
-                rx_seen  = Signal()
-                rx_armed = Signal(reset=1)
-                rx_count = Signal(4)
-
-                self.sync += [
-                    If(ResetSignal(),
-                       rx_dbg0.eq(0), rx_dbg1.eq(0), rx_dbg2.eq(0), rx_dbg3.eq(0),
-                       rx_dbg4.eq(0), rx_dbg5.eq(0), rx_dbg6.eq(0), rx_dbg7.eq(0),
-                       rx_be0.eq(0),  rx_be1.eq(0),  rx_be2.eq(0),  rx_be3.eq(0),
-                       rx_be4.eq(0),  rx_be5.eq(0),  rx_be6.eq(0),  rx_be7.eq(0),
-                       rx_lasts.eq(0),
-                       rx_seen.eq(0),
-                       rx_armed.eq(1),
-                       rx_count.eq(0),
-                       ).Elif(rx_armed & self.pcie_phy.source.valid & self.pcie_phy.source.ready,
-                              rx_seen.eq(1),
-                              Case(rx_count, {
-                                  0: [rx_dbg0.eq(self.pcie_phy.source.dat), rx_be0.eq(self.pcie_phy.source.be), rx_lasts[0].eq(self.pcie_phy.source.last)],
-                                  1: [rx_dbg1.eq(self.pcie_phy.source.dat), rx_be1.eq(self.pcie_phy.source.be), rx_lasts[1].eq(self.pcie_phy.source.last)],
-                                  2: [rx_dbg2.eq(self.pcie_phy.source.dat), rx_be2.eq(self.pcie_phy.source.be), rx_lasts[2].eq(self.pcie_phy.source.last)],
-                                  3: [rx_dbg3.eq(self.pcie_phy.source.dat), rx_be3.eq(self.pcie_phy.source.be), rx_lasts[3].eq(self.pcie_phy.source.last)],
-                                  4: [rx_dbg4.eq(self.pcie_phy.source.dat), rx_be4.eq(self.pcie_phy.source.be), rx_lasts[4].eq(self.pcie_phy.source.last)],
-                                  5: [rx_dbg5.eq(self.pcie_phy.source.dat), rx_be5.eq(self.pcie_phy.source.be), rx_lasts[5].eq(self.pcie_phy.source.last)],
-                                  6: [rx_dbg6.eq(self.pcie_phy.source.dat), rx_be6.eq(self.pcie_phy.source.be), rx_lasts[6].eq(self.pcie_phy.source.last)],
-                                7: [
-                                    rx_dbg7.eq(self.pcie_phy.source.dat),
-                                    rx_be7.eq(self.pcie_phy.source.be),
-                                    rx_lasts[7].eq(self.pcie_phy.source.last),
-                                    rx_armed.eq(0),
-                                ],
-                              }),
-                              If(rx_count != 7,
-                                 rx_count.eq(rx_count + 1)
-                                 )
-                              )
-                ]
-                
-                self.comb += [
-                    pcileech_fifo.rxsink_dbg[0].eq(rx_dbg0),
-                    pcileech_fifo.rxsink_dbg[1].eq(rx_dbg1),
-                    pcileech_fifo.rxsink_dbg[2].eq(rx_dbg2),
-                    pcileech_fifo.rxsink_dbg[3].eq(rx_dbg3),
-                    pcileech_fifo.rxsink_dbg[4].eq(rx_dbg4),
-                    pcileech_fifo.rxsink_dbg[5].eq(rx_dbg5),
-                    pcileech_fifo.rxsink_dbg[6].eq(rx_dbg6),
-                    pcileech_fifo.rxsink_dbg[7].eq(rx_dbg7),
-                    pcileech_fifo.rxsink_be[0].eq(rx_be0),
-                    pcileech_fifo.rxsink_be[1].eq(rx_be1),
-                    pcileech_fifo.rxsink_be[2].eq(rx_be2),
-                    pcileech_fifo.rxsink_be[3].eq(rx_be3),
-                    pcileech_fifo.rxsink_be[4].eq(rx_be4),
-                    pcileech_fifo.rxsink_be[5].eq(rx_be5),
-                    pcileech_fifo.rxsink_be[6].eq(rx_be6),
-                    pcileech_fifo.rxsink_be[7].eq(rx_be7),
-                    pcileech_fifo.rxsink_lasts.eq(rx_lasts),
-                    pcileech_fifo.rxsink_flags.eq(Cat(rx_seen, rx_armed, rx_count, Constant(0, 10))),
-                ]
-
-
-
-            if 1:
-                rx64_seen       = Signal(16)
-                ser_out_seen    = Signal(16)
-                usbtx_seen      = Signal(16)
-                self.comb += [
-                    pcileech_fifo.diag_rx64_seen.eq(rx64_seen),
-                    pcileech_fifo.diag_rx32_seen.eq(0),
-                    pcileech_fifo.diag_ser_out_seen.eq(ser_out_seen),
-                    pcileech_fifo.diag_usbtx_seen.eq(usbtx_seen),
-                ]
-                self.sync += [
-                    If(self.pcie_phy.source.valid & self.pcie_phy.source.ready,
-                       rx64_seen.eq(rx64_seen + 1)
-                       ),
-                ]
-                
-                self.sync += [
-                    If(pcileech_fifo.serializer.source.valid & pcileech_fifo.serializer.source.ready,
-                       ser_out_seen.eq(ser_out_seen + 1)
-                       ),
-                    If(self.usb_phy.sink.valid & self.usb_phy.sink.ready,
-                       usbtx_seen.eq(usbtx_seen + 1)
-                       ),
-                ]
-
-                # --- Extra PCIe-IP edge counters ------------------------------
-                # Count in the pcie clock domain (where the IP signals live),
-                # then CDC-resync the 16-bit counter value into sys.
-                #
-                # tx_tlp_cnt_pcie : # of TLPs we handed to the IP
-                #                   (MRds/MWrs; CfgRd/CfgWr use cfg_mgmt, not s_axis_tx)
-                # rx_tlp_cnt_pcie : # of TLPs the IP delivered (CplDs etc.)
-                # tx_err_cnt_pcie : # of tx_err_drop pulses
-                #
-                # TX uses valid & ready & last — AXI-S guarantees this is a
-                # single-cycle transfer event per TLP.
-                #
-                # RX uses valid & ready & last via rx_datapath.sink, because
-                # m_axis_rx_tready isn't directly exposed in pcie_phy.  Using
-                # just (valid & last) would over-count whenever we backpressure
-                # (IP holds valid & last high until tready comes back).
-                rx_sink = self.pcie_phy.rx_datapath.sink  # pcie domain
-
-                tx_tlp_cnt_pcie = Signal(16)
-                rx_tlp_cnt_pcie = Signal(16)
-                tx_err_cnt_pcie = Signal(16)
-                self.sync.pcie += [
-                    If(self.pcie_phy.s_axis_tx_tvalid
-                       & self.pcie_phy.s_axis_tx_tready
-                       & self.pcie_phy.s_axis_tx_tlast,
-                       tx_tlp_cnt_pcie.eq(tx_tlp_cnt_pcie + 1)
-                       ),
-                    If(rx_sink.valid & rx_sink.ready & rx_sink.last,
-                       rx_tlp_cnt_pcie.eq(rx_tlp_cnt_pcie + 1)
-                       ),
-                    If(self.pcie_phy.tx_err_drop,
-                       tx_err_cnt_pcie.eq(tx_err_cnt_pcie + 1)
-                       ),
-                ]
-
-                tx_tlp_sync = BusSynchronizer(16, "pcie", "sys")
-                rx_tlp_sync = BusSynchronizer(16, "pcie", "sys")
-                tx_err_sync = BusSynchronizer(16, "pcie", "sys")
-                self.submodules += tx_tlp_sync, rx_tlp_sync, tx_err_sync
-                self.comb += [
-                    tx_tlp_sync.i.eq(tx_tlp_cnt_pcie),
-                    rx_tlp_sync.i.eq(rx_tlp_cnt_pcie),
-                    tx_err_sync.i.eq(tx_err_cnt_pcie),
-                    pcileech_fifo.diag_tx_tlp_seen    .eq(tx_tlp_sync.o),
-                    pcileech_fifo.diag_rx_tlp_seen    .eq(rx_tlp_sync.o),
-                    pcileech_fifo.diag_tx_err_drop_cnt.eq(tx_err_sync.o),
-                ]
-
-                # FT601 usb-domain diag counters → sys via CDC, exposed on
-                # PCILeechFIFO diag registers (regs 70/71/72 = 0x008c/8e/90).
-                ft601_filler_sync = BusSynchronizer(16, "usb", "sys")
-                ft601_wrn0_sync   = BusSynchronizer(16, "usb", "sys")
-                ft601_txen_sync   = BusSynchronizer(16, "usb", "sys")
-                self.submodules += ft601_filler_sync, ft601_wrn0_sync, ft601_txen_sync
-                self.comb += [
-                    ft601_filler_sync.i.eq(self.usb_phy.diag_filler_emit),
-                    ft601_wrn0_sync  .i.eq(self.usb_phy.diag_wrn0_accept),
-                    ft601_txen_sync  .i.eq(self.usb_phy.diag_txen_high),
-                    pcileech_fifo.diag_ft601_filler_emit.eq(ft601_filler_sync.o),
-                    pcileech_fifo.diag_ft601_wrn0_accept.eq(ft601_wrn0_sync.o),
-                    pcileech_fifo.diag_ft601_txen_high  .eq(ft601_txen_sync.o),
-                ]
-
-            
             # PCIe reset driven by CMD register file.
             # rw[200] starts at 1 (core held in reset at startup).
             # Host clears it via CMD write to bring PCIe core online.
@@ -636,95 +246,39 @@ class PCIeSquirrel(SoCMini):
                 pcileech_fifo.cfg_dcommand .eq(self.pcie_phy.dcommand),
             ]
             self.comb += [
-                pcileech_fifo.diag_tx_axis_seen.eq(self.pcie_phy.s_axis_tx_tvalid & self.pcie_phy.s_axis_tx_tready),
-                pcileech_fifo.diag_rx_axis_seen.eq(self.pcie_phy.m_axis_rx_tvalid),
-                pcileech_fifo.diag_tx_err_drop.eq(self.pcie_phy.tx_err_drop),
+                pcileech_fifo.tx_axis_seen.eq(self.pcie_phy.s_axis_tx_tvalid & self.pcie_phy.s_axis_tx_tready),
+                pcileech_fifo.rx_axis_seen.eq(self.pcie_phy.m_axis_rx_tvalid),
+                pcileech_fifo.tx_err_drop.eq(self.pcie_phy.tx_err_drop),
             ]
-            if 1:
-                # Auto-set BME+MemEn once link is up
-                # Replace the combinational wr_en with a registered single-cycle pulse
-                bme_done = Signal()
-                bme_timer = Signal(20)
-                bme_pulse = Signal()
-                self.sync.pcie += [
-                    bme_pulse.eq(0),  # default off
-                    If(~bme_done,
-                       If(self.pcie_phy._link_status.fields.status,
-                          If(bme_timer < (1<<20)-1,
-                             bme_timer.eq(bme_timer + 1)
-                             ).Elif(~bme_pulse,  # only pulse once
-                                    bme_pulse.eq(1),
-                                    bme_done.eq(1)
-                                    )
-                          )
-                       ),
-                ]
-                self.comb += [
-                    self.pcie_phy.cfg_mgmt_dwaddr.eq(1),
-                    self.pcie_phy.cfg_mgmt_di.eq(0x00000006),
-                    self.pcie_phy.cfg_mgmt_byte_en.eq(0x3),
-                    self.pcie_phy.cfg_mgmt_wr_en.eq(bme_pulse),
-                ]
+            # Auto-set BME+MemEn once link is up
+            # Replace the combinational wr_en with a registered single-cycle pulse
+            bme_done = Signal()
+            bme_timer = Signal(20)
+            bme_pulse = Signal()
+            self.sync.pcie += [
+                bme_pulse.eq(0),  # default off
+                If(~bme_done,
+                   If(self.pcie_phy._link_status.fields.status,
+                      If(bme_timer < (1<<20)-1,
+                         bme_timer.eq(bme_timer + 1)
+                         ).Elif(~bme_pulse,  # only pulse once
+                                bme_pulse.eq(1),
+                                bme_done.eq(1)
+                                )
+                      )
+                   ),
+            ]
+            self.comb += [
+                self.pcie_phy.cfg_mgmt_dwaddr.eq(1),
+                self.pcie_phy.cfg_mgmt_di.eq(0x00000006),
+                self.pcie_phy.cfg_mgmt_byte_en.eq(0x3),
+                self.pcie_phy.cfg_mgmt_wr_en.eq(bme_pulse),
+            ]
 
         # MSI --------------------------------------------------------------------------------------
         self.submodules.msi = MSI()
         self.comb += self.msi.source.connect(self.pcie_phy.msi)
         self.add_csr("msi")
-
-        if 1:
-            source_seen_latch = Signal()
-            self.sync.sys += If(self.pcie_phy.source.valid, source_seen_latch.eq(1))
-            self.comb += pcileech_fifo.phy_source_seen.eq(source_seen_latch)
-
-            raw_rx_seen_pcie = Signal()
-            raw_rx_seen_sys  = Signal()
-            self.sync.pcie += If(self.pcie_phy.m_axis_rx_tvalid, raw_rx_seen_pcie.eq(1))
-            self.specials += MultiReg(raw_rx_seen_pcie, raw_rx_seen_sys)
-            self.comb += pcileech_fifo.phy_raw_rx_seen.eq(raw_rx_seen_sys)
-            
-        # LEDs -------------------------------------------------------------------------------------
-        if 0:
-            #tx0_latch = Signal()
-            #self.sync.pcie += If(pcileech_fifo.tlp_tx.valid & pcileech_fifo.tlp_tx.ready,tx0_latch.eq(1))
-            #tx1_latch = Signal()
-            #self.sync.pcie += If(tlp_tx_conv.source.valid & tlp_tx_conv.source.ready,tx1_latch.eq(1))
-            #tx2_latch = Signal()
-            #self.sync.pcie += If(self.pcie_phy.sink.valid & self.pcie_phy.sink.ready,tx2_latch.eq(1))
-            
-            tx3_latch = Signal()
-            self.sync.pcie += If(self.pcie_phy.m_axis_rx_tvalid, tx3_latch.eq(1))
-            tx4_latch = Signal()
-            self.sync.pcie += If(self.pcie_phy.s_axis_tx_tvalid, tx4_latch.eq(1))
-            self.comb += platform.request("user_led", 0).eq(tx3_latch)
-            self.comb += platform.request("user_led", 1).eq(tx4_latch)
-        elif 0:
-            # LED0: tx_err_drop — TLP dropped by PCIe IP (BME not set or flow control)
-            tx_err_drop_latch = Signal()
-            self.sync.pcie += If(self.pcie_phy.tx_err_drop, tx_err_drop_latch.eq(1))
-            self.comb += platform.request("user_led", 0).eq(tx_err_drop_latch)
-
-            # LED1: rx_seen — CplD received from PCIe bus (entirely in pcie domain, no CDC issue)
-            rx_seen = Signal()
-            self.sync.pcie += If(self.pcie_phy.source.valid, rx_seen.eq(1))
-            self.comb += platform.request("user_led", 1).eq(rx_seen)
-        elif 0:
-            # Sticky LEDs for tx_seen and rx_seen 
-            tx_seen = Signal()
-            self.sync.pcie += If(self.pcie_phy.sink.valid & self.pcie_phy.sink.ready, tx_seen.eq(1))
-            self.comb += platform.request("user_led", 0).eq(tx_seen)
-
-            rx_seen = Signal()
-            self.sync.pcie += If(self.pcie_phy.source.valid, rx_seen.eq(1))
-            self.comb += platform.request("user_led", 1).eq(rx_seen)
-        elif 0:
-            # 7/8 LED0 lit at usb clock so verify usb clock present and polarity of driving led
-            usb_counter = Signal(32)
-            self.sync.usb += usb_counter.eq(usb_counter + 1)
-            self.comb += platform.request("user_led", 0).eq(usb_counter[26]|usb_counter[25]|usb_counter[24])
-            # Verify presence of pcie clock
-            pcie_counter = Signal(32)
-            self.sync.pcie += pcie_counter.eq(pcie_counter + 1)
-            self.comb += platform.request("user_led", 1).eq(pcie_counter[26])
 
         # Analyzer ---------------------------------------------------------------------------------
         if with_analyzer:

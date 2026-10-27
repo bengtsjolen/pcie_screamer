@@ -328,309 +328,6 @@ class MuxSerializer(Module):
                    )
                 )
 
-class MuxSerializer2(Module):
-    def __init__(self):
-        self.sink   = stream.Endpoint([("data", 256)])
-        self.source = stream.Endpoint([("data", 32)])
-        
-        buf        = Signal(256)
-        count      = Signal(3)
-        rsync      = Signal(3)
-        
-        next_buf   = Signal(256)
-        next_valid = Signal()
-    
-        self.submodules.fsm = fsm = FSM(reset_state="IDLE")
-        
-        self.comb += [
-            self.sink.ready.eq(0),
-            self.source.valid.eq(0),
-            self.source.data.eq(0),
-        ]
-        
-        fsm.act("IDLE",
-                self.sink.ready.eq(1),
-                If(self.sink.valid,
-                   NextValue(buf, self.sink.data),
-                   NextValue(count, 7),
-                   NextValue(rsync, 4),
-                   NextValue(next_valid, 0),
-                   NextState("RESYNC"),
-                   )
-                )
-        
-        fsm.act("RESYNC",
-                self.source.valid.eq(1),
-                self.source.data.eq(0x66665555),
-                If(self.source.ready,
-                   If(rsync == 0,
-                      NextState("SEND"),
-                      ).Else(
-                          NextValue(rsync, rsync - 1),
-                      )
-                   )
-                )
-        
-        fsm.act("SEND",
-                If(~next_valid,
-                   self.sink.ready.eq(1),
-                   If(self.sink.valid,
-                      NextValue(next_buf, self.sink.data),
-                      NextValue(next_valid, 1),
-                      )
-                   ),
-                
-                self.source.valid.eq(1),
-                self.source.data.eq(buf[224:256]),
-                
-                If(self.source.ready,
-                   If(count == 0,
-                      If(next_valid,
-                         NextValue(buf, next_buf),
-                         NextValue(count, 7),
-                         NextValue(next_valid, 0),
-                         # stay in SEND, no RESYNC
-                         ).Else(
-                             NextState("IDLE"),
-                         )
-                      ).Else(
-                          NextValue(buf, buf << 32),
-                          NextValue(count, count - 1),
-                      )
-                   )
-                )
-
-
-
-        
-class MuxWordQueueTX(Module):
-    def __init__(self, idle_threshold=64, word_fifo_depth=32, start_wait_max=8):
-        self.sink   = stream.Endpoint([("data", 256)])  # from PCILeechMux
-        self.source = stream.Endpoint([("data", 32)])   # to USB / FT601
-        
-        # ------------------------------------------------------------------
-        # Real 32-bit word FIFO.
-        # Sync words are NOT stored here.
-        # ------------------------------------------------------------------
-        self.submodules.word_fifo = word_fifo = SyncFIFO([("data", 32)], word_fifo_depth)
-        
-        # ------------------------------------------------------------------
-        # Two full-frame buffers.
-        #
-        # fb0 = frame currently being expanded into word_fifo
-        # fb1 = next full frame already captured from mux
-        # ------------------------------------------------------------------
-        fb0       = Signal(256)
-        fb0_valid = Signal()
-        fb0_idx   = Signal(4)   # 0..7
-        
-        fb1       = Signal(256)
-        fb1_valid = Signal()
-
-        # heuristic for differing wat during dump start
-        fb0_word0 = Signal(32)
-        is_dump_start = Signal()
-        active_start_wait_max = Signal(12)
-        ctrl_start_wait_max = 8
-        dump_start_wait_max = 2048
-        
-        self.comb += [fb0_word0.eq(fb0[224:256]),
-                      is_dump_start.eq(fb0_word0 == 0xf2ffffef),
-                      active_start_wait_max.eq(Mux(is_dump_start,dump_start_wait_max,ctrl_start_wait_max))
-                      ]
-
-        
-        # ------------------------------------------------------------------
-        # Burst / sync state.
-        #
-        # armed_for_sync : after long idle, next burst should start with 5 syncs
-        # sync_count     : sync words still to emit for current burst
-        # burst_pending  : first data of a new burst has arrived, but output has
-        #                  not started yet (waiting for watermark or timeout)
-        # burst_started  : actively outputting sync/data for current burst
-        # ------------------------------------------------------------------
-        armed_for_sync = Signal(reset=1)
-        sync_count     = Signal(3)   # 0..5
-        burst_pending  = Signal()
-        burst_started  = Signal()
-        
-        # Startup wait counter while pending.
-        start_wait = Signal(max=dump_start_wait_max + 1)
-        
-        # ------------------------------------------------------------------
-        # Idle tracking.
-        # ------------------------------------------------------------------
-        idle_count = Signal(max=idle_threshold + 1)
-        
-        fifo_empty    = Signal()
-        fifo_has_room = Signal()
-        self.comb += [
-            fifo_empty.eq(word_fifo.level == 0),
-            fifo_has_room.eq(word_fifo.level < word_fifo_depth),
-        ]
-        
-        fully_idle = Signal()
-        self.comb += fully_idle.eq(
-        (sync_count == 0) &
-            ~fb0_valid &
-            ~fb1_valid &
-            fifo_empty &
-            ~burst_pending &
-            ~burst_started
-        )
-        
-        # ------------------------------------------------------------------
-        # Start condition:
-        #   - if we already have a second frame buffered, great
-        #   - or if one full frame of words is already queued
-        #   - or after a short timeout, start anyway so tiny bursts don't stall
-        # ------------------------------------------------------------------
-        start_now = Signal()
-        self.comb += start_now.eq(
-            burst_pending & (
-                fb1_valid |
-                (word_fifo.level >= 8) |
-                (start_wait >= active_start_wait_max)
-            )
-        )
-        
-        # ------------------------------------------------------------------
-        # Output path:
-        #   - emit sync words first
-        #   - then real FIFO data
-        # Only active once burst_started=1.
-        # ------------------------------------------------------------------
-        sending_sync = Signal()
-        sending_data = Signal()
-        self.comb += [
-            sending_sync.eq(burst_started & (sync_count != 0)),
-            sending_data.eq(burst_started & (sync_count == 0) & word_fifo.source.valid),
-            
-            self.source.valid.eq(sending_sync | sending_data),
-            self.source.data.eq(Mux(sending_sync, 0x66665555, word_fifo.source.data)),
-            
-            word_fifo.source.ready.eq(burst_started & (sync_count == 0) & self.source.ready),
-        ]
-        
-        # ------------------------------------------------------------------
-        # Accept a new 256-bit frame whenever fb1 is free.
-        # This gives us 2 full-frame buffers of elasticity.
-        # ------------------------------------------------------------------
-        self.comb += self.sink.ready.eq(~fb1_valid)
-        
-        # ------------------------------------------------------------------
-        # Feed words from fb0 into word_fifo.
-        # This can happen while sync is being emitted.
-        # ------------------------------------------------------------------
-        self.comb += [
-            word_fifo.sink.valid.eq(fb0_valid & fifo_has_room),
-            word_fifo.sink.data.eq(fb0[224:256]),
-        ]
-        
-        # ------------------------------------------------------------------
-        # Sequential logic
-        # ------------------------------------------------------------------
-        self.sync += [
-            # --------------------------------------------------------------
-            # Re-arm sync after long true idle.
-            # --------------------------------------------------------------
-            If(fully_idle,
-               If(idle_count < idle_threshold,
-                  idle_count.eq(idle_count + 1)
-                  ).Else(
-                      armed_for_sync.eq(1)
-                  )
-               ).Else(
-                   idle_count.eq(0)
-               ),
-            
-            # --------------------------------------------------------------
-            # Capture incoming 256-bit frame.
-            #
-            # If pipeline was idle before this frame, mark burst_pending.
-            # --------------------------------------------------------------
-            If(self.sink.valid & self.sink.ready,
-               If(~fb0_valid & ~fb1_valid & ~burst_pending & ~burst_started & (sync_count == 0) & fifo_empty,
-                  burst_pending.eq(1),
-                  start_wait.eq(0)
-                  ),
-               
-               If(~fb0_valid,
-                  fb0.eq(self.sink.data),
-                  fb0_valid.eq(1),
-                  fb0_idx.eq(0)
-                  ).Else(
-                      fb1.eq(self.sink.data),
-                      fb1_valid.eq(1)
-                  )
-               ),
-            
-            # --------------------------------------------------------------
-            # While pending, wait a little for more buffered data.
-            # --------------------------------------------------------------
-            If(burst_pending & ~start_now,
-               If(start_wait != dump_start_wait_max,
-                  start_wait.eq(start_wait + 1)
-                  )
-               ),
-            
-            # --------------------------------------------------------------
-            # Start the burst.
-            # Only here do we arm the 5 sync words.
-            # --------------------------------------------------------------
-            If(start_now,
-               burst_pending.eq(0),
-               burst_started.eq(1),
-               If(armed_for_sync,
-                  sync_count.eq(5),
-                  armed_for_sync.eq(0)
-                  )
-               ),
-            
-            # --------------------------------------------------------------
-            # Drain one sync word.
-            # --------------------------------------------------------------
-            If((sync_count != 0) & burst_started & self.source.ready,
-               sync_count.eq(sync_count - 1)
-               ),
-            
-            # --------------------------------------------------------------
-            # Advance fb0 as words are accepted into word_fifo.
-            # Promote fb1 immediately when fb0 finishes.
-            # --------------------------------------------------------------
-            If(word_fifo.sink.valid & word_fifo.sink.ready,
-               If(fb0_idx == 7,
-                  If(fb1_valid,
-                     fb0.eq(fb1),
-                     fb0_valid.eq(1),
-                     fb0_idx.eq(0),
-                     fb1_valid.eq(0)
-                     ).Else(
-                         fb0_valid.eq(0)
-                     )
-                  ).Else(
-                      fb0.eq(fb0 << 32),
-                      fb0_idx.eq(fb0_idx + 1)
-                  )
-               ),
-            
-            # --------------------------------------------------------------
-            # End burst when everything has drained.
-            # --------------------------------------------------------------
-            If(burst_started &
-               (sync_count == 0) &
-               ~fb0_valid &
-               ~fb1_valid &
-               fifo_empty,
-               burst_started.eq(0)
-               )
-        ]
-        
-        
-        
-        
-        
-        
 # ---------------------------------------------------------------------------
 # PCILeechFIFO
 #
@@ -674,117 +371,13 @@ class PCILeechFIFO(Module):
         self.phy_id        = Signal(16) # PCIe BDF: {bus[7:0], dev[4:0], fn[2:0]}
         self.cfg_dcommand  = Signal(16) # PCIe Device Control register (dcommand)
 
-        # Extra diagnostics from pcie_phy / wrappers
-        self.diag_tx_conv_seen   = Signal()  # tlp_tx_conv.source.valid & ready
-        self.diag_tx_axis_seen   = Signal()  # pcie_phy.s_axis_tx_tvalid & ready
-        self.diag_rx_axis_seen   = Signal()  # pcie_phy.m_axis_rx_tvalid
-        self.diag_tx_err_drop    = Signal()  # pcie_phy.tx_err_drop
+        # Functional PCIe activity inputs for timeout/recovery.
+        self.tx_axis_seen = Signal()
+        self.rx_axis_seen = Signal()
+        self.tx_err_drop  = Signal()
 
-        self.tlp_tx_dbg0 = Signal(32)
-        self.tlp_tx_dbg1 = Signal(32)
-        self.tlp_tx_dbg2 = Signal(32)
-        self.tlp_tx_dbg3 = Signal(32)
-        self.tlp_tx_dbg_be0 = Signal(4)
-        self.tlp_tx_dbg_be1 = Signal(4)
-        self.tlp_tx_dbg_be2 = Signal(4)
-        self.tlp_tx_dbg_be3 = Signal(4)
-        self.tlp_tx_dbg_last0 = Signal()
-        self.tlp_tx_dbg_last1 = Signal()
-        self.tlp_tx_dbg_last2 = Signal()
-        self.tlp_tx_dbg_last3 = Signal()
-        dbg_armed   = Signal(reset=1)
-        dbg_count   = Signal(3)
-        dbg_seen    = Signal()
-
-        self.tx64_dbg0      = Signal(64)
-        self.tx64_dbg1      = Signal(64)
-        self.tx64_dbg_flags = Signal(16)  # low bits: seen/armed/count
-
-        self.txsink_dbg0      = Signal(64)
-        self.txsink_dbg1      = Signal(64)
-        self.txsink_dbg_be0   = Signal(8)
-        self.txsink_dbg_be1   = Signal(8)
-        self.txsink_dbg_last0 = Signal()
-        self.txsink_dbg_last1 = Signal()
-        self.txsink_dbg_flags = Signal(16)
-
-        self.rxsink_dbg = Array(Signal(64) for _ in range(8))
-        self.rxsink_be  = Array(Signal(8)  for _ in range(8))
-        self.rxsink_lasts = Signal(8)
-        self.rxsink_flags = Signal(16)
-        
-        # Flow counters captured in top-level / locally.
-        self.diag_rx64_seen      = Signal(16)
-        self.diag_rx32_seen      = Signal(16)
-        self.diag_ser_out_seen   = Signal(16)
-        self.diag_usbtx_seen     = Signal(16)
-        
-        self.diag_rxfifo_in_seen = Signal(16)
-        self.diag_rxfifo_out_seen= Signal(16)
-        self.diag_mux_p3_wr_seen = Signal(16)
-
-        # Extra PCIe-IP edge counters (driven from top-level sys domain).
-        # Help distinguish whether the 10-page-dump stall is upstream
-        # (insufficient MRds sent) or at/inside the Xilinx IP (completions
-        # lost).
-        self.diag_tx_tlp_seen     = Signal(16)  # count of s_axis_tx.last & valid & ready (TLPs we sent)
-        self.diag_rx_tlp_seen     = Signal(16)  # count of m_axis_rx.last & valid (TLPs delivered by IP)
-        self.diag_tx_err_drop_cnt = Signal(16)  # sticky count of tx_err_drop pulses
-
-        # TLP RX analysis diagnostics. Help distinguish between
-        #   (a) IP delivered all 160 CplDs but our pipeline lost 9
-        #   (b) IP only delivered 151 CplDs (RC didn't send more)
-        #   (c) the 151 number contains non-CplD TLPs
-        #
-        # diag_tlp_rx_cpl_count    : count of CplD TLPs arriving at tlp_rx
-        #                            (last-event count for TLPs whose first-beat
-        #                             byte0 matched CplD type 0x4a / 0x4b or Cpl 0x0a).
-        # diag_tlp_rx_other_count  : count of non-Cpl/CplD TLPs at tlp_rx
-        #                            (TLPs the filter dropped).
-        # diag_tlp_rx_fifo_peak    : high-water-mark of tlp_rx_fifo.level.
-        #                            If this never approaches 2048, we never
-        #                            backpressured the IP and the 9 missing
-        #                            CplDs are lost upstream of our fabric.
-        # diag_tlp_rx_stall_cnt    : number of pcie-domain cycles where
-        #                            tlp_rx.valid & ~tlp_rx.ready (i.e. we
-        #                            actively stalled m_axis_rx).
-        self.diag_tlp_rx_cpl_count   = Signal(16)
-        self.diag_tlp_rx_other_count = Signal(16)
-        self.diag_tlp_rx_fifo_peak   = Signal(16)
-        self.diag_tlp_rx_stall_cnt   = Signal(16)
-
-        # FT601 write-side diagnostics (driven from top via CDC from usb dom).
-        # Help answer "where are the 824 missing bytes when 14-page dumps stall":
-        #
-        # diag_ft601_filler_emit : # of sync-word (0x66665555) writes the
-        #                          filler branch drove.  If 0 after a stalled
-        #                          dump → filler never fired, FT601 module is
-        #                          going to IDLE too fast.
-        # diag_ft601_wrn0_accept : # of usb-clk cycles with wr_n=0 AND txe_n=0,
-        #                          i.e. DWs FT601 actually sampled from us.
-        #                          Should equal ~diag_usbtx_seen + filler_emit.
-        # diag_ft601_txen_high   : # of usb-clk cycles observed with txe_n=1.
-        #                          Non-zero means FT601 pushed back on us
-        #                          (chip IN buffer full).
-        self.diag_ft601_filler_emit = Signal(16)
-        self.diag_ft601_wrn0_accept = Signal(16)
-        self.diag_ft601_txen_high   = Signal(16)
-
-        rxfifo_in_seen   = Signal(16)
-        rxfifo_out_seen  = Signal(16)
-        mux_p3_wr_seen   = Signal(16)
-        
-        
-        # Timeout / snapshot outputs
-        self.diag_force_pcie_reset = Signal()
-        
-        # Diagnostic output - read via CMD register 0x0006 (ro, word_index 3):
-        # [7:0]=tlp_rx_fifo.level, [13:8]=rx_seen_count[5:0],
-        # [14]=phy_source_seen (pcie_phy.source.valid after CDC),
-        # [15]=phy_raw_rx_seen (m_axis_rx_tvalid before CDC)
-        self.tlp_rx_level    = Signal(16)
-        self.phy_source_seen = Signal()  # driven from squirrel.py sys domain
-        self.phy_raw_rx_seen = Signal()  # driven from squirrel.py sys domain (CDC from pcie)
+        # Timeout / automatic PCIe reset output.
+        self.force_pcie_reset = Signal()
         
 
         # ===================================================================
@@ -886,42 +479,6 @@ class PCILeechFIFO(Module):
 
 
 
-        # TLP Debug
-        self.sync += [
-            If(ResetSignal(),
-               dbg_armed.eq(1),
-               dbg_count.eq(0),
-               dbg_seen.eq(0),
-               ).Elif(dbg_armed & self.tlp_tx.valid & self.tlp_tx.ready,
-                      dbg_seen.eq(1),
-                      Case(dbg_count, {
-                          0: [
-                              self.tlp_tx_dbg0.eq(self.tlp_tx.dat),
-                              self.tlp_tx_dbg_be0.eq(self.tlp_tx.be),
-                              self.tlp_tx_dbg_last0.eq(self.tlp_tx.last),
-                          ],
-                          1: [
-                              self.tlp_tx_dbg1.eq(self.tlp_tx.dat),
-                              self.tlp_tx_dbg_be1.eq(self.tlp_tx.be),
-                              self.tlp_tx_dbg_last1.eq(self.tlp_tx.last),
-                          ],
-                          2: [
-                              self.tlp_tx_dbg2.eq(self.tlp_tx.dat),
-                              self.tlp_tx_dbg_be2.eq(self.tlp_tx.be),
-                              self.tlp_tx_dbg_last2.eq(self.tlp_tx.last),
-                          ],
-                          3: [
-                              self.tlp_tx_dbg3.eq(self.tlp_tx.dat),
-                              self.tlp_tx_dbg_be3.eq(self.tlp_tx.be),
-                              self.tlp_tx_dbg_last3.eq(self.tlp_tx.last),
-                              dbg_armed.eq(0),
-                          ],
-                      }),
-                      If(dbg_count != 3,
-                         dbg_count.eq(dbg_count + 1)
-                         )
-                      )
-        ]
         
 
 
@@ -951,125 +508,47 @@ class PCILeechFIFO(Module):
             tlp128_filter.source.connect(tlp_rx_fifo.sink),
         ]
 
-        # Diagnostics: count Cpl/CplD vs other TLPs at the packer output,
-        # track FIFO high-water mark, and count stalled 64-bit RX beats.
-        rx_seen_count = Signal(16)
-        tlp_is_cpl = Signal()
-        self.comb += tlp_is_cpl.eq(
-            (tlp64_to_128.source.dat[25:32] == 0b0000101) |
-            (tlp64_to_128.source.dat[25:32] == 0b0100101)
-        )
-        self.sync += [
-            If(tlp64_to_128.source.valid & tlp64_to_128.source.ready & tlp64_to_128.source.first,
-                If(tlp_is_cpl,
-                    self.diag_tlp_rx_cpl_count.eq(self.diag_tlp_rx_cpl_count + 1),
-                ).Else(
-                    self.diag_tlp_rx_other_count.eq(self.diag_tlp_rx_other_count + 1),
-                )
-            ),
-            If(tlp_rx_fifo.level > self.diag_tlp_rx_fifo_peak,
-                self.diag_tlp_rx_fifo_peak.eq(tlp_rx_fifo.level),
-            ),
-            If(self.tlp_rx.valid & ~self.tlp_rx.ready,
-                self.diag_tlp_rx_stall_cnt.eq(self.diag_tlp_rx_stall_cnt + 1),
-            ),
-            If(self.tlp_rx.valid & self.tlp_rx.ready,
-                rx_seen_count.eq(rx_seen_count + 1),
-            ),
-        ]
-
-        # Diagnostic layout: 128-bit FIFO level plus seen bits.  The level
-        # width follows the configured FIFO depth (10 bits for 512 entries,
-        # 11 bits for 1024/2048 entries).
-        self.comb += self.tlp_rx_level.eq(Cat(
-            tlp_rx_fifo.level,
-            rx_seen_count[0:3],
-            self.phy_source_seen,
-            self.phy_raw_rx_seen,
-        ))
-
         # -------------------------------------------------------------------
-        # PCIe timeout diagnostics / recovery
+        # PCIe timeout / recovery
         # -------------------------------------------------------------------
         TIMEOUT_CYCLES = 200_000_000  # 2 seconds at 100 MHz sys clock
 
-        tx_axis_seen_count = Signal(8)
-        rx_axis_seen_count = Signal(8)
-        tx_err_drop_count  = Signal(8)
-
-        tx_axis_ever     = Signal()
-        rx_axis_ever     = Signal()
-        tx_err_drop_ever = Signal()
-
-        waiting_for_rx   = Signal()
-        stall_counter    = Signal(max=TIMEOUT_CYCLES + 1)
-        stall_hit        = Signal()
-        reset_holdoff    = Signal(24)  # ~0.16s at 100 MHz
-
-        # Snapshots captured when timeout hits
-        snap_tx_axis_seen_count = Signal(8)
-        snap_rx_axis_seen_count = Signal(8)
-        snap_tx_err_drop_count  = Signal(8)
-        snap_flags              = Signal(16)
+        waiting_for_rx = Signal()
+        stall_counter  = Signal(max=TIMEOUT_CYCLES + 1)
+        stall_hit      = Signal()
+        reset_holdoff  = Signal(24)  # ~0.16s at 100 MHz
 
         self.sync += [
-            # Defaults
-            self.diag_force_pcie_reset.eq(0),
-            
-            # Live counters / sticky bits
-            If(self.diag_tx_axis_seen,
-               tx_axis_seen_count.eq(tx_axis_seen_count + 1),
-               tx_axis_ever.eq(1)
-               ),
-            If(self.diag_rx_axis_seen,
-               rx_axis_seen_count.eq(rx_axis_seen_count + 1),
-               rx_axis_ever.eq(1)
-               ),
-            If(self.diag_tx_err_drop,
-               tx_err_drop_count.eq(tx_err_drop_count + 1),
-               tx_err_drop_ever.eq(1)
-               ),
+            # Default: no reset pulse.
+            self.force_pcie_reset.eq(0),
 
-            # Start watchdog on first TX beat, stop on any RX beat
-            If(~waiting_for_rx & self.diag_tx_axis_seen,
-               waiting_for_rx.eq(1),
-               stall_counter.eq(0)
-               ).Elif(waiting_for_rx & self.diag_rx_axis_seen,
-                      waiting_for_rx.eq(0),
-                      stall_counter.eq(0)
-                      ).Elif(waiting_for_rx & ~stall_hit,
-                             If(stall_counter < TIMEOUT_CYCLES,
-                                stall_counter.eq(stall_counter + 1)
-                                ).Else(
-                                    stall_hit.eq(1),
-                                    waiting_for_rx.eq(0),
-                                    
-                                    # Snapshot current diagnostics
-                                    snap_tx_axis_seen_count.eq(tx_axis_seen_count),
-                                    snap_rx_axis_seen_count.eq(rx_axis_seen_count),
-                                    snap_tx_err_drop_count.eq(tx_err_drop_count),
-                                    snap_flags.eq(Cat(
-                                        tx_axis_ever,      # bit 0
-                                        rx_axis_ever,      # bit 1
-                                        tx_err_drop_ever,  # bit 2
-                                        Constant(1, 1),    # bit 3 = stall_hit snapshot
-                                        Constant(0, 12)
-                                    )),
-                                    
-                                    # Start reset pulse
-                                    reset_holdoff.eq((1 << 24) - 1)
-                                )
-                             ),
-        
-            # Automatic PCIe reset pulse after timeout
+            # Start watchdog on first TX beat, stop on any RX beat.
+            If(~waiting_for_rx & self.tx_axis_seen,
+                waiting_for_rx.eq(1),
+                stall_counter.eq(0),
+            ).Elif(waiting_for_rx & self.rx_axis_seen,
+                waiting_for_rx.eq(0),
+                stall_counter.eq(0),
+            ).Elif(waiting_for_rx & ~stall_hit,
+                If(stall_counter < TIMEOUT_CYCLES,
+                    stall_counter.eq(stall_counter + 1),
+                ).Else(
+                    stall_hit.eq(1),
+                    waiting_for_rx.eq(0),
+                    reset_holdoff.eq((1 << 24) - 1),
+                ),
+            ),
+
+            # Automatic PCIe reset pulse after timeout.
             If(reset_holdoff != 0,
-               self.diag_force_pcie_reset.eq(1),
-               reset_holdoff.eq(reset_holdoff - 1)
-               ),
+                self.force_pcie_reset.eq(1),
+                reset_holdoff.eq(reset_holdoff - 1),
+            ),
 
-            # Optional: clear live TX/RX wait state after reset pulse finishes
-            If((reset_holdoff == 1)),
-            stall_hit.eq(0)
+            # Re-arm timeout detection after the reset pulse.
+            If(reset_holdoff == 1,
+                stall_hit.eq(0),
+            ),
         ]
         
 
@@ -1571,135 +1050,12 @@ class PCILeechFIFO(Module):
         # byte offset 0x00 → word_index 0 → magic 0xab89
         # byte offset 0x08 → word_index 4 → {VERSION_MINOR, VERSION_MAJOR}
         # byte offset 0x0A → word_index 5 → {0x00, DEVICE_ID}
+        # ro[] readback: magic, version, and device ID only.
         self.comb += Case(in_addr_byte[1:8], {
             0: ro_readback.eq(0xab89),
-            3: ro_readback.eq(self.tlp_rx_level),          # byte 0x06: tlp_rx_fifo fill level (diagnostic)
-            4: ro_readback.eq(Cat(Constant(VERSION_MINOR,8),
-                                  Constant(VERSION_MAJOR,8))),
-            # DEVICE_ID response: need DWORD=000a0400 so pcileech uses small-tag profile
-            # Cat puts first arg at LSB: Cat(lo, hi) → {hi, lo} in Verilog
-            # We need readback[15:8]=DEVICE_ID so hi=DEVICE_ID → second arg has DEVICE_ID
-            # Use named signals to ensure stable Migen elaboration order
-            5: ro_readback.eq(Cat(Constant(0, 8), Constant(DEVICE_ID, 8))),  # DWORD=000a0400 → Tag=0x01 profile
-
-
-
-            
-            # FIXME: extra status readbacks
-            6:  ro_readback.eq(Cat(snap_tx_axis_seen_count, snap_rx_axis_seen_count)),  # 0x000c
-            7:  ro_readback.eq(Cat(snap_tx_err_drop_count, snap_flags[0:8])),            # 0x000e
-            
-            #9:  ro_readback.eq(self.tlp_tx_dbg0[0:16]),   # 0x0012 low half dbg0
-            #10: ro_readback.eq(self.tlp_tx_dbg0[16:32]),  # 0x0014 high half dbg0
-            #11: ro_readback.ebq(self.tlp_tx_dbg1[0:16]),   # 0x0016
-            #12: ro_readback.eq(self.tlp_tx_dbg1[16:32]),  # 0x0018
-            #13: ro_readback.eq(self.tlp_tx_dbg2[0:16]),   # 0x001a
-            #14: ro_readback.eq(self.tlp_tx_dbg2[16:32]),  # 0x001c
-            #15: ro_readback.eq(self.tlp_tx_dbg3[0:16]),   # 0x001e
-            #16: ro_readback.eq(self.tlp_tx_dbg3[16:32]),  # 0x0020
-            #17: ro_readback.eq(Cat(self.tlp_tx_dbg_be0, self.tlp_tx_dbg_be1,
-            #                                              self.tlp_tx_dbg_be2, self.tlp_tx_dbg_be3)),           # 0x0022
-            #18: ro_readback.eq(Cat(self.tlp_tx_dbg_last0, self.tlp_tx_dbg_last1,
-            #                                              self.tlp_tx_dbg_last2, self.tlp_tx_dbg_last3,
-            #                                              dbg_seen, dbg_armed, Constant(0, 10))),               # 0x0024
-
-            #9:  ro_readback.eq(self.tx64_dbg0[ 0:16]),   # 0x0012
-            #10: ro_readback.eq(self.tx64_dbg0[16:32]),   # 0x0014
-            #11: ro_readback.eq(self.tx64_dbg0[32:48]),   # 0x0016
-            #12: ro_readback.eq(self.tx64_dbg0[48:64]),   # 0x0018
-            #13: ro_readback.eq(self.tx64_dbg1[ 0:16]),   # 0x001a
-            #14: ro_readback.eq(self.tx64_dbg1[16:32]),   # 0x001c
-            #15: ro_readback.eq(self.tx64_dbg1[32:48]),   # 0x001e
-            #16: ro_readback.eq(self.tx64_dbg1[48:64]),   # 0x0020
-            #17: ro_readback.eq(self.tx64_dbg_flags),     # 0x0022
-
-            9:  ro_readback.eq(self.txsink_dbg0[ 0:16]),   # 0x0012
-            10: ro_readback.eq(self.txsink_dbg0[16:32]),   # 0x0014
-            11: ro_readback.eq(self.txsink_dbg0[32:48]),   # 0x0016
-            12: ro_readback.eq(self.txsink_dbg0[48:64]),   # 0x0018
-            13: ro_readback.eq(self.txsink_dbg1[ 0:16]),   # 0x001a
-            14: ro_readback.eq(self.txsink_dbg1[16:32]),   # 0x001c
-            15: ro_readback.eq(self.txsink_dbg1[32:48]),   # 0x001e
-            16: ro_readback.eq(self.txsink_dbg1[48:64]),   # 0x0020
-            17: ro_readback.eq(Cat(self.txsink_dbg_be0, self.txsink_dbg_be1)),   # 0x0022
-            18: ro_readback.eq(Cat(self.txsink_dbg_last0,
-                                                          self.txsink_dbg_last1,
-                                                          self.txsink_dbg_flags[2:16])),                 # 0x0024
-
-
-            19: ro_readback.eq(self.rxsink_dbg[0][ 0:16]),   # 0x0026
-            20: ro_readback.eq(self.rxsink_dbg[0][16:32]),   # 0x0028
-            21: ro_readback.eq(self.rxsink_dbg[0][32:48]),   # 0x002a
-            22: ro_readback.eq(self.rxsink_dbg[0][48:64]),   # 0x002c
-        
-            23: ro_readback.eq(self.rxsink_dbg[1][ 0:16]),   # 0x0026
-            24: ro_readback.eq(self.rxsink_dbg[1][16:32]),   # 0x0028
-            25: ro_readback.eq(self.rxsink_dbg[1][32:48]),   # 0x002a
-            26: ro_readback.eq(self.rxsink_dbg[1][48:64]),   # 0x002c
-
-            27: ro_readback.eq(self.rxsink_dbg[2][ 0:16]),   # 0x0026
-            28: ro_readback.eq(self.rxsink_dbg[2][16:32]),   # 0x0028
-            29: ro_readback.eq(self.rxsink_dbg[2][32:48]),   # 0x002a
-            30: ro_readback.eq(self.rxsink_dbg[2][48:64]),   # 0x002c
-
-            31: ro_readback.eq(self.rxsink_dbg[3][ 0:16]),   # 0x0026
-            32: ro_readback.eq(self.rxsink_dbg[3][16:32]),   # 0x0028
-            33: ro_readback.eq(self.rxsink_dbg[3][32:48]),   # 0x002a
-            34: ro_readback.eq(self.rxsink_dbg[3][48:64]),   # 0x002c
-            
-            35: ro_readback.eq(self.rxsink_dbg[4][ 0:16]),   # 0x0026
-            36: ro_readback.eq(self.rxsink_dbg[4][16:32]),   # 0x0028
-            37: ro_readback.eq(self.rxsink_dbg[4][32:48]),   # 0x002a
-            38: ro_readback.eq(self.rxsink_dbg[4][48:64]),   # 0x002c
-        
-            39: ro_readback.eq(self.rxsink_dbg[5][ 0:16]),   # 0x0026
-            40: ro_readback.eq(self.rxsink_dbg[5][16:32]),   # 0x0028
-            41: ro_readback.eq(self.rxsink_dbg[5][32:48]),   # 0x002a
-            42: ro_readback.eq(self.rxsink_dbg[5][48:64]),   # 0x002c
-        
-            43: ro_readback.eq(self.rxsink_dbg[6][ 0:16]),   # 0x0026
-            44: ro_readback.eq(self.rxsink_dbg[6][16:32]),   # 0x0028
-            45: ro_readback.eq(self.rxsink_dbg[6][32:48]),   # 0x002a
-            46: ro_readback.eq(self.rxsink_dbg[5][48:64]),   # 0x002c
-        
-            47: ro_readback.eq(self.rxsink_dbg[7][ 0:16]),   # 0x0026
-            48: ro_readback.eq(self.rxsink_dbg[7][16:32]),   # 0x0028
-            49: ro_readback.eq(self.rxsink_dbg[7][32:48]),   # 0x002a
-            50: ro_readback.eq(self.rxsink_dbg[7][48:64]),   # 0x002c
-    
-            51: ro_readback.eq(Cat(self.rxsink_be[0], self.rxsink_be[1])),  # 0x0060
-            52: ro_readback.eq(Cat(self.rxsink_be[2], self.rxsink_be[3])),  # 0x0062
-            53: ro_readback.eq(Cat(self.rxsink_be[4], self.rxsink_be[5])),  # 0x0064
-            54: ro_readback.eq(Cat(self.rxsink_be[6], self.rxsink_be[7])),  # 0x0066
-            55: ro_readback.eq(Cat(self.rxsink_lasts, self.rxsink_flags[0:8])),  # 0x0068
-
-            56: ro_readback.eq(self.diag_rx64_seen),       # 0x0070
-            57: ro_readback.eq(self.diag_rx32_seen),       # 0x0072
-            58: ro_readback.eq(self.diag_rxfifo_in_seen),  # 0x0074
-            59: ro_readback.eq(self.diag_rxfifo_out_seen), # 0x0076
-            60: ro_readback.eq(self.diag_mux_p3_wr_seen),  # 0x0078
-            61: ro_readback.eq(self.diag_ser_out_seen),    # 0x007a
-            62: ro_readback.eq(self.diag_usbtx_seen),      # 0x007c
-
-            63: ro_readback.eq(self.diag_tx_tlp_seen),      # 0x007e: MRds/CfgWr etc we sent
-            64: ro_readback.eq(self.diag_rx_tlp_seen),      # 0x0080: TLPs the IP delivered (CplDs + others)
-            65: ro_readback.eq(self.diag_tx_err_drop_cnt),  # 0x0082: IP-side TX drops (should be 0)
-
-            # ------------------------------------------------------------
-            # RX-side TLP analysis (all counts are at tlp_rx = post-CDC,
-            # post-StrideConverter, post-BEFilter).  Compare the totals to
-            # narrow down where 9 CplDs go missing in a 10-page dump.
-            # ------------------------------------------------------------
-            66: ro_readback.eq(self.diag_tlp_rx_cpl_count),   # 0x0084: Cpl/CplD TLPs that reached tlp_rx
-            67: ro_readback.eq(self.diag_tlp_rx_other_count), # 0x0086: non-Cpl TLPs the filter dropped
-            68: ro_readback.eq(self.diag_tlp_rx_fifo_peak),   # 0x0088: tlp_rx_fifo high-water mark (max level)
-            69: ro_readback.eq(self.diag_tlp_rx_stall_cnt),   # 0x008a: cycles m_axis_rx was back-pressured
-
-            70: ro_readback.eq(self.diag_ft601_filler_emit),  # 0x008c: FT601 sync-word filler beats driven
-            71: ro_readback.eq(self.diag_ft601_wrn0_accept),  # 0x008e: FT601 wr_n=0 & txe_n=0 accepted beats
-            72: ro_readback.eq(self.diag_ft601_txen_high),    # 0x0090: usb-dom cycles with txe_n=1 (chip full)
-
-            
+            4: ro_readback.eq(Cat(Constant(VERSION_MINOR, 8),
+                                  Constant(VERSION_MAJOR, 8))),
+            5: ro_readback.eq(Cat(Constant(0, 8), Constant(DEVICE_ID, 8))),
         })
 
         # Select ro[] or rw[] based on f_rw flag
@@ -1771,162 +1127,142 @@ class PCILeechFIFO(Module):
         #self.comb += mux.rd_en.eq(serializer.sink.ready)
         
         # Connect mux output to serializer
-        if 1:
-            # mux_out_fifo: BRAM-backed (buffered=True) so we can afford real
-            # depth.  Ufrisk's fifo_256_32_clk2_comtx is 256b × 4096 = 128 KB
-            # of BRAM, sized so the mux→serializer boundary never stalls
-            # during a burst.
-            #
-            # We use 2048 entries = 64 KB = ~15 BRAM36 tiles, matching
-            # ufrisk's fifo_256_32_clk2_comtx.  This is sized to hold the
-            # host's full outstanding read window (MAX_SIZE_RX = 112 KB)
-            # so the USB stream does not starve between PCIe completion
-            # bursts, while staying inside the XC7A35T's BRAM budget.
-            #
-            # IMPORTANT: buffered=True is required.  With the default
-            # (async_read=True), migen allocates distributed RAM (RAMD64E)
-            # which blows the LUT-RAM budget at this width × depth.
-            self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO(
-                [("data", 256)], mux_out_fifo_depth, buffered=True
-            )
+        # mux_out_fifo: BRAM-backed (buffered=True) so we can afford real
+        # depth.  Ufrisk's fifo_256_32_clk2_comtx is 256b × 4096 = 128 KB
+        # of BRAM, sized so the mux→serializer boundary never stalls
+        # during a burst.
+        #
+        # We use 2048 entries = 64 KB = ~15 BRAM36 tiles, matching
+        # ufrisk's fifo_256_32_clk2_comtx.  This is sized to hold the
+        # host's full outstanding read window (MAX_SIZE_RX = 112 KB)
+        # so the USB stream does not starve between PCIe completion
+        # bursts, while staying inside the XC7A35T's BRAM budget.
+        #
+        # IMPORTANT: buffered=True is required.  With the default
+        # (async_read=True), migen allocates distributed RAM (RAMD64E)
+        # which blows the LUT-RAM budget at this width × depth.
+        self.submodules.mux_out_fifo = mux_out_fifo = SyncFIFO(
+            [("data", 256)], mux_out_fifo_depth, buffered=True
+        )
 
-            self.comb += [
-                # Mux writes frames into a small FIFO / skid buffer.
-                mux_out_fifo.sink.valid.eq(mux.valid),
-                mux_out_fifo.sink.data.eq(mux.dout),
-                mux.rd_en.eq(mux_out_fifo.sink.ready),
-            ]
+        self.comb += [
+            # Mux writes frames into a small FIFO / skid buffer.
+            mux_out_fifo.sink.valid.eq(mux.valid),
+            mux_out_fifo.sink.data.eq(mux.dout),
+            mux.rd_en.eq(mux_out_fifo.sink.ready),
+        ]
 
-            # ---------------------------------------------------------------
-            # BURST-START GATE
-            # ---------------------------------------------------------------
-            # The FT601 chip (in 245-Sync FIFO mode) terminates a USB transfer
-            # by sending a short packet whenever WR_N has been inactive for
-            # more than a brief internal timeout (~µs).  If our TX pipeline
-            # has any gap while the host's bulk-in is active, the host sees
-            # a short packet and declares the transfer complete — even if
-            # more data is coming.
-            #
-            # Two gap sources need to be absorbed:
-            #
-            #   (A) START-OF-BURST gap: the host-injected LOOPBACK probe is
-            #       processed in ~50 ns (CMD byte-frame → loop_fifo → mux →
-            #       mux_out_fifo), but the MRd CplD round-trip through the
-            #       PCIe root complex takes 1–5 µs before the first CplD
-            #       reaches tlp_rx_fifo.  Without gating, the serializer
-            #       immediately drains the single loopback frame (52 bytes
-            #       on the wire) and then sits idle for µs while PCIe
-            #       catches up — FT601 auto-flushes a short packet, the
-            #       transfer splits in half.
-            #
-            #   (B) MID-BURST gap: under sustained backpressure (multi-page
-            #       reads), PCIe flow-control credits between our
-            #       tlp_rx_fifo and the root complex open inter-CplD gaps
-            #       that can exceed FT601's drain_wait (100 µs).  If the
-            #       burst gate closes during such a gap, new data arriving
-            #       after the gate closes has to re-fill BURST_FILL frames
-            #       before the gate reopens — which adds even MORE delay
-            #       on top of the FT601 drain timeout, making a mid-burst
-            #       split nearly certain for 10+ page dumps.
-            #
-            # ufrisk avoids all of this with ~64 KB of upstream buffering
-            # (fifo_256_32_clk2_comtx = 256b × 2048).  Our mux_out_fifo
-            # matches that size, so the gate can stay open through
-            # mid-burst gaps.
-            #
-            # The gate opens when EITHER:
-            #   1. mux_out_fifo.level >= BURST_FILL  (16 frames ≈ 1.28 µs of
-            #      sustainable TX ≫ any realistic serializer/CDC hiccup), OR
-            #   2. the warmup timer (BURST_WARMUP, 50 µs @ 100 MHz) expires
-            #      as a fallback for genuinely small single-frame responses
-            #      (CMD/CFG probes).
-            #
-            # Once open, the gate stays open until the FIFO has been empty
-            # for BURST_SETTLE (500 µs) continuously.  This is 5× longer
-            # than FT601's drain_wait (100 µs), so by the time the gate
-            # closes the FT601 has already exited WRITE and emitted its
-            # short packet — guaranteeing the gate closure never affects
-            # an in-progress transfer, only end-of-burst cleanup.  New
-            # bursts then enter FILL and re-prime from scratch.
-            # ---------------------------------------------------------------
-            BURST_FILL    = 16        # frames to accumulate before opening
-            BURST_WARMUP  = 5000      # 50 µs fallback timer @ 100 MHz
-            BURST_SETTLE  = 50000     # 500 µs empty → gate closes (end-of-burst)
+        # ---------------------------------------------------------------
+        # BURST-START GATE
+        # ---------------------------------------------------------------
+        # The FT601 chip (in 245-Sync FIFO mode) terminates a USB transfer
+        # by sending a short packet whenever WR_N has been inactive for
+        # more than a brief internal timeout (~µs).  If our TX pipeline
+        # has any gap while the host's bulk-in is active, the host sees
+        # a short packet and declares the transfer complete — even if
+        # more data is coming.
+        #
+        # Two gap sources need to be absorbed:
+        #
+        #   (A) START-OF-BURST gap: the host-injected LOOPBACK probe is
+        #       processed in ~50 ns (CMD byte-frame → loop_fifo → mux →
+        #       mux_out_fifo), but the MRd CplD round-trip through the
+        #       PCIe root complex takes 1–5 µs before the first CplD
+        #       reaches tlp_rx_fifo.  Without gating, the serializer
+        #       immediately drains the single loopback frame (52 bytes
+        #       on the wire) and then sits idle for µs while PCIe
+        #       catches up — FT601 auto-flushes a short packet, the
+        #       transfer splits in half.
+        #
+        #   (B) MID-BURST gap: under sustained backpressure (multi-page
+        #       reads), PCIe flow-control credits between our
+        #       tlp_rx_fifo and the root complex open inter-CplD gaps
+        #       that can exceed FT601's drain_wait (100 µs).  If the
+        #       burst gate closes during such a gap, new data arriving
+        #       after the gate closes has to re-fill BURST_FILL frames
+        #       before the gate reopens — which adds even MORE delay
+        #       on top of the FT601 drain timeout, making a mid-burst
+        #       split nearly certain for 10+ page dumps.
+        #
+        # ufrisk avoids all of this with ~64 KB of upstream buffering
+        # (fifo_256_32_clk2_comtx = 256b × 2048).  Our mux_out_fifo
+        # matches that size, so the gate can stay open through
+        # mid-burst gaps.
+        #
+        # The gate opens when EITHER:
+        #   1. mux_out_fifo.level >= BURST_FILL  (16 frames ≈ 1.28 µs of
+        #      sustainable TX ≫ any realistic serializer/CDC hiccup), OR
+        #   2. the warmup timer (BURST_WARMUP, 50 µs @ 100 MHz) expires
+        #      as a fallback for genuinely small single-frame responses
+        #      (CMD/CFG probes).
+        #
+        # Once open, the gate stays open until the FIFO has been empty
+        # for BURST_SETTLE (500 µs) continuously.  This is 5× longer
+        # than FT601's drain_wait (100 µs), so by the time the gate
+        # closes the FT601 has already exited WRITE and emitted its
+        # short packet — guaranteeing the gate closure never affects
+        # an in-progress transfer, only end-of-burst cleanup.  New
+        # bursts then enter FILL and re-prime from scratch.
+        # ---------------------------------------------------------------
+        BURST_FILL    = 16        # frames to accumulate before opening
+        BURST_WARMUP  = 5000      # 50 µs fallback timer @ 100 MHz
+        BURST_SETTLE  = 50000     # 500 µs empty → gate closes (end-of-burst)
 
-            burst_gate  = Signal()
-            burst_timer = Signal(max=max(BURST_WARMUP, BURST_SETTLE) + 1)
+        burst_gate  = Signal()
+        burst_timer = Signal(max=max(BURST_WARMUP, BURST_SETTLE) + 1)
 
-            self.submodules.burst_fsm = burst_fsm = FSM(reset_state="FILL")
-            burst_fsm.act("FILL",
-                # Serializer held in IDLE — mux_out_fifo accumulates frames.
-                If(mux_out_fifo.source.valid,
-                    NextValue(burst_timer, burst_timer + 1),
-                ).Else(
+        self.submodules.burst_fsm = burst_fsm = FSM(reset_state="FILL")
+        burst_fsm.act("FILL",
+            # Serializer held in IDLE — mux_out_fifo accumulates frames.
+            If(mux_out_fifo.source.valid,
+                NextValue(burst_timer, burst_timer + 1),
+            ).Else(
+                NextValue(burst_timer, 0),
+            ),
+            If((mux_out_fifo.level >= BURST_FILL) | (burst_timer >= BURST_WARMUP),
+                NextValue(burst_timer, 0),
+                NextState("DRAIN"),
+            ),
+        )
+        burst_fsm.act("DRAIN",
+            burst_gate.eq(1),
+            # Stay in DRAIN through any mid-burst gap shorter than
+            # BURST_SETTLE.  Under PCIe credit exhaustion during a
+            # large multi-page read, inter-CplD gaps can be tens of µs;
+            # we MUST keep the gate open so data resumes flowing the
+            # instant a new CplD lands in mux_out_fifo.  BURST_SETTLE
+            # is sized well above FT601 drain_wait so the gate only
+            # closes AFTER the transfer has genuinely ended.
+            If(~mux_out_fifo.source.valid,
+                NextValue(burst_timer, burst_timer + 1),
+                If(burst_timer >= BURST_SETTLE,
                     NextValue(burst_timer, 0),
+                    NextState("FILL"),
                 ),
-                If((mux_out_fifo.level >= BURST_FILL) | (burst_timer >= BURST_WARMUP),
-                    NextValue(burst_timer, 0),
-                    NextState("DRAIN"),
-                ),
-            )
-            burst_fsm.act("DRAIN",
-                burst_gate.eq(1),
-                # Stay in DRAIN through any mid-burst gap shorter than
-                # BURST_SETTLE.  Under PCIe credit exhaustion during a
-                # large multi-page read, inter-CplD gaps can be tens of µs;
-                # we MUST keep the gate open so data resumes flowing the
-                # instant a new CplD lands in mux_out_fifo.  BURST_SETTLE
-                # is sized well above FT601 drain_wait so the gate only
-                # closes AFTER the transfer has genuinely ended.
-                If(~mux_out_fifo.source.valid,
-                    NextValue(burst_timer, burst_timer + 1),
-                    If(burst_timer >= BURST_SETTLE,
-                        NextValue(burst_timer, 0),
-                        NextState("FILL"),
-                    ),
-                ).Else(
-                    NextValue(burst_timer, 0),
-                ),
-            )
+            ).Else(
+                NextValue(burst_timer, 0),
+            ),
+        )
 
-            # Gated connection: serializer only sees data when burst_gate is 1.
-            self.comb += [
-                serializer.sink.valid.eq(mux_out_fifo.source.valid & burst_gate),
-                serializer.sink.data .eq(mux_out_fifo.source.data),
-                mux_out_fifo.source.ready.eq(serializer.sink.ready & burst_gate),
-            ]
+        # Gated connection: serializer only sees data when burst_gate is 1.
+        self.comb += [
+            serializer.sink.valid.eq(mux_out_fifo.source.valid & burst_gate),
+            serializer.sink.data .eq(mux_out_fifo.source.data),
+            mux_out_fifo.source.ready.eq(serializer.sink.ready & burst_gate),
+        ]
 
-            # Burst-start pulse: rising edge of burst_gate marks the start
-            # of a new USB bulk-in transfer.  The serializer uses this to
-            # emit a fresh 5 × 0x66665555 sync preamble — ufrisk does the
-            # same on every Bi, and pcileech's host parser relies on it
-            # to align frame boundaries across USB transfer boundaries.
-            burst_gate_prev   = Signal()
-            burst_start_pulse = Signal()
-            self.sync += burst_gate_prev.eq(burst_gate)
-            self.comb += [
-                burst_start_pulse.eq(burst_gate & ~burst_gate_prev),
-                serializer.start_sync.eq(burst_start_pulse),
-            ]
-
-            # Diagnostic hooks (optional, wired to read-only status regs if needed)
-            self.burst_gate  = burst_gate
-            self.burst_timer = burst_timer
-        elif 0:
-            self.comb += [
-                serializer.sink.valid.eq(mux.valid),
-                serializer.sink.data .eq(mux.dout),
-                mux.rd_en.eq(serializer.sink.ready),
-            ]
-        else:
-            self.submodules.txpipe = txpipe = MuxWordQueueTX(idle_threshold=64, word_fifo_depth = 32, start_wait_max=16)
-            
-            self.comb += [
-                txpipe.sink.valid.eq(mux.valid),
-                txpipe.sink.data.eq(mux.dout),
-                mux.rd_en.eq(txpipe.sink.ready),
-            ]
-            serializer=txpipe
+        # Burst-start pulse: rising edge of burst_gate marks the start
+        # of a new USB bulk-in transfer.  The serializer uses this to
+        # emit a fresh 5 × 0x66665555 sync preamble — ufrisk does the
+        # same on every Bi, and pcileech's host parser relies on it
+        # to align frame boundaries across USB transfer boundaries.
+        burst_gate_prev   = Signal()
+        burst_start_pulse = Signal()
+        self.sync += burst_gate_prev.eq(burst_gate)
+        self.comb += [
+            burst_start_pulse.eq(burst_gate & ~burst_gate_prev),
+            serializer.start_sync.eq(burst_start_pulse),
+        ]
 
         # Connect serializer output to USB TX with byte-swap.
         # FT601 swaps bytes on TX (pcileech_ft601.sv line 36), so we pre-swap
@@ -2035,19 +1371,4 @@ class PCILeechFIFO(Module):
             mux.p_wr [7].eq(0),
         ]
 
-        if 1:
-            self.sync += [
-                    If(tlp_rx_fifo.sink.valid & tlp_rx_fifo.sink.ready,rxfifo_in_seen.eq(rxfifo_in_seen + 1)),
-                    If(tlp_rx_fifo.source.valid & tlp_rx_fifo.source.ready,rxfifo_out_seen.eq(rxfifo_out_seen + 1)),
-                    # breaks things:
-                    #If(mux.p_wr[3],mux_p3_wr_seen.eq(mux_p3_wr_seen + 1)),
-                ]
-            self.comb += [
-                self.diag_rxfifo_in_seen.eq(rxfifo_in_seen),
-                self.diag_rxfifo_out_seen.eq(rxfifo_out_seen),
-                self.diag_mux_p3_wr_seen.eq(mux_p3_wr_seen),
-            ]
-        
 
-
-            

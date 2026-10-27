@@ -9,12 +9,12 @@ The default (large FIFO) design is the committed 128-bit RX path.
 
 | Resource | Used | Available | Util |
 |---|---:|---:|---:|
-| Slice LUTs | 4,674 | 20,800 | 22.47% |
-| — LUT as logic | 4,221 | 20,800 | 20.29% |
+| Slice LUTs | 4,200 | 20,800 | 20.19% |
+| — LUT as logic | 3,747 | 20,800 | 18.01% |
 | — LUT as memory | 453 | 9,600 | 4.72% |
-| Slice registers | 4,944 | 41,600 | 11.88% |
-| F7 muxes | 81 | 16,300 | 0.50% |
-| F8 muxes | 8 | 8,150 | 0.10% |
+| Slice registers | 3,437 | 41,600 | 8.26% |
+| F7 muxes | 30 | 16,300 | 0.18% |
+| F8 muxes | 2 | 8,150 | 0.02% |
 | Block RAM tiles | **41.5** | **50** | **83.00%** |
 | — RAMB36/FIFO | 39 | 50 | 78.00% |
 | — RAMB18 | 5 | 100 | 5.00% |
@@ -27,6 +27,23 @@ BRAM is the limiting resource: ~8.5 tiles (~38 KiB) remain. LUT and
 register headroom is large; a small VexRiscv or control state machine fits
 without touching the FIFOs, but a sizeable local RAM would need BRAM
 reclaimed from the FIFOs.
+
+## Cleanup verification (2026-10-27)
+
+The cleaned large build was verified with PCILeech 4.17.8.49:
+
+- 1 GiB: 151.48 MiB/s, 262144/262144 pages, 0 failed.
+- 2 GiB: 147.83 MiB/s valid, 483328/524288 pages, 40960 known holes.
+- VESA ROM `0x3f000-0x40000`: SHA-256
+  `5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db`,
+  matching the ufrisk reference.
+- Bitstream: `pcie_squirrel-cleanup-rx128.bin`, SHA-256
+  `33848540d0efaacbd975321ff99ea14108051451be81c75fb5eb44f9e9e2297b`.
+
+The build reports WNS -1.421 ns / 103 failing endpoints on PCIe
+clock-domain reset paths. The existing false-path commands are emitted
+before clock creation and appear to be discarded; this constraint issue is
+outside the cleanup scope and is not timing closure.
 
 ## Where the BRAM goes (approximate)
 
@@ -89,6 +106,9 @@ FT601 write 8192**. The depths are independent; there is no fixed ratio
 between the 256-bit mux FIFO and the 32-bit FT601 FIFO (the 4x entry
 difference in the defaults is just 64 KiB vs 32 KiB). “Half” and
 “Quarter” below scale all default parameters by 2x and 4x respectively.
+
+The LUT/FF columns in this sweep were measured before the diagnostic
+cleanup; use the Current utilization table for the cleaned build.
 
 | Name | mux_out | TLP RX | FT601 write | BRAM | Δ BRAM | LUTs | FFs | 1G MiB/s | 2G valid MiB/s | 1G failed | 2G failed | Functional |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
