@@ -193,6 +193,31 @@ issues roughly 19% more read commands; each extra command costs a control
 transfer and a round trip. The short 20-byte reads are FT601 sync-word
 filler packets emitted when the FPGA runs out of completion data.
 
+### What the trace says
+
+Bulk transfer rate is not the difference. Full 64 KiB reads take about the
+same time in both designs (median start-to-start 0.325 ms vs 0.327 ms).
+The mean is 0.344 ms for ufrisk vs 0.386 ms for ours; the difference is in
+the tail, where our stream occasionally goes empty and produces short or
+partial reads.
+
+* 3,136 extra 20-byte reads and ~1,000 partial reads are enough to cost
+  several percent: at roughly 0.1-0.15 ms per extra control transfer and
+  round trip, that is ~0.3-0.5 s out of the ~7.6 s run.
+* Longer FIFOs are not adding meaningful latency. BRAM/FIFO read latency
+  is a few clock cycles, negligible next to the ~0.3 ms host read cycle.
+  Deeper buffers should reduce stalls, not create them.
+* It is also not PCIe link turnaround: the link, root complex, MRd size,
+  and CplD size are the same. It is completion-arrival jitter plus the
+  host's extra read-command round trips.
+
+The most likely remaining difference is the PCIe RX forwarding
+architecture. ufrisk splits a 128-bit TLP stream into four parallel
+32-bit ports before the mux; ours uses a single 64->32-bit stream through
+a stride converter and BE filter. That can make completion delivery less
+smooth, and the host's credit-based read loop amplifies the jitter into
+smaller MRd batches and more read commands.
+
 These cheap fixes were tested and made no measurable difference:
 
 * FT601 return-to-IDLE instead of the 100 us `drain_wait` (137.3 MiB/s).
