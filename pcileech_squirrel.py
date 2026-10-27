@@ -366,39 +366,16 @@ class PCIeSquirrel(SoCMini):
 
             # PCIe PHY <--> PCILeechFIFO
             #
-            # pcie_phy uses 64-bit AXI stream (phy_layout(64)).
-            # PCILeechFIFO uses 32-bit words with last signal.
-            # StrideConverter handles the width change; the "last" field in
-            # phy_layout maps directly to our tlp_rx/tlp_tx last signal.
-            #
-            # RX: PCIe bus → pcie_phy.source (64-bit) → conv → pcileech_fifo.tlp_rx (32-bit)
-            if 1: 
-                self.submodules.tlp_rx_conv = tlp_rx_conv = StrideConverter(
-                    phy_layout(64), phy_layout(32), reverse=False)
-                self.submodules.tlp_rx_filt = tlp_rx_filt = StrideConverterBEFilter()
+            # RX: pcie_phy.source (64-bit) goes directly to PCILeechFIFO,
+            # which packs it to 128-bit and splits it into four parallel
+            # 32-bit mux ports (ufrisk-style RX path).
+            # TX: pcileech_fifo.tlp_tx (32-bit) -> TLP32To64Packer -> PHY.
+            self.submodules.tlp_tx_conv = tlp_tx_conv = TLP32To64Packer(
+                swap_words=False
+            )
 
-                
-            else:
-                self.submodules.tlp_rx_conv = tlp_rx_conv = TLP64To32Unpacker(
-                    swap_words=False
-                )
-
-            # TX: pcileech_fifo.tlp_tx (32-bit) → conv → pcie_phy.sink (64-bit) → PCIe bus
-            if 0:
-                self.submodules.tlp_tx_conv = tlp_tx_conv = StrideConverter(
-                    phy_layout(32), phy_layout(64), reverse=False)
-            else:
-                self.submodules.tlp_tx_conv = tlp_tx_conv = TLP32To64Packer(
-                    swap_words=False
-                )
-                
             self.comb += [
-                # RX path
-                self.pcie_phy.source.connect(tlp_rx_conv.sink),
-                tlp_rx_conv.source.connect(tlp_rx_filt.sink),
-                tlp_rx_filt.source.connect(pcileech_fifo.tlp_rx),
-                
-                # TX path
+                self.pcie_phy.source.connect(pcileech_fifo.tlp_rx),
                 pcileech_fifo.tlp_tx.connect(tlp_tx_conv.sink),
                 tlp_tx_conv.source.connect(self.pcie_phy.sink),
             ]
@@ -544,21 +521,17 @@ class PCIeSquirrel(SoCMini):
 
             if 1:
                 rx64_seen       = Signal(16)
-                rx32_seen       = Signal(16)
                 ser_out_seen    = Signal(16)
                 usbtx_seen      = Signal(16)
                 self.comb += [
                     pcileech_fifo.diag_rx64_seen.eq(rx64_seen),
-                    pcileech_fifo.diag_rx32_seen.eq(rx32_seen),
+                    pcileech_fifo.diag_rx32_seen.eq(0),
                     pcileech_fifo.diag_ser_out_seen.eq(ser_out_seen),
                     pcileech_fifo.diag_usbtx_seen.eq(usbtx_seen),
                 ]
                 self.sync += [
                     If(self.pcie_phy.source.valid & self.pcie_phy.source.ready,
                        rx64_seen.eq(rx64_seen + 1)
-                       ),
-                    If(tlp_rx_conv.source.valid & tlp_rx_conv.source.ready,
-                       rx32_seen.eq(rx32_seen + 1)
                        ),
                 ]
                 

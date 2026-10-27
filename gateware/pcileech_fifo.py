@@ -34,6 +34,8 @@ from litex.soc.interconnect.stream import SyncFIFO
 from litepcie.common import phy_layout
 from functools import reduce
 
+from gateware.tlp128 import TLP64To128Packer, TLP128Filter, TLP128_LAYOUT
+
 # ---------------------------------------------------------------------------
 # Wire-protocol constants
 # ---------------------------------------------------------------------------
@@ -654,8 +656,9 @@ class PCILeechFIFO(Module):
         self.usb_rx = stream.Endpoint([("data", 32)])   # words arriving from host
         self.usb_tx = stream.Endpoint([("data", 32)])   # words going to host
 
-        # PCIe TLP side - 32-bit, matches phy_layout(32): dat, be, last
-        self.tlp_rx = stream.Endpoint(phy_layout(32))  # from PCIe RX
+        # PCIe TLP side - RX is the 64-bit PCIe PHY stream (packed to
+        # 128-bit internally); TX remains 32-bit (MRds/CFG/commands).
+        self.tlp_rx = stream.Endpoint(phy_layout(64))  # from PCIe RX
         self.tlp_tx = stream.Endpoint(phy_layout(32))  # to PCIe TX
 
         # Control outputs driven by CMD register file
@@ -931,160 +934,34 @@ class PCILeechFIFO(Module):
         
 
         # ===================================================================
-        # TLP RX FIFO: PCIe→host  (256 deep, 32+1 bit)
-        # Receives TLP words from pcie_phy RX, feeds TX mux port 3.
-        # Filter: only Cpl (0b0000101x) and CplD (0b0100101x) pass through.
-        # CfgRd/CfgWr and other TLPs from enumeration are discarded.
-        # Matches ufrisk pcileech_tlps128_filter cfgtlp_filter=1 behavior.
+        # TLP RX: PCIe 64-bit -> 128-bit packer -> Cpl filter -> 128-bit
+        # FIFO -> four parallel 32-bit mux ports.
+        # Mirrors ufrisk pcileech_tlps128_src64 / dst_fifo / mux.
         # ===================================================================
-        # tlp_rx_fifo: BRAM-backed (buffered=True) so we can afford a deep
-        # buffer.  Ufrisk's equivalent (fifo_134_134_clk2) is a 128-bit,
-        # ~1024-deep BRAM FIFO sized so that m_axis_rx never needs to be
-        # stalled during a full CplD burst.  Our PCILeechFIFO uses a 32-bit
-        # bus after the StrideConverter, so we need ~4x more entries for
-        # the same effective buffering.
-        #
-        # 2048 entries × (32 + 4 + 1) ≈ 9 KB → 2-3 BRAM36 tiles.
-        # Using buffered=True switches migen from SyncFIFO(fwft=True,
-        # async_read=True) to SyncFIFOBuffered (sync-read) which Vivado
-        # infers as BRAM, not distributed LUT RAM.  This is critical —
-        # the shallow 512-entry distributed-RAM version blows the LUT-RAM
-        # budget long before it helps throughput.
-        #
-        # Bumped to 8192 after a 10-page dump hit diag_tlp_rx_fifo_peak=2049
-        # with diag_tlp_rx_stall_cnt=24099 (241 µs of m_axis_rx back-pressure).
-        # 8192×37 b ≈ 37 KB → ~9 BRAM36 tiles; xc7a35t has 50, so plenty of
-        # headroom.  This should absorb the entire 10-MRd burst of CplDs
-        # (~43 KB) without ever stalling m_axis_rx, eliminating any risk of
-        # the Xilinx IP silently dropping inside its tiny internal CplD
-        # buffer when Buf_Opt_BMA=true / Cpl_Finite=false.
+        self.submodules.tlp64_to_128 = tlp64_to_128 = TLP64To128Packer()
+        self.submodules.tlp128_filter = tlp128_filter = TLP128Filter()
         self.submodules.tlp_rx_fifo = tlp_rx_fifo = SyncFIFO(
-            phy_layout(32), 8192, buffered=True
+            TLP128_LAYOUT, 2048, buffered=True
         )
-        tlp_filter_bypass = Signal()  # wired to ~rw[202] after rw is defined
-        # TLP filter state: track first beat and whether current TLP passes
-        tlp_filter_first  = Signal(reset=1)   # next beat is first of TLP
-        tlp_filter_pass   = Signal(reset=0)   # current TLP passes filter
-        # First DWORD bits[31:25] = {Fmt[2:0], Type[4:3]} — check Cpl/CplD
-        tlp_is_cpl = Signal()
-        # IMPORTANT byte-order note: Xilinx pcie_7x AXI-Stream uses
-        # "DWORDs in little-endian position, bytes within each DWORD in
-        # BIG-endian order".  That is: byte 0 of the TLP (fmt/type) sits
-        # at tdata[31:24] — NOT tdata[7:0].  Same convention as ufrisk's
-        # pcileech_pcie_tlp_a7.sv line 181:
-        #     (tlps_in.tdata[31:25] == 7'b0100101)   // CplD
-        #
-        # Earlier we wrote this check against dat[1:8] (assuming byte0 at LSB),
-        # which NEVER matched (confirmed by diag_tlp_rx_cpl_count=0 while
-        # 151 TLPs did reach the FIFO).  The filter effectively passed
-        # everything only because rw[202] (cfgtlp_filter_en) was 0 at
-        # runtime — i.e. the filter was bypassed.
-        #
-        # byte0 = {R, Fmt[2:0], Type[4:0]}.  Cpl=0x0a (fmt=000, type=01010),
-        # CplD=0x4a (fmt=010, type=01010).  Check bits[7:1]={Fmt[2:0],Type[4:3]}
-        # at tdata[31:25]:
-        self.comb += tlp_is_cpl.eq(
-            (self.tlp_rx.dat[25:32] == 0b0000101) |   # Cpl  byte0[7:1]=0b0000101
-            (self.tlp_rx.dat[25:32] == 0b0100101)     # CplD byte0[7:1]=0b0100101
-        )
-        self.sync += [
-            If(self.tlp_rx.valid & self.tlp_rx.ready,
-                tlp_filter_first.eq(self.tlp_rx.last),
-                If(tlp_filter_first,
-                    tlp_filter_pass.eq(tlp_is_cpl),
-                )
-            )
-        ]
-
-
-
-
-
-        
-        # Gate TLP RX into FIFO: first beat requires Cpl/CplD, subsequent beats follow filter state
-        tlp_rx_pass_beat   = Signal()   # this beat passes the filter (want to keep)
-        tlp_rx_gated_valid = Signal()   # this beat will be written to the FIFO
+        tlp_filter_bypass = Signal()
         self.comb += [
-            # rw[202]=cfgtlp_filter_en: when 1 (default), only pass Cpl/CplD;
-            # when 0, pass all TLPs (useful for debugging — set reset value to 0).
-            # tlp_filter_bypass=1 → pass all TLPs; =0 → only Cpl/CplD.
-            tlp_rx_pass_beat.eq(
-                Mux(tlp_filter_bypass,
-                    1,
-                    Mux(tlp_filter_first, tlp_is_cpl, tlp_filter_pass))),
-            tlp_rx_gated_valid.eq(self.tlp_rx.valid & tlp_rx_pass_beat),
-            tlp_rx_fifo.sink.valid.eq(tlp_rx_gated_valid),
-            tlp_rx_fifo.sink.dat  .eq(self.tlp_rx.dat),
-            tlp_rx_fifo.sink.be   .eq(self.tlp_rx.be),
-            tlp_rx_fifo.sink.last .eq(self.tlp_rx.last),
-            # CRITICAL backpressure rule: only a TLP we actually want to keep
-            # may stall m_axis_rx when the FIFO is full.  A TLP that the
-            # filter is discarding MUST be consumed unconditionally — it
-            # never touches the FIFO, so FIFO fullness is irrelevant for it.
-            #
-            # The previous code wired ready = tlp_rx_fifo.sink.ready
-            # unconditionally, which meant a filtered (dropped) TLP
-            # arriving while the FIFO was full would still stall the
-            # PCIe IP's m_axis_rx.  Under sustained traffic this creates
-            # head-of-line blocking: every filtered TLP (CfgRd/CfgWr,
-            # MsgD, internal Xilinx completions, etc.) behind a burst
-            # of CplDs waits for downstream drain.  That pressure
-            # propagates into the IP's internal buffer, starves flow
-            # control credits back to the root complex, and causes
-            # outstanding MRds to hit the host's Completion Timeout.
-            #
-            # Matches ufrisk's pcileech_pcie_tlp_a7.sv, where the filter
-            # can always discard upstream regardless of the filter's
-            # output-FIFO state.
-            self.tlp_rx.ready.eq(
-                Mux(tlp_rx_pass_beat,
-                    tlp_rx_fifo.sink.ready,   # real CplD: stall until FIFO has room
-                    1,                         # filtered: consume and drop
-                )
-            ),
+            self.tlp_rx.connect(tlp64_to_128.sink),
+            tlp64_to_128.source.connect(tlp128_filter.sink),
+            tlp128_filter.bypass.eq(tlp_filter_bypass),
+            tlp128_filter.source.connect(tlp_rx_fifo.sink),
         ]
 
-        # Diagnostic: expose tlp_rx_fifo level + rx_seen counter via CMD register
-        self.tlp_rx_level = Signal(16)
+        # Diagnostics: count Cpl/CplD vs other TLPs at the packer output,
+        # track FIFO high-water mark, and count stalled 64-bit RX beats.
         rx_seen_count = Signal(16)
-        self.sync += [
-            If(self.tlp_rx.valid & self.tlp_rx.ready,
-                rx_seen_count.eq(rx_seen_count + 1),
-            )
-        ]
-
-        # -------------------------------------------------------------------
-        # TLP-RX analysis counters (all in self.sync = sys domain, same as
-        # tlp_rx stream after CDC inside pcie_phy).
-        #
-        #   cpl_count   : +1 on the "last" beat of a TLP whose first beat
-        #                 identified as Cpl/CplD (tlp_filter_pass=1).
-        #   other_count : +1 on the "last" beat of a TLP whose first beat
-        #                 did NOT match Cpl/CplD (tlp_filter_pass=0).
-        #   fifo_peak   : running max of tlp_rx_fifo.level (sat 16 bits).
-        #   stall_cnt   : +1 every cycle the IP asserts valid while we hold
-        #                 ready=0 (backpressure applied to m_axis_rx).
-        #
-        # "last" detection: tlp_rx.last & valid & ready edge.
-        # tlp_filter_first = 1 ⇒ next beat is first-of-TLP; at last beat,
-        # tlp_filter_pass holds the first-beat classification.
-        # -------------------------------------------------------------------
-        tlp_rx_last_edge = Signal()
-        self.comb += tlp_rx_last_edge.eq(
-            self.tlp_rx.valid & self.tlp_rx.ready & self.tlp_rx.last
+        tlp_is_cpl = Signal()
+        self.comb += tlp_is_cpl.eq(
+            (tlp64_to_128.source.dat[25:32] == 0b0000101) |
+            (tlp64_to_128.source.dat[25:32] == 0b0100101)
         )
-
-        # first-beat match: the *current* beat is a first-beat (tlp_filter_first=1)
-        # and tlp_is_cpl is a pass. For single-beat TLPs, first-beat and last
-        # coincide, so we need to check both conditions at the last edge.
-        # Use tlp_filter_pass (latched from first-beat) for multi-beat TLPs,
-        # OR (tlp_filter_first & tlp_is_cpl) for single-beat TLPs.
-        first_and_cpl = Signal()
-        self.comb += first_and_cpl.eq(tlp_filter_first & tlp_is_cpl)
-
         self.sync += [
-            If(tlp_rx_last_edge,
-                If(tlp_filter_pass | first_and_cpl,
+            If(tlp64_to_128.source.valid & tlp64_to_128.source.ready & tlp64_to_128.source.first,
+                If(tlp_is_cpl,
                     self.diag_tlp_rx_cpl_count.eq(self.diag_tlp_rx_cpl_count + 1),
                 ).Else(
                     self.diag_tlp_rx_other_count.eq(self.diag_tlp_rx_other_count + 1),
@@ -1096,16 +973,18 @@ class PCILeechFIFO(Module):
             If(self.tlp_rx.valid & ~self.tlp_rx.ready,
                 self.diag_tlp_rx_stall_cnt.eq(self.diag_tlp_rx_stall_cnt + 1),
             ),
+            If(self.tlp_rx.valid & self.tlp_rx.ready,
+                rx_seen_count.eq(rx_seen_count + 1),
+            ),
         ]
-        # Diagnostic layout: fifo depth is now 2048 so `level` is 11 bits.
-        # Use the top 3 bits of the level (i.e. level >> 8) so the 16-bit
-        # readback remains useful as a fullness indicator (0..7 in units of 256).
+
+        # Diagnostic layout: 128-bit FIFO level (depth 2048) plus seen bits.
         self.comb += self.tlp_rx_level.eq(Cat(
-            tlp_rx_fifo.level[8:11], # [2:0]  fifo fill level (top 3 bits of 11-bit level)
-            tlp_rx_fifo.level[0:8],  # [10:3] fifo fill level (low 8 bits)
-            rx_seen_count[0:3],      # [13:11] beats reaching self.tlp_rx
-            self.phy_source_seen,    # [14]   pcie_phy.source.valid fired (after CDC)
-            self.phy_raw_rx_seen,    # [15]   m_axis_rx_tvalid fired (raw PCIe IP RX)
+            tlp_rx_fifo.level[8:11],
+            tlp_rx_fifo.level[0:8],
+            rx_seen_count[0:3],
+            self.phy_source_seen,
+            self.phy_raw_rx_seen,
         ))
 
         # -------------------------------------------------------------------
@@ -2107,48 +1986,53 @@ class PCILeechFIFO(Module):
         #   0x00 = TLP, 0x01 = CFG, 0x02 = LOOP, 0x03 = CMD
         # -------------------------------------------------------------------
 
-        # p0: TLP RX (PCIe → host) — HIGHEST PRIORITY (matches SV p0)
-        # ctx nibble: bits[1:0]=TYPE_TLP=0b00, bit[2]=last, bit[3]=0
-        self.comb += [
-            mux.p_din[0].eq(tlp_rx_fifo.source.dat),
-            mux.p_ctx[0].eq(Cat(Constant(0b00, 2),           # bits[1:0] = TYPE_TLP tag
-                                tlp_rx_fifo.source.last,     # bit[2] = last
-                                Constant(0, 1))),             # bit[3] = 0
-            mux.p_wr [0].eq(tlp_rx_fifo.source.valid & mux.p_req[0]),
-            tlp_rx_fifo.source.ready.eq(mux.p_req[0]),
-        ]
-
-        # p1: CFG response — tag=0b01, ctx=0b00
-        self.comb += [
-            mux.p_din[1].eq(cfg_tx_fifo.source.data),
-            mux.p_ctx[1].eq(0b0001),
-            mux.p_wr [1].eq(cfg_tx_fifo.source.valid & mux.p_req[1]),
-            cfg_tx_fifo.source.ready.eq(mux.p_req[1]),
-        ]
-
-        # p2: loopback — tag=0b10, ctx from stored loop_fifo.ctx
-        self.comb += [
-            mux.p_din[2].eq(loop_fifo.source.data),
-            mux.p_ctx[2].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
-            mux.p_wr [2].eq(loop_fifo.source.valid & mux.p_req[2]),
-            loop_fifo.source.ready.eq(mux.p_req[2]),
-        ]
-
-        # p3: CMD response — tag=0b11, ctx=0b00 — LOWEST PRIORITY
-        self.comb += [
-            mux.p_din[3].eq(cmd_tx_fifo.source.data),
-            mux.p_ctx[3].eq(0b0011),
-            mux.p_wr [3].eq(cmd_tx_fifo.source.valid & mux.p_req[3]),
-            cmd_tx_fifo.source.ready.eq(mux.p_req[3]),
-        ]
-
-        # p4-p7: stubs
-        for i in range(4, 8):
+        # p0-p3: four parallel 32-bit TLP streams from the 128-bit RX FIFO.
+        # Each 128-bit word contributes up to four DWORDs; keep bits gate
+        # which ports write, and the last flag goes on the final DWORD.
+        tlp_last = [Signal() for _ in range(4)]
+        for i in range(4):
+            self.comb += tlp_last[i].eq(
+                tlp_rx_fifo.source.last &
+                (tlp_rx_fifo.source.keep == ((1 << (i + 1)) - 1))
+            )
+        for i in range(4):
             self.comb += [
-                mux.p_din[i].eq(0),
-                mux.p_ctx[i].eq(0),
-                mux.p_wr [i].eq(0),
+                mux.p_din[i].eq(tlp_rx_fifo.source.dat[32*i:32*(i + 1)]),
+                mux.p_ctx[i].eq(Cat(Constant(0b00, 2), tlp_last[i], Constant(0, 1))),
+                mux.p_wr [i].eq(tlp_rx_fifo.source.valid & tlp_rx_fifo.source.keep[i] & mux.p_req[i]),
             ]
+        self.comb += tlp_rx_fifo.source.ready.eq(mux.p_req[0])
+
+        # p4: CFG response — tag=0b01, ctx=0b00
+        self.comb += [
+            mux.p_din[4].eq(cfg_tx_fifo.source.data),
+            mux.p_ctx[4].eq(0b0001),
+            mux.p_wr [4].eq(cfg_tx_fifo.source.valid & mux.p_req[4]),
+            cfg_tx_fifo.source.ready.eq(mux.p_req[4]),
+        ]
+
+        # p5: loopback — tag=0b10, ctx from stored loop_fifo.ctx
+        self.comb += [
+            mux.p_din[5].eq(loop_fifo.source.data),
+            mux.p_ctx[5].eq(Cat(Signal(2, reset=0b10), loop_fifo.source.ctx)),
+            mux.p_wr [5].eq(loop_fifo.source.valid & mux.p_req[5]),
+            loop_fifo.source.ready.eq(mux.p_req[5]),
+        ]
+
+        # p6: CMD response — tag=0b11, ctx=0b00 — LOWEST PRIORITY
+        self.comb += [
+            mux.p_din[6].eq(cmd_tx_fifo.source.data),
+            mux.p_ctx[6].eq(0b0011),
+            mux.p_wr [6].eq(cmd_tx_fifo.source.valid & mux.p_req[6]),
+            cmd_tx_fifo.source.ready.eq(mux.p_req[6]),
+        ]
+
+        # p7: stub
+        self.comb += [
+            mux.p_din[7].eq(0),
+            mux.p_ctx[7].eq(0),
+            mux.p_wr [7].eq(0),
+        ]
 
         if 1:
             self.sync += [

@@ -1,6 +1,6 @@
 # PCIe Squirrel read-throughput measurements
 
-Date: 2026-10-26
+Date: 2026-10-26 (updated 2026-10-27)
 
 This document collects the memory-read throughput measured on the PCIe
 Squirrel with our LiteX/Migen gateware and with the original
@@ -13,9 +13,12 @@ Squirrel with our LiteX/Migen gateware and with the original
 * On USB 3.0 the ufrisk v4.14 gateware reaches **~149 MiB/s (156.6 MB/s)**
   on a 1 GiB range and **~148 MiB/s (155 MB/s) of valid data** on a 2 GiB
   range on this machine.
-* Our gateware after increasing the TX FIFOs reaches **~139 MiB/s
-  (146 MB/s)** on 1 GiB, i.e. about 7% below the ufrisk reference on this
-  host.
+* Increasing the TX FIFOs took our gateware from ~101 to ~139 MiB/s on
+  1 GiB.
+* Replacing the single-stream 64->32-bit RX path with an ufrisk-style
+  128-bit RX path (64->128 packer, 128-bit FIFO, four parallel 32-bit mux
+  ports) took it to **~147 MiB/s (154 MB/s)** with PCILeech 4.17.8.49 and
+  **~149 MiB/s** with 4.19.5, within ~1.5% of ufrisk on 1 GiB.
 * The claimed 190 MB/s figure for v4.14 was **not reproduced** here, even
   with PCILeech 4.19.5 (best 1 GiB result: 151.7 MiB/s / 159 MB/s).
 
@@ -41,7 +44,8 @@ Software:
 * Gateware under test:
   * ufrisk PCIeSquirrel v4.14 (`pcileech_squirrel-4.14.bin`)
   * ours: LiteX/Migen tree at commit `0286dde` plus the TX-FIFO change
-    (64 KiB `mux_out_fifo`, 32 KiB FT601 `write_fifo`), flashed 2026-10-27
+    (64 KiB `mux_out_fifo`, 32 KiB FT601 `write_fifo`) and the 128-bit RX
+    path (`gateware/tlp128.py`, four parallel mux ports), flashed 2026-10-27
 
 Method:
 
@@ -84,7 +88,7 @@ These are interface/protocol ceilings, not expected benchmark results.
 * The 100 MHz, 64-bit internal path (800 MB/s) and the PCIe user interface
   (64-bit at 125 MHz, 1 GB/s) are not the limiting interfaces.
 * Sync words and keepalive frames are small and not included above.
-* The measured 139-149 MiB/s is about 46-49% of the ~303 MiB/s
+* The measured 147-149 MiB/s is about 48-49% of the ~303 MiB/s
   protocol/framing ceiling.
 
 ### Memory bandwidth is not the limit
@@ -124,16 +128,35 @@ USB 3.0 (5000 Mbps), after increasing the TX FIFOs:
 
 Measured with `./bench-pcileech.sh ours-final 64M 1G 2G`.
 
-The FIFO change was:
+USB 3.0 (5000 Mbps), 128-bit RX path (final design):
+
+| Host SW | Range | Elapsed s | Raw MiB/s | Valid MiB/s | Valid MB/s | PCILeech speed | Pages failed |
+|---------|-------|-----------|-----------|-------------|------------|----------------|--------------|
+| 4.17.8.49 | 64M | 0.651 | 98.31 | 98.31 | 103.09 | 64 MB/s | 0 |
+| 4.17.8.49 | 1G  | 6.960 | 147.13 | 147.13 | 154.27 | 146 MB/s | 0 |
+| 4.17.8.49 | 2G  | 13.170 | 155.50 | 143.36 | 150.32 | 146 MB/s | 40960 |
+| 4.19.5.63 | 1G  | 6.857 | 149.34 | 149.34 | 156.59 | 146 MB/s | 0 |
+
+Measured with `./bench-pcileech.sh ours-rx128 64M 1G 2G` plus the 4.19.5
+bundle for the last row. A repeat 2 GiB run measured 144.31 MiB/s valid
+(151.32 MB/s). BRAM usage is 41.5/50 tiles and LUT usage 22%.
+
+Data validation: a 4 KiB dump of the stable VESA ROM region
+(`0x3f000-0x40000`) with the 128-bit RX path is byte-identical to the old
+ufrisk v4.14 dump, and the 1 GiB run had 0 failed pages. The 2 GiB
+failures are the known memory-map holes (40960 pages), not data errors.
+
+The changes were:
 
 * `gateware/pcileech_fifo.py`: `mux_out_fifo` 512 -> 2048 frames
   (16 KiB -> 64 KiB)
 * `gateware/ft601.py`: FT601 `write_fifo` 1024 -> 8192 words
   (4 KiB -> 32 KiB)
+* `gateware/tlp128.py` plus the mux: 64->128 TLP packer, 128-bit
+  Cpl/CplD filter and FIFO, and four parallel 32-bit mux ports
 
-This matches the buffering of the ufrisk reference design and removes
-the USB starvation between PCIe completion bursts. BRAM usage after the
-change is 42.5 / 50 tiles.
+The FIFO change matches ufrisk's buffering. The 128-bit RX path mirrors
+ufrisk's `pcileech_tlps128_src64`/`dst_fifo`/mux structure.
 
 ### ufrisk PCIeSquirrel v4.14
 
@@ -160,9 +183,13 @@ Cross-check with a newer host stack, PCILeech 4.19.5.63:
   was entirely a USB-link problem.
 * Increasing the TX buffering improved our 1 GiB result from 100.9 to
   139.2 MiB/s (+38%).
-* The ufrisk v4.14 gateware is still faster than ours on sustained reads:
-  ~149 MiB/s vs ~139 MiB/s on 1 GiB (~7% difference), and ~148 MiB/s vs
-  ~136 MiB/s of valid data on 2 GiB (~8% difference).
+* The 128-bit RX path improved it further to 147.1 MiB/s with PCILeech
+  4.17.8.49 and 149.3 MiB/s with 4.19.5, within ~1.5% of ufrisk on 1 GiB.
+  On 2 GiB we now measure 143.4-144.3 MiB/s of valid data vs 146.7-147.9
+  for ufrisk (~2-3%).
+* After the RX path change, a 1 GiB USB trace has 19,712 full 64 KiB
+  reads, 64 twenty-byte reads, and **zero** partial reads, versus
+  19,584 / 64 / 64 for ufrisk. The mid-stream short reads are gone.
 * The 64 MiB result is dominated by PCILeech process/device startup and
   is not a good steady-state indicator. Use 1 GiB or 2 GiB for comparisons.
 * The 2 GiB "raw" number is inflated by 160 MiB of unreadable pages;
@@ -175,31 +202,42 @@ Cross-check with a newer host stack, PCILeech 4.19.5.63:
 
 ## Remaining gap investigation
 
-The final design keeps only the two FIFO increases that produced the large
-win: `mux_out_fifo` 512 -> 2048 frames and FT601 `write_fifo`
-1024 -> 8192 words. BRAM usage is 42.5/50 tiles. No experimental FSM or
-extra TLP-buffer changes were kept.
+The first step was the two FIFO increases. The single-stream RX path still
+left the output stream occasionally empty, so we then implemented the
+ufrisk-style 128-bit RX path. The historical trace below shows why that
+was needed; the final 128-bit path removes the starvation.
 
-USB traces of a 1 GiB dump on both gatewares show where the remaining 7-8%
-goes:
+USB traces of a 1 GiB dump:
 
 | Gateware | Full 64 KiB reads | 20-byte filler reads | Partial reads |
 |----------|-------------------|----------------------|---------------|
 | ufrisk v4.14 | 19,584 | 64 | 64 |
-| ours | ~19,300 | 3,136 | ~1,000 |
+| ours, single-stream RX | ~19,300 | 3,136 | ~1,000 |
+| ours, 128-bit RX | 19,712 | 64 | 0 |
 
-Our completion stream occasionally starves the USB output, so the host
-issues roughly 19% more read commands; each extra command costs a control
-transfer and a round trip. The short 20-byte reads are FT601 sync-word
-filler packets emitted when the FPGA runs out of completion data.
+With the single-stream path, our completion stream occasionally starved
+the USB output, so the host issued roughly 19% more read commands; each
+extra command costs a control transfer and a round trip. The short 20-byte
+reads are FT601 sync-word filler packets emitted when the FPGA runs out of
+completion data.
+
+### Resolution: 128-bit RX path
+
+The 64->128 packer, 128-bit Cpl/CplD filter/FIFO, and four parallel 32-bit
+mux ports removed the mid-stream starvation. The 1 GiB USB trace now has
+19,712 full 64 KiB reads, 64 twenty-byte reads, and no partial reads,
+essentially matching ufrisk. 1 GiB throughput is 147.1 MiB/s with
+PCILeech 4.17.8.49 and 149.3 MiB/s with 4.19.5; the remaining 1.5-3%
+difference to ufrisk is within run-to-run variance and small wire
+overhead. BRAM usage is 41.5/50 tiles and LUT usage 22%.
 
 ### What the trace says
 
 Bulk transfer rate is not the difference. Full 64 KiB reads take about the
 same time in both designs (median start-to-start 0.325 ms vs 0.327 ms).
-The mean is 0.344 ms for ufrisk vs 0.386 ms for ours; the difference is in
-the tail, where our stream occasionally goes empty and produces short or
-partial reads.
+The mean is 0.344 ms for ufrisk vs 0.386 ms for the old single-stream
+design; the difference was in the tail, where that stream occasionally
+went empty and produced short or partial reads.
 
 * 3,136 extra 20-byte reads and ~1,000 partial reads are enough to cost
   several percent: at roughly 0.1-0.15 ms per extra control transfer and
@@ -211,12 +249,52 @@ partial reads.
   and CplD size are the same. It is completion-arrival jitter plus the
   host's extra read-command round trips.
 
-The most likely remaining difference is the PCIe RX forwarding
-architecture. ufrisk splits a 128-bit TLP stream into four parallel
-32-bit ports before the mux; ours uses a single 64->32-bit stream through
-a stride converter and BE filter. That can make completion delivery less
-smooth, and the host's credit-based read loop amplifies the jitter into
-smaller MRd batches and more read commands.
+This pointed to the PCIe RX forwarding architecture. ufrisk splits a
+128-bit TLP stream into four parallel 32-bit ports before the mux; the old
+design used a single 64->32-bit stream through a stride converter and BE
+filter, which made completion delivery less smooth and let the host's
+credit-based read loop amplify the jitter into more read commands. The
+128-bit RX path described above replaced that old path and closed the gap.
+
+### FT601 session/underrun mechanism
+
+FTDI AN_412 describes the IN direction as a USB read **session** with a
+requested length. The FIFO master must write maximum-sized packets
+(1024 B on USB3) except for the last packet, which must be a short packet.
+If the master stops writing before the FIFO buffer is full and the
+requested length has not been reached, the FT601 detects a **session
+underrun** and terminates the read with a short packet.
+
+The FPGA does not know the host's requested read length: that length is
+part of the FT601/USB read request, while the FPGA only sees MRd TLPs and
+writes CplD data. The original ufrisk gateware does not track it either;
+it keeps the output stream fed so underruns do not occur. Our 5-word
+filler writes 20 B and stops, so FT601 ends the session with a 20-byte
+short packet. With the old single-stream RX path this produced the 3,136
+short reads; after the 128-bit RX fix only the expected 64 remain,
+matching ufrisk.
+
+A gateware-only workaround is possible without changing the standard
+PCILeech host: parse the MRd length fields and CplD byte counts, keep a
+running count of outstanding completion bytes, and only allow an
+underrun/short packet when no completions are outstanding. While
+completions are outstanding the output must stay fed with real data or
+filler so the session survives. The FT601 also has a
+`DISABLECANCELSESSIONUNDERRUN` option, but the standard PCILeech host
+sets `OptionalFeatureSupport = 0`, so it is not used in these tests.
+
+A larger FIFO or store-and-forward pacing does not remove the
+session-length problem. A 0.1 ms gap at 300 MB/s is only ~30 KB, which
+the existing 112 KB buffering can cover; the buffer is often near empty
+because the source average is ~150 MB/s. Waiting for a full buffer adds
+latency and stalls the host read pipeline (measured ~100 MiB/s), and a
+much larger FIFO would only smooth jitter, not raise the average above
+the source rate.
+
+Host-visible gaps can be extracted from USB traces; gateware-level gaps
+would need a cycle counter. In the 1 GiB trace, gaps after partial reads
+are ~0.2 ms typical, while 20-byte events cluster and can stall for
+several milliseconds.
 
 These cheap fixes were tested and made no measurable difference:
 
@@ -225,13 +303,13 @@ These cheap fixes were tested and made no measurable difference:
   buffering (137.3 MiB/s).
 * Limiting continuous TX to 64-word bursts and prioritizing RX in IDLE
   (137.3 MiB/s).
+* Delaying the 5-word filler to a 1 ms true-idle timeout (~100 MiB/s;
+  the host read waits and the pipeline stalls).
+* Filling to full 1024-byte FT601 packets without a terminating short
+  packet (the host read blocks; reverted).
 
-All three were reverted. The remaining gap therefore appears to be in the
-PCIe completion path or its interaction with the host read pipeline, not
-in the FT601/USB side. Closing it would require a deeper RX-path redesign
-(e.g. a different PCIe RX width/stream architecture or more invasive
-pacing), which was deliberately not done to keep the design simple and
-extensible.
+All were reverted. The final design uses the 128-bit RX path, which keeps
+the design simple and extensible and closes the gap to ~1.5-3%.
 
 ## Reproducing a run
 
