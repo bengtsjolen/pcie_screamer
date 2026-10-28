@@ -263,7 +263,7 @@ type/length/byte-count/lower-address validation, sync/drain handling, and
 | Placed resources | 6,208 LUT / 4,213 FF / 37 BRAM tiles (34 RAMB36 + 6 RAMB18) / 4 IOB / 8 BUFG / 0 DSP |
 | Timing | WNS +0.525 ns, WHS +0.040 ns, WPWS -0.007 ns on the known PCIe hard-IP PIPECLK→USERCLK skew |
 | DRC | 4 warnings, 0 errors |
-| Bridge FIFO | 1024 × 34 RX FIFO inferred as LUTRAM (`RAM64M` × 176), not BRAM |
+| Bridge FIFO | 1024 × 34 RX FIFO inferred as LUTRAM (`RAMD64E`/`RAMD32`/`RAMS32` primitives), not BRAM |
 | Hardware `status` | `bridge link=1 tx_full=0 rx_empty=1`; `pcie link=0x163 bme=1 id=0x1600` |
 | Default VESA dump | SHA-256 `5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db` |
 | Arbitrary read | `dump 0x1000000 0x40` returned 64 bytes with no mux/TLP error; host remained alive |

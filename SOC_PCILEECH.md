@@ -51,7 +51,7 @@ TLP128Filter
 tlp_rx_fifo (2048 × 128)
     │
     ▼
-PCILeechMux (2048 × 256)
+PCILeechMux + mux_out_fifo (2048 × 256)
     │
     ▼
 MuxSerializer (8 × 32)
@@ -218,7 +218,7 @@ completion error stops the dump and prints a reason.
 | SRAM | `0x10000000` | `0x2000` (8 KiB) | 136 B `.bss`; `.data` 0 B; stack grows down from `0x10002000` |
 | CSR | `0xf0000000` | `0x10000` (64 KiB) | PCIe PHY, CPU bridge, `pcie_id`, UART registers |
 | `PCILeechFIFO` TLP RX | internal | 2048 × 128 | PCILeech CplD/TLP frame storage |
-| `PCILeechFIFO` mux | internal | 2048 × 256 | 7-word response frames plus context |
+| `PCILeechFIFO` `mux_out_fifo` | internal | 2048 × 256 | 7-word response frames plus context |
 | Bridge TX FIFO | internal | 256 × 32 | CPU-to-FIFO word staging |
 | Bridge RX FIFO | internal | 1024 × 32 (34-bit internal) | FIFO-to-CPU word staging |
 
@@ -244,7 +244,8 @@ Authoritative table and history: `RESOURCES.md`.
 | BUFGCTRL | 8 | 32 | 25.00% |
 
 The bridge FIFOs did not consume BRAM. In particular, the 1024 × 34 RX FIFO
-was inferred as distributed LUTRAM (`RAM64M` × 176), not block RAM. This keeps
+was inferred as distributed LUTRAM (`RAMD64E`, `RAMD32`, and `RAMS32`
+primitives), not block RAM. This keeps
 the BRAM total at 37/50 tiles (74%) while increasing LUT-as-memory use; the
 1,316 distributed-RAM LUTs are mostly the two CPU bridge FIFOs. BRAM remains
 the tighter resource, with 13 tiles spare.

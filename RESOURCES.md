@@ -271,7 +271,8 @@ tables above are unchanged.
 
 The BIOS image is 3,935 bytes in the 32 KiB ROM region with no undefined
 symbols; the SRAM is 8 KiB. Bridge FIFOs did not use BRAM: the 1024 × 34 RX
-FIFO was inferred as distributed LUTRAM (`RAM64M` × 176), not block RAM,
+FIFO was inferred as distributed LUTRAM (`RAMD64E`, `RAMD32`, and `RAMS32`
+primitives), not block RAM,
 leaving the BRAM total at 37/50 tiles while raising LUT-as-memory use.
 
 The bitstream is `bitstreams/soc_pcileech-console.bin`, 1,280,396 bytes,
