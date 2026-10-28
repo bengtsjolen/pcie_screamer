@@ -61,6 +61,8 @@ Estimated BRAM:
 The current PCILeech large build uses 41.5 tiles; removing FT601 and the
 `PCILeechFIFO` mux/TLP FIFOs leaves ample room for the CPU, ROM, SRAM, and DMA.
 The `VexRiscv` `minimal` variant and a no-libc console keep LUT/FF use modest.
+The built implementation uses 2,050 LUTs, 2,470 registers, and 16 BRAM tiles;
+LiteX auto-resizes the physical ROM from 0x8000 to the 2.7 KiB BIOS.
 If the design does not fit, reduce in this order:
 
 1. ROM 32 KiB → 16 KiB and SRAM 8 KiB → 4 KiB.
@@ -88,7 +90,11 @@ soc_squirrel.py
   - `integrated_rom_size=0x8000`;
   - `integrated_sram_size=0x2000`;
   - `uart_name="serial"`, 115200 baud;
+  - `uart_rx_fifo_rx_we=True` so each polling `uart_rxtx` read pops the RX
+    FIFO (the custom console does not use the UART event manager);
   - `with_timer=False`, `with_ctrl=False`.
+- `check_bios_requirements()` is overridden to require ROM/SRAM but not the
+  unused timer.
 - The custom console replaces the normal LiteX BIOS package and is built into
   the integrated ROM.
 - The FT4232H channel-B serial pins are the ones already committed in
@@ -99,11 +105,17 @@ soc_squirrel.py
 - Reuse `S7PCIEPHY` with `data_width=64`, `bar0_size=0x40000`.
 - Keep `Device_ID=0666`, class code `02/00`, extended tag settings, and the
   existing GTP placement command.
-- Keep the existing `platform.add_platform_command` false-path setup.
+- Use the post-synthesis clock-group helper:
+  `add_false_path_constraints_by_name("main_s7pciephy_clkout*",
+  "main_crg_clkout")`; the old `main_clkout` names do not apply to this SoC.
 - Do not override `pcie_phy.pcie_rst_n` from a PCILeech CMD register. The PHY
   default and board PERST# (`pads.rst_n`) control reset.
 - Auto-BME after link-up remains: wait about `1<<20` cycles after link, then
-  write `0x6` to config command register with byte enables `0x3`.
+  write `0x6` to config command register with byte enables `0x3`. The BME
+  timer/pulse runs in the pcie domain.
+- `link_ready` uses the host-visible `_bus_master_enable.status`, not the
+  local `bme_done` pulse, and is qualified by link-up and a nonzero
+  `pcie_phy.id`.
 - Do not instantiate the MSI module or the PCILeech command/mux path.
 
 ### TLPDMA
@@ -125,30 +137,44 @@ CSRs:
 
 Behavior:
 
-- `link_ready = pcie_link_up & bme_done & (pcie_phy.id != 0)`.
+- `link_ready = pcie_link_up & bus_master_enable & (pcie_phy.id != 0)`.
 - On `start` when idle, latch the 64-bit address and length; `start` is
-  ignored while busy.
-- Issue sequential 64-bit MRd TLPs, one DWORD per request, tag 0:
-  - DW0 `0x20000001` (Fmt=01, 4-DW header, MRd, length=1).
-  - DW1 `{requester_id, first_be=0xF}`; requester ID is `pcie_phy.id`.
-  - DW2 `addr[31:0]` with the low two bits cleared.
-  - DW3 `addr[63:32]`.
-- Send the four 32-bit words through `TLP32To64Packer` to `pcie_phy.sink`.
+  ignored while busy. The start address is aligned to 4 bytes.
+- A free-running 8-bit tag is latched for each request and consumed at
+  request start; the next request uses the next tag.
+- Issue sequential single-DWORD MRd TLPs:
+  - For addresses below 4 GiB, use MRd32:
+    - DW0 `0x00000001` (Fmt=00, 3-DW header, MRd, length=1);
+    - DW1 `{requester_id, tag, first_be=0xF}`;
+    - DW2 `addr[31:0]` with the low two bits cleared;
+    - `last` on DW2.
+  - For addresses at or above 4 GiB, use MRd64:
+    - DW0 `0x20000001` (Fmt=01, 4-DW header, MRd, length=1);
+    - DW1 `{requester_id, tag, first_be=0xF}`;
+    - DW2 `addr[31:0]`, DW3 `addr[63:32]`;
+    - `last` on DW3.
+- Send the words through `TLP32To64Packer` to `pcie_phy.sink`.
 - Wait for the completion on `pcie_phy.source`:
   - a 1-DWORD CplD is four DWORDs: three header DWORDs plus data;
+  - validate the CplD type `dat[24:32] == 0x4A` and length 1;
   - check completion status bits in DW1 (`status == 0`);
-  - check the data beat is valid (`be[4:8] == 0xF`);
+  - validate the DW2 lower address, tag, and requester ID against the
+    outstanding request; stale completions are dropped;
+  - check the data beat is valid (`last`, `be[4:8] == 0xF`);
   - extract data from the final beat's upper 32 bits.
+- Cpl (`0x0A`) no-data completions are drained and matched before reporting
+  error code 2 (nonzero status) or 3 (unexpected Cpl).
 - Store each completed DWORD into a 1024×32 page buffer, increment the
   address, and continue until `length` DWORDs are complete.
-- Set `done` on success.
+- Set `done` on success; DONE/ERROR/error code are sticky until the next
+  start.
 - Set `error` and stop on:
   - not ready/link down;
   - malformed or non-CplD completion;
   - completion status not Successful;
   - no completion within 10 ms.
 - `rd_index`/`rd_data` expose the completed buffer to the CPU.
-- The DMA accepts only one outstanding request at a time and uses tag 0.
+- The DMA accepts only one outstanding request at a time.
 
 The page buffer is 1024×32 bits = 4 KiB. `rd_index` selects a DWORD; the
 buffer read is registered, so firmware writes `rd_index` and reads `rd_data`
@@ -174,9 +200,11 @@ New `software/soc_console/` package:
 Console:
 
 - 115200 8N1, raw polling UART (`uart_txfull`, `uart_rxempty`,
-  `uart_rxtx`).
+  `uart_rxtx`); RX FIFO reads pop on the CSR read (`uart_rx_fifo_rx_we`).
 - Banner and prompt on boot.
 - Commands:
+  - `status` — print TLPDMA status, PCIe link status, BME, and the assigned
+    requester ID;
   - `dump [addr] [len]`:
     - default address `0x3f000`, default length `0x1000`;
     - address is 64-bit hexadecimal;
@@ -187,7 +215,9 @@ Console:
     - writes address/length, sets `start`, polls `status`;
     - on `error`, prints the error code and stops;
     - on `done`, reads `rd_index`/`rd_data` and prints 16 bytes per line
-      with the physical address;
+      with the physical address, MSB-first within each DWORD so the output
+      matches memory byte order;
+    - while link-ready is false, prints `status` every ~1M polling cycles;
   - `help` — one-screen summary and the arbitrary-read warning.
 - The console warns that arbitrary physical reads may hang or crash the host;
   the VESA default is the safe path.
@@ -209,8 +239,9 @@ Build integration:
 2. Link trains; auto-BME writes the config command; `bme_done` asserts.
 3. CPU waits for `link_ready`.
 4. `dump` latches a 64-bit physical address and a DWORD count.
-5. TLPDMA sends sequential 1-DWORD MRd64 TLPs.
-6. Host completions return as CplDs; TLPDMA validates and stores data.
+5. TLPDMA sends sequential 1-DWORD MRd32 TLPs below 4 GiB (MRd64 above).
+6. Host completions return as CplDs; TLPDMA matches, validates, and stores
+   data.
 7. CPU reads the completed buffer and prints it over serial.
 
 ## Error Handling
@@ -272,6 +303,25 @@ acceptance is boot + VESA match + host alive, not timing closure.
 - The host remains alive and the PCIe device remains enumerated.
 - The PCILeech RX128 bitstream can be reflashed and still works.
 - The existing PCILeech top level elaborates after the packer move.
+
+## Implementation Result (2026-10-28)
+
+- Built bitstream: `bitstreams/soc_squirrel-console.bin`, 822,836 bytes,
+  SHA-256 `25a439bed48e14ad0720a986678338cb51a147225da1f00172e36d29f57031df`.
+- BIOS: 2,728 bytes, SHA-256
+  `ee620316f9b3ae5fe03e41780b975acd0b42dd83131941b901bb37d78db66cf3`,
+  byte-identical to the embedded ROM init.
+- Placed resources: 2,050 LUT, 2,470 registers, 16 BRAM, 4 IOB, 8 BUFG.
+- Timing: WNS +0.686 ns, WHS +0.032 ns, WPWS -0.007 ns on one PCIe hard-IP
+  PIPECLK→USERCLK endpoint; 5 DRC warnings, 0 errors.
+- Serial port: `ttyUSB1` (FT4232H USB interface 1.2), 115200 8N1.
+- `status` after enumeration reports `link=0x163`, `bme=1`, `id=0x1600`,
+  `tlp=0x01`.
+- Default `dump` returned 4,096 bytes matching VESA reference SHA-256
+  `5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db`.
+- `dump 0x1000000 0x40` returned 64 zero bytes with no DMA error; the host
+  remained alive and the PCIe device still enumerated.
+- The PCILeech RX128 fallback was reflashed after testing.
 
 ## Future Work
 
