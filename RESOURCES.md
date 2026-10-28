@@ -239,7 +239,9 @@ above 4 GiB is simulation-verified only. The MRd32 VESA/low-memory path is
 hardware-verified. The known hard-IP WPWS -0.007 ns and five DRC warnings are
 accepted bring-up caveats.
 
-The PCILeech build remains in `pcileech_squirrel.py`; reflash
-`bitstreams/pcie_squirrel-cleanup-rx128.bin` to return to it. The FT601 path
-still frees ~8 BRAM tiles, ~176 LUTs, ~311 registers, and 44 I/O pins when
-removed from a future SoC.
+The PCILeech build remains in `pcileech_squirrel.py`; the RX128 fallback
+`bitstreams/pcie_squirrel-cleanup-rx128.bin` was reflashed and rescanned after
+the SoC test. A live PCILeech VESA dump matched
+`5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db` with
+1/1 page and 0 failures. The FT601 path still frees ~8 BRAM tiles, ~176 LUTs,
+~311 registers, and 44 I/O pins when removed from a future SoC.

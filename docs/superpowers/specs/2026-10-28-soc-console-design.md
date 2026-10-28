@@ -334,7 +334,8 @@ acceptance is boot + VESA match + host alive, not timing closure.
   VESA/low-memory path.
 - The known PCIe hard-IP WPWS -0.007 ns and five DRC warnings are accepted
   bring-up caveats.
-- The PCILeech RX128 fallback was reflashed; its final rescan is user-side.
+- The PCILeech RX128 fallback was reflashed, rescanned, and a live VESA dump
+  matched the reference with 1/1 page and 0 failures.
 
 ## Future Work
 
