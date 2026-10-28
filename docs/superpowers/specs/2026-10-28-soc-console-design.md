@@ -1,7 +1,7 @@
 # PCIe Squirrel VexRiscv Console SoC Design
 
 Date: 2026-10-28
-Status: Approved for implementation planning
+Status: Implemented; MRd32/VESA path hardware-verified
 
 ## Context
 
@@ -322,6 +322,19 @@ acceptance is boot + VESA match + host alive, not timing closure.
 - `dump 0x1000000 0x40` returned 64 zero bytes with no DMA error; the host
   remained alive and the PCIe device still enumerated.
 - The PCILeech RX128 fallback was reflashed after testing.
+
+### Accepted limitations
+
+- The ISSUE state has no independent timeout; if the PCIe TX stream stalls while
+  link-ready stays high, the DMA stays busy and the console must be reset.
+  The tested main path does not hit this.
+- The 8-bit request tag wraps after 256 requests. A completion more than 10 ms
+  late after a timeout could theoretically alias a later request; not observed.
+- MRd64 (above 4 GiB) is simulation-verified; the hardware test used the MRd32
+  VESA/low-memory path.
+- The known PCIe hard-IP WPWS -0.007 ns and five DRC warnings are accepted
+  bring-up caveats.
+- The PCILeech RX128 fallback was reflashed; its final rescan is user-side.
 
 ## Future Work
 
