@@ -1,7 +1,7 @@
 # PCIe Squirrel PCILeechFIFO SoC Variant Design
 
 Date: 2026-10-28
-Status: Approved for implementation planning
+Status: Implemented and hardware-verified (2026-10-28)
 
 ## Context
 
@@ -130,12 +130,12 @@ magic/type/last. The CPU sends one MRd at a time:
 
 - Below 4 GiB: MRd32
   - DW0 `0x00000001` (Fmt=00, 3-DW header, length=1)
-  - DW1 `{requester_id, tag=0, first_be=0xF}`
+  - DW1 `{requester_id, rotating 8-bit tag, first_be=0xF}`
   - DW2 `addr[31:0]`, 4-byte aligned
   - `last` on DW2
 - At or above 4 GiB: MRd64
   - DW0 `0x20000001` (Fmt=01, 4-DW header, length=1)
-  - DW1 `{requester_id, tag=0, first_be=0xF}`
+  - DW1 `{requester_id, rotating 8-bit tag, first_be=0xF}`
   - DW2 `addr[31:0]`, DW3 `addr[63:32]`
   - `last` on DW3
 
@@ -161,11 +161,14 @@ bits  7: 4 0xE      bits  3: 0 ctx[6]
 
 The BIOS parser:
 
-- skips sync words and idle filler (`ctx == 0xF`);
+- skips sync words and idle filler (`ctx == 0xF`); a sync discards any
+  partial CplD state;
 - collects data words with TLP context (`ctx & 0x3 == 0`);
-- uses `ctx & 0x2` as the final-DWORD flag;
+- uses `ctx & 0x4` as the final-DWORD flag (the Migen mux puts
+  `tlp_last` in context bit 2);
 - locates a 1-DWORD CplD (four DWORDs: three header DWORDs plus data);
-- verifies CplD type `0x4A`, completion status, tag, and requester ID;
+- verifies CplD type/length, byte count 4, completion status, tag, requester
+  ID, and lower address;
 - extracts the data DWORD;
 - prints the data MSB-first so the serial output is host memory byte order;
 - ignores CMD/CFG/loopback contexts (none are generated in this variant).
@@ -246,13 +249,39 @@ small relative to the PCILeech mux/TLP buffers.
 8. Record the PCILeechFIFO SoC resource/verification result in
    `RESOURCES.md` and a `SOC_PCILEECH.md` variant note.
 
+## Implementation Result
+
+Implemented and hardware-verified on 2026-10-28. The shipped parser uses the
+final behavior described above: rotating 8-bit request tag, CplD
+type/length/byte-count/lower-address validation, sync/drain handling, and
+`ctx & 0x4` as the last-DWORD flag.
+
+| Item | Result |
+|---|---|
+| Bitstream | `bitstreams/soc_pcileech-console.bin`, 1,280,396 bytes, SHA-256 `c5bd55ec75e618bcf11bfcb8ff9ed4f050fc3f52f576ad1bcc34ec159f236984` |
+| BIOS | `build/soc_pcileech/software/bios/bios.bin`, 3,935 bytes, no undefined symbols |
+| Placed resources | 6,208 LUT / 4,213 FF / 37 BRAM tiles (34 RAMB36 + 6 RAMB18) / 4 IOB / 8 BUFG / 0 DSP |
+| Timing | WNS +0.525 ns, WHS +0.040 ns, WPWS -0.007 ns on the known PCIe hard-IP PIPECLK→USERCLK skew |
+| DRC | 4 warnings, 0 errors |
+| Bridge FIFO | 1024 × 34 RX FIFO inferred as LUTRAM (`RAM64M` × 176), not BRAM |
+| Hardware `status` | `bridge link=1 tx_full=0 rx_empty=1`; `pcie link=0x163 bme=1 id=0x1600` |
+| Default VESA dump | SHA-256 `5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db` |
+| Arbitrary read | `dump 0x1000000 0x40` returned 64 bytes with no mux/TLP error; host remained alive |
+| Fallback | PCILeech RX128 reflashed and a live VESA dump matched the same hash |
+
+The bridge simulation, bridge/PCILeechFIFO integration simulation, and
+first-SoC TLPDMA regression pass. The PCILeechFIFO burst gate adds
+warmup/settle latency, and the CPU-fed path is intentionally not a throughput
+path.
+
 ## Error Handling and Timeouts
 
 - Link not ready: console reports status and waits.
 - TX FIFO full: wait.
-- RX frame sync loss: resynchronize on `0x66665555`; timeout if no valid
-  frame/CplD.
-- CplD status/type/tag/requester mismatch: report and stop.
+- RX frame sync loss: resynchronize on `0x66665555`; drain the bridge RX
+  FIFO at dump start; timeout if no valid frame/CplD.
+- CplD status/type/tag/requester/lower-address/byte-count mismatch: report
+  and stop. A no-data Cpl with status 0 is malformed.
 - No completion within a console-side timeout: report and prompt.
 - No host writes; arbitrary reads use the same warning/default as the first
   SoC.
@@ -277,6 +306,7 @@ small relative to the PCILeech mux/TLP buffers.
 - Create: `software/soc_pcileech_console/Makefile`
 - Create: `software/soc_pcileech_console/linker.ld`
 - Create: `test/test_pcileech_bridge.py`
+- Create: `test/test_pcileech_bridge_integration.py`
 - Create: `SOC_PCILEECH.md`
 - Modify: `RESOURCES.md`
 - Do not modify the first SoC/PCILeech source or bitstreams.

@@ -1,6 +1,6 @@
 # PCIe Squirrel FPGA resource use
 
-Date: 2026-10-27
+Date: 2026-10-28
 
 Device: Xilinx XC7A35T-FGG484-2, Vivado 2021.2, placed utilization.
 The default (large FIFO) design is the committed 128-bit RX path.
@@ -245,3 +245,51 @@ the SoC test. A live PCILeech VESA dump matched
 `5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db` with
 1/1 page and 0 failures. The FT601 path still frees ~8 BRAM tiles, ~176 LUTs,
 ~311 registers, and 44 I/O pins when removed from a future SoC.
+
+## PCILeechFIFO SoC variant (2026-10-28)
+
+A second separate SoC build, `soc_pcileech.py`, reuses the existing
+`PCILeechFIFO` large configuration (`mux_out_fifo_depth=2048`,
+`tlp_rx_fifo_depth=2048`) and its mux, but feeds and reads the FIFO from a
+VexRiscv CPU through a 256 × 32 TX / 1024 × 32 RX CSR bridge instead of an
+FT601. The CPU sends PCILeech TLP data/flag words and parses the serializer's
+8-word context frames; no host CMD/CFG init is used. The first SoC/PCILeech
+tables above are unchanged.
+
+| Resource | Used | Available | Util |
+|---|---:|---:|---:|
+| Slice LUTs | 6,208 | 20,800 | 29.85% |
+| — LUT as logic | 4,881 | 20,800 | 23.47% |
+| — LUT as memory | 1,327 | 9,600 | 13.82% |
+| Slice registers | 4,213 | 41,600 | 10.13% |
+| Block RAM tiles | 37 | 50 | 74.00% |
+| — RAMB36 | 34 | 50 | 68.00% |
+| — RAMB18 | 6 | 100 | 6.00% |
+| DSP slices | 0 | 90 | 0.00% |
+| Bonded IOB | 4 | 250 | 1.60% |
+| BUFGCTRL | 8 | 32 | 25.00% |
+
+The BIOS image is 3,935 bytes in the 32 KiB ROM region with no undefined
+symbols; the SRAM is 8 KiB. Bridge FIFOs did not use BRAM: the 1024 × 34 RX
+FIFO was inferred as distributed LUTRAM (`RAM64M` × 176), not block RAM,
+leaving the BRAM total at 37/50 tiles while raising LUT-as-memory use.
+
+The bitstream is `bitstreams/soc_pcileech-console.bin`, 1,280,396 bytes,
+SHA-256 `c5bd55ec75e618bcf11bfcb8ff9ed4f050fc3f52f576ad1bcc34ec159f236984`.
+Timing: WNS +0.525 ns, WHS +0.040 ns, WPWS -0.007 ns on the known PCIe
+hard-IP PIPECLK→USERCLK skew; 4 DRC warnings, 0 errors.
+
+Hardware results: serial `status` reported
+`bridge link=1 tx_full=0 rx_empty=1` and
+`pcie link=0x163 bme=1 id=0x1600`. The default VESA dump matched SHA-256
+`5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db`;
+`dump 0x1000000 0x40` returned 64 bytes with no mux/TLP error, and the host
+remained alive. The PCILeech RX128 fallback was reflashed and a live VESA
+dump matched the same hash.
+
+Accepted variant limitations: no CPU DMA, host writes, multi-DWORD MRds,
+CMD/CFG/loopback host emulation, or MSI; the PCILeechFIFO burst gate adds
+warmup/settle latency; auto-BME is one-shot; MRd64 above 4 GiB is
+simulation-only; the bridge RX FIFO LUTRAM inference is accepted; and the
+known hard-IP WPWS/DRC caveats remain. The PCILeechFIFO timeout watchdog
+`force_pcie_reset` is not wired to the PCIe reset.
