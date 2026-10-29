@@ -31,7 +31,8 @@ def expect_mrd64(dut, addr, length, tag):
 
     length_field = 0 if length == 1024 else length
     dw0 = 0x20000000 | length_field
-    dw1 = (REQ_ID << 16) | (tag << 8) | 0x0f
+    last_be = 0x0f if length == 1 else 0xff
+    dw1 = (REQ_ID << 16) | (tag << 8) | last_be
     expected0 = (dw1 << 32) | dw0
     expected1 = ((addr >> 32) << 32) | (addr & 0xfffffffc)
 
@@ -41,6 +42,12 @@ def expect_mrd64(dut, addr, length, tag):
     assert beats[1][0] == expected1, hex(beats[1][0])
     assert beats[1][1] == 1
     assert beats[1][2] == 0xff
+
+
+def expect_no_tx(dut, cycles=10):
+    for _ in range(cycles):
+        assert not (yield dut.tlp_tx.valid)
+        yield
 
 
 def tb_request(dut):
@@ -54,11 +61,30 @@ def tb_request(dut):
     yield from dut.buffer.write(0)
     yield from dut.start.write(1)
     yield from expect_mrd64(dut, 0x1_0003_f000, 1024, 0)
+    yield from expect_no_tx(dut)
+
+
+def tb_request_single(dut):
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x0003f002)
+    yield from dut.addr_hi.write(1)
+    yield from dut.length.write(1)
+    yield from dut.buffer.write(1)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x1_0003_f000, 1, 0)
+    yield from expect_no_tx(dut)
 
 
 def main():
     dut = ChunkDMA()
     run_simulation(dut, tb_request(dut))
+
+    dut = ChunkDMA()
+    run_simulation(dut, tb_request_single(dut))
+
     print("ChunkDMA request simulation OK")
 
 

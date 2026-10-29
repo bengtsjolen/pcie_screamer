@@ -92,7 +92,8 @@ class ChunkDMA(Module, AutoCSR):
                     NextValue(req_tag, tag),
                     NextValue(tag, tag + 1),
                     NextValue(addr, Cat(self.addr_lo.storage,
-                                        self.addr_hi.storage)),
+                                        self.addr_hi.storage) &
+                                      0xFFFFFFFFFFFFFFFC),
                     NextValue(count, self.length.storage),
                     NextValue(wr_buf, self.buffer.storage),
                     NextValue(word, 0),
@@ -108,7 +109,8 @@ class ChunkDMA(Module, AutoCSR):
                 0: sink.dat.eq(0x20000000 |
                                Mux(count == 1024, 0, count)),
                 1: sink.dat.eq((self.requester_id << 16) |
-                               (req_tag << 8) | 0x0f),
+                               (req_tag << 8) |
+                               Mux(count == 1, 0x0f, 0xff)),
                 2: sink.dat.eq(addr[0:32]),
                 3: sink.dat.eq(addr[32:64]),
             }),
