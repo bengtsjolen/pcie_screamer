@@ -1398,7 +1398,17 @@ scan 0x3f000 0x1000 0x41534556 0xf1000300 0x00013000 0xf0220000
 
 Expected: `match 0x000000000003f000`.
 
-- [ ] **Step 4: Verify no-match and post-match behavior**
+- [ ] **Step 4: Verify ping-pong and no-match behavior
+
+A two-chunk VESA scan exercises the second buffer:
+
+```text
+scan 0x3e000 0x2000 0x41534556 0xf1000300 0x00013000 0xf0220000
+```
+
+Expected: `match 0x000000000003f000` (chunk 0 no-match, chunk 1 match).
+
+Then:
 
 ```text
 scan 0x3f010 0x1000 0x41534556 0xf1000300 0x00013000 0xf0220000
@@ -1409,14 +1419,17 @@ inspect the returned address).
 
 - [ ] **Step 5: Measure a long scan**
 
-Use a pattern unlikely to occur and a long range, for example:
+`/proc/iomem` addresses are masked on this host (kptr_restrict), so use a
+RAM range above 4 GiB on the 78 GiB host, e.g.:
 
 ```text
-scan 0x40000 0x17ffc0000 0xdeadbeef 0x01234567 0x89abcdef 0xfedcba98
+scan 0x100000000 0x180000000 0xdeadbeef 0x01234567 0x89abcdef 0xfedcba98
 ```
 
 Expected: progress lines every 256 MB, then `no match`; no per-candidate
 UART output; host remains alive. Record elapsed time and calculate MB/s.
+If a DMA error occurs, record the error/range and try a smaller RAM-only
+range; do not report no-match after an error.
 
 - [ ] **Step 6: Restore the PCILeech fallback**
 
