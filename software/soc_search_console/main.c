@@ -250,9 +250,9 @@ static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4])
 	uint64_t next_progress = 256ull * 1024 * 1024;
 	uint64_t match;
 	uint32_t current_len;
-	uint32_t next_len;
+	uint32_t next_len = 0;
 	uint32_t current_buf = 0;
-	uint32_t next_buf;
+	uint32_t next_buf = 0;
 	uint32_t wait_count = 0;
 	int have_next;
 
