@@ -20,6 +20,7 @@ class ChunkDMA(Module, AutoCSR):
         self.rd_buffer = CSRStorage(1)
         self.rd_index = CSRStorage(9)
         self.rd_data = CSRStatus(64)
+        self.debug = CSRStatus(64)
 
         self.link_ready = Signal()
         self.requester_id = Signal(16)
@@ -40,6 +41,7 @@ class ChunkDMA(Module, AutoCSR):
         done = Signal()
         error = Signal()
         error_code = Signal(4)
+        debug = Signal(64)
         tag = Signal(8)
         req_tag = Signal(8)
         addr = Signal(64)
@@ -60,6 +62,7 @@ class ChunkDMA(Module, AutoCSR):
         self.comb += [
             self.status.status.eq(Cat(self.link_ready, busy, done, error)),
             self.error.status.eq(error_code),
+            self.debug.status.eq(debug),
             rp0.adr.eq(self.rd_index.storage),
             rp1.adr.eq(self.rd_index.storage),
             self.rd_data.status.eq(Mux(self.rd_buffer.storage,
@@ -148,6 +151,7 @@ class ChunkDMA(Module, AutoCSR):
             self.tlp_rx.ready.eq(1),
             If(self.tlp_rx.valid,
                 If(self.tlp_rx.dat[24:32] != 0x4a,
+                    NextValue(debug, self.tlp_rx.dat),
                     NextValue(busy, 0),
                     NextValue(error, 1),
                     NextValue(error_code, 6),
@@ -155,6 +159,7 @@ class ChunkDMA(Module, AutoCSR):
                 ).Elif(self.tlp_rx.dat[45:48] != 0,
                     NextValue(busy, 0),
                     NextValue(error, 1),
+                    NextValue(debug, self.tlp_rx.dat),
                     NextValue(error_code, 2),
                     NextState("ERROR"),
                 ).Elif(self.tlp_rx.dat[32:44] !=
@@ -162,6 +167,7 @@ class ChunkDMA(Module, AutoCSR):
                            self.tlp_rx.dat[0:10] * 4),
                     NextValue(busy, 0),
                     NextValue(error, 1),
+                    NextValue(debug, self.tlp_rx.dat),
                     NextValue(error_code, 7),
                     NextState("ERROR"),
                 ).Elif((data_count >= count) |
@@ -170,6 +176,7 @@ class ChunkDMA(Module, AutoCSR):
                         (count - data_count)),
                     NextValue(busy, 0),
                     NextValue(error, 1),
+                    NextValue(debug, self.tlp_rx.dat),
                     NextValue(error_code, 8),
                     NextState("ERROR"),
                 ).Else(
@@ -203,6 +210,7 @@ class ChunkDMA(Module, AutoCSR):
                    (self.tlp_rx.dat[8:16] != req_tag) |
                    (self.tlp_rx.dat[16:32] != self.requester_id),
                     NextValue(busy, 0),
+                    NextValue(debug, self.tlp_rx.dat),
                     NextValue(error, 1),
                     NextValue(error_code, 9),
                     NextState("ERROR"),
@@ -309,11 +317,13 @@ class ChunkDMA(Module, AutoCSR):
         fsm.act("CPL_END",
             NextValue(wr_en, 0),
             If(cpl_count != cpl_len,
+                NextValue(debug, Cat(cpl_count, cpl_len, data_count)),
                 NextValue(busy, 0),
                 NextValue(error, 1),
                 NextValue(error_code, 10),
                 NextState("ERROR"),
             ).Elif(data_count > count,
+                NextValue(debug, Cat(cpl_count, cpl_len, data_count)),
                 NextValue(busy, 0),
                 NextValue(error, 1),
                 NextValue(error_code, 11),

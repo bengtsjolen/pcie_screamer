@@ -65,6 +65,8 @@ static void print_status(void)
 	uart_putc((pcie_phy_bus_master_enable_read() & 1) ? '1' : '0');
 	uart_puts(" id=0x");
 	put_hex32(main_pcie_id_read(), 4);
+	uart_puts(" dbg=0x");
+	put_hex64(chunk_dma_debug_read());
 	uart_puts("\r\n");
 }
 
