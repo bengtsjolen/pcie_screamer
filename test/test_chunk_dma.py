@@ -308,7 +308,7 @@ def tb_tag_error(dut):
     yield from expect_mrd64(dut, 0x3f000, 1, 0)
     yield from cpl_chunk(dut, [0x12345678], 0x3f000, 1)
     yield from wait_status(dut, STATUS_ERROR)
-    assert (yield from dut.error.read()) == 3
+    assert (yield from dut.error.read()) == 9
 
 
 def start_one(dut, length=1, buffer=0):
@@ -330,7 +330,7 @@ def tb_lower_error(dut):
     yield from beat(dut, (REQ_ID << 16) | 4, 0x11111111,
                     be=0xf0, last=1)
     yield from wait_status(dut, STATUS_ERROR)
-    assert (yield from dut.error.read()) == 3
+    assert (yield from dut.error.read()) == 9
 
 
 def tb_byte_error(dut):
@@ -338,7 +338,7 @@ def tb_byte_error(dut):
     yield from expect_mrd64(dut, 0x3f000, 1, 0)
     yield from beat(dut, (0x4a << 24) | 1, 8, be=0xff, last=0)
     yield from wait_status(dut, STATUS_ERROR)
-    assert (yield from dut.error.read()) == 3
+    assert (yield from dut.error.read()) == 7
 
 
 def tb_requester_error(dut):
@@ -348,7 +348,7 @@ def tb_requester_error(dut):
     yield from beat(dut, (0x1111 << 16) | 0, 0x11111111,
                     be=0xf0, last=1)
     yield from wait_status(dut, STATUS_ERROR)
-    assert (yield from dut.error.read()) == 3
+    assert (yield from dut.error.read()) == 9
 
 
 def tb_long_error(dut):
@@ -356,7 +356,7 @@ def tb_long_error(dut):
     yield from expect_mrd64(dut, 0x3f000, 1, 0)
     yield from beat(dut, (0x4a << 24) | 2, 8, be=0xff, last=0)
     yield from wait_status(dut, STATUS_ERROR)
-    assert (yield from dut.error.read()) == 3
+    assert (yield from dut.error.read()) == 8
 
 
 def tb_retry(dut):
@@ -383,7 +383,7 @@ def tb_restart_error(dut):
     yield from beat(dut, (REQ_ID << 16) | (1 << 8) | 0x20,
                     first[8], be=0xff, last=0)
     yield from wait_status(dut, STATUS_ERROR)
-    assert (yield from dut.error.read()) == 3
+    assert (yield from dut.error.read()) == 9
     yield from check_buffer(dut, 0, first[:8])
 
     yield from start_one(dut, length=16)
@@ -417,7 +417,7 @@ def tb_overlength(dut):
     yield from cpl_chunk(dut, data[:8], 0x3f000, 0)
     yield from beat(dut, (0x4a << 24) | 9, 9 * 4, be=0xff, last=0)
     yield from wait_status(dut, STATUS_ERROR)
-    assert (yield from dut.error.read()) == 3
+    assert (yield from dut.error.read()) == 8
 
 
 def tb_link_loss(dut):
