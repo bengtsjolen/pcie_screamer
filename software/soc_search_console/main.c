@@ -217,6 +217,14 @@ static int start_chunk(uint64_t addr, uint32_t len, uint32_t buffer)
 	return 0;
 }
 
+static uint32_t bswap32(uint32_t v)
+{
+	return ((v & 0x000000ffu) << 24) |
+	       ((v & 0x0000ff00u) << 8) |
+	       ((v & 0x00ff0000u) >> 8) |
+	       ((v & 0xff000000u) >> 24);
+}
+
 static int scan_buffer(uint32_t buffer, uint64_t addr, uint32_t len,
 		       const uint32_t pattern[4], uint64_t *match)
 {
@@ -230,15 +238,15 @@ static int scan_buffer(uint32_t buffer, uint64_t addr, uint32_t len,
 		chunk_dma_rd_index_write(off / 8);
 		asm volatile("nop; nop; nop; nop;" ::: "memory");
 		pair0 = chunk_dma_rd_data_read();
-		if ((uint32_t)pair0 != pattern[0])
+		if (bswap32((uint32_t)pair0) != pattern[0])
 			continue;
 
 		chunk_dma_rd_index_write(off / 8 + 1);
 		asm volatile("nop; nop; nop; nop;" ::: "memory");
 		pair1 = chunk_dma_rd_data_read();
-		if ((uint32_t)(pair0 >> 32) != pattern[1] ||
-		    (uint32_t)pair1 != pattern[2] ||
-		    (uint32_t)(pair1 >> 32) != pattern[3])
+		if (bswap32((uint32_t)(pair0 >> 32)) != pattern[1] ||
+		    bswap32((uint32_t)pair1) != pattern[2] ||
+		    bswap32((uint32_t)(pair1 >> 32)) != pattern[3])
 			continue;
 
 		*match = addr + off;
