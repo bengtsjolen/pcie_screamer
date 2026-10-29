@@ -161,6 +161,9 @@ def main():
     run_simulation(dut, tb_request(dut))
 
     dut = ChunkDMA()
+    run_simulation(dut, tb_request_single(dut))
+
+    dut = ChunkDMA()
     run_simulation(dut, tb_single(dut))
 
     print("ChunkDMA simulation OK")
