@@ -44,6 +44,11 @@ class ChunkDMA(Module, AutoCSR):
         req_tag = Signal(8)
         addr = Signal(64)
         count = Signal(11)
+        data_count = Signal(11)
+        cpl_len = Signal(11)
+        cpl_count = Signal(11)
+        pending = Signal(32)
+        pending_valid = Signal()
         word = Signal(2)
         timeout = Signal(max=timeout_cycles)
 
@@ -74,6 +79,7 @@ class ChunkDMA(Module, AutoCSR):
         self.submodules.fsm = fsm = FSM(reset_state="IDLE")
 
         fsm.act("IDLE",
+            NextValue(wr_en, 0),
             If(self.start.re & self.start.storage & ~busy,
                 NextValue(done, 0),
                 NextValue(error, 0),
@@ -103,6 +109,7 @@ class ChunkDMA(Module, AutoCSR):
         )
 
         fsm.act("ISSUE",
+            NextValue(wr_en, 0),
             sink.valid.eq(self.link_ready),
             sink.be.eq(0xf),
             Case(word, {
@@ -131,10 +138,196 @@ class ChunkDMA(Module, AutoCSR):
             ),
         )
 
-        # Completion parsing is added in Task 2.
-        fsm.act("CPL_H0", NextState("CPL_H0"))
+        fsm.act("CPL_H0",
+            NextValue(wr_en, 0),
+            self.tlp_rx.ready.eq(1),
+            If(self.tlp_rx.valid,
+                If(self.tlp_rx.dat[24:32] != 0x4a,
+                    NextValue(busy, 0),
+                    NextValue(error, 1),
+                    NextValue(error_code, 3),
+                    NextState("ERROR"),
+                ).Elif(self.tlp_rx.dat[45:48] != 0,
+                    NextValue(busy, 0),
+                    NextValue(error, 1),
+                    NextValue(error_code, 2),
+                    NextState("ERROR"),
+                ).Elif(self.tlp_rx.dat[32:44] !=
+                       Mux(self.tlp_rx.dat[0:10] == 0, 0,
+                           self.tlp_rx.dat[0:10] * 4),
+                    NextValue(busy, 0),
+                    NextValue(error, 1),
+                    NextValue(error_code, 3),
+                    NextState("ERROR"),
+                ).Elif(Mux(self.tlp_rx.dat[0:10] == 0, 1024,
+                           self.tlp_rx.dat[0:10]) > (count - data_count),
+                    NextValue(busy, 0),
+                    NextValue(error, 1),
+                    NextValue(error_code, 3),
+                    NextState("ERROR"),
+                ).Else(
+                    NextValue(cpl_len, Mux(self.tlp_rx.dat[0:10] == 0,
+                                           1024, self.tlp_rx.dat[0:10])),
+                    NextValue(cpl_count, 0),
+                    NextValue(timeout, 0),
+                    NextState("CPL_H1"),
+                )
+            ).Elif(~self.link_ready,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 1),
+                NextState("ERROR"),
+            ).Elif(timeout == timeout_cycles - 1,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 4),
+                NextState("ERROR"),
+            ).Else(
+                NextValue(timeout, timeout + 1),
+            ),
+        )
+
+        fsm.act("CPL_H1",
+            NextValue(wr_en, 0),
+            self.tlp_rx.ready.eq(1),
+            If(self.tlp_rx.valid,
+                If((self.tlp_rx.dat[0:7] !=
+                    (addr + (data_count << 2))[0:7]) |
+                   (self.tlp_rx.dat[8:16] != req_tag) |
+                   (self.tlp_rx.dat[16:32] != self.requester_id),
+                    NextValue(busy, 0),
+                    NextValue(error, 1),
+                    NextValue(error_code, 3),
+                    NextState("ERROR"),
+                ).Else(
+                    NextValue(data_count, data_count + 1),
+                    NextValue(cpl_count, 1),
+                    If(pending_valid,
+                        NextValue(wr_en, 1),
+                        NextValue(wr_addr, data_count >> 1),
+                        NextValue(wr_data, Cat(pending,
+                                               self.tlp_rx.dat[32:64])),
+                        NextValue(pending_valid, 0),
+                    ).Else(
+                        NextValue(pending, self.tlp_rx.dat[32:64]),
+                        NextValue(pending_valid, 1),
+                    ),
+                    If(self.tlp_rx.last,
+                        NextState("CPL_END"),
+                    ).Else(
+                        NextState("CPL_D"),
+                    ),
+                )
+            ).Elif(~self.link_ready,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 1),
+                NextState("ERROR"),
+            ).Elif(timeout == timeout_cycles - 1,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 4),
+                NextState("ERROR"),
+            ).Else(
+                NextValue(timeout, timeout + 1),
+            ),
+        )
+
+        fsm.act("CPL_D",
+            NextValue(wr_en, 0),
+            self.tlp_rx.ready.eq(1),
+            If(self.tlp_rx.valid,
+                If((self.tlp_rx.be[0:4] != 0) & (self.tlp_rx.be[4:8] != 0),
+                    If(pending_valid,
+                        NextValue(wr_en, 1),
+                        NextValue(wr_addr, data_count >> 1),
+                        NextValue(wr_data, Cat(pending,
+                                               self.tlp_rx.dat[0:32])),
+                        NextValue(pending, self.tlp_rx.dat[32:64]),
+                        NextValue(pending_valid, 1),
+                    ).Else(
+                        NextValue(wr_en, 1),
+                        NextValue(wr_addr, data_count >> 1),
+                        NextValue(wr_data, Cat(self.tlp_rx.dat[0:32],
+                                               self.tlp_rx.dat[32:64])),
+                        NextValue(pending_valid, 0),
+                    ),
+                    NextValue(data_count, data_count + 2),
+                    NextValue(cpl_count, cpl_count + 2),
+                ).Elif(self.tlp_rx.be[0:4] != 0,
+                    If(pending_valid,
+                        NextValue(wr_en, 1),
+                        NextValue(wr_addr, data_count >> 1),
+                        NextValue(wr_data, Cat(pending,
+                                               self.tlp_rx.dat[0:32])),
+                        NextValue(pending_valid, 0),
+                    ).Else(
+                        NextValue(pending, self.tlp_rx.dat[0:32]),
+                        NextValue(pending_valid, 1),
+                    ),
+                    NextValue(data_count, data_count + 1),
+                    NextValue(cpl_count, cpl_count + 1),
+                ).Elif(self.tlp_rx.be[4:8] != 0,
+                    If(pending_valid,
+                        NextValue(wr_en, 1),
+                        NextValue(wr_addr, data_count >> 1),
+                        NextValue(wr_data, Cat(pending,
+                                               self.tlp_rx.dat[32:64])),
+                        NextValue(pending_valid, 0),
+                    ).Else(
+                        NextValue(pending, self.tlp_rx.dat[32:64]),
+                        NextValue(pending_valid, 1),
+                    ),
+                    NextValue(data_count, data_count + 1),
+                    NextValue(cpl_count, cpl_count + 1),
+                ),
+                If(self.tlp_rx.last,
+                    NextState("CPL_END"),
+                ),
+            ).Elif(~self.link_ready,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 1),
+                NextState("ERROR"),
+            ).Elif(timeout == timeout_cycles - 1,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 4),
+                NextState("ERROR"),
+            ).Else(
+                NextValue(timeout, timeout + 1),
+            ),
+        )
+
+        fsm.act("CPL_END",
+            NextValue(wr_en, 0),
+            If(cpl_count != cpl_len,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 3),
+                NextState("ERROR"),
+            ).Elif(data_count > count,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 3),
+                NextState("ERROR"),
+            ).Elif(data_count == count,
+                If(pending_valid,
+                    NextValue(wr_en, 1),
+                    NextValue(wr_addr, data_count >> 1),
+                    NextValue(wr_data, Cat(pending, Constant(0, 32))),
+                ),
+                NextValue(busy, 0),
+                NextValue(done, 1),
+                NextState("IDLE"),
+            ).Else(
+                NextValue(timeout, 0),
+                NextState("CPL_H0"),
+            ),
+        )
 
         fsm.act("ERROR",
+            NextValue(wr_en, 0),
             packer.reset.eq(1),
             NextValue(busy, 0),
             NextValue(error, 1),

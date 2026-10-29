@@ -78,14 +78,92 @@ def tb_request_single(dut):
     yield from expect_no_tx(dut)
 
 
+def beat(dut, dw0, dw1, be=0xff, last=0):
+    yield dut.tlp_rx.dat.eq((dw1 << 32) | dw0)
+    yield dut.tlp_rx.be.eq(be)
+    yield dut.tlp_rx.last.eq(last)
+    yield dut.tlp_rx.valid.eq(1)
+    yield
+    for _ in range(100):
+        if (yield dut.tlp_rx.ready):
+            break
+        yield
+    else:
+        raise AssertionError("tlp_rx.ready not asserted")
+    yield dut.tlp_rx.valid.eq(0)
+
+
+def cpl_chunk(dut, data, addr, tag):
+    assert 1 <= len(data) <= 1024
+    length = len(data) & 0x3ff
+    dw0 = (0x4a << 24) | length
+    dw1 = (len(data) * 4) & 0xfff
+    dw2 = (REQ_ID << 16) | ((tag & 0xff) << 8) | (addr & 0x7f)
+
+    beats = [(dw0, dw1, 0xff, 0)]
+    beats.append((dw2, data[0], 0xff, len(data) == 1))
+    i = 1
+    while i + 1 < len(data):
+        last = int(i + 2 == len(data))
+        beats.append((data[i], data[i + 1], 0xff, last))
+        i += 2
+    if i < len(data):
+        beats.append((data[i], 0, 0x0f, 1))
+
+    for dw0, dw1, be, last in beats:
+        yield from beat(dut, dw0, dw1, be, last)
+
+
+def wait_status(dut, mask, timeout=4000):
+    for _ in range(timeout):
+        status = yield from dut.status.read()
+        if status & mask:
+            return status
+        yield
+    raise AssertionError("status mask not reached")
+
+
+def read64(dut, buffer, index):
+    yield from dut.rd_buffer.write(buffer)
+    yield from dut.rd_index.write(index)
+    yield
+    yield
+    return (yield from dut.rd_data.read())
+
+
+def tb_single(dut):
+    data = [0x10000000 + i for i in range(1024)]
+
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x0003f000)
+    yield from dut.addr_hi.write(1)
+    yield from dut.length.write(1024)
+    yield from dut.buffer.write(0)
+    yield from dut.start.write(1)
+
+    yield from expect_mrd64(dut, 0x1_0003_f000, 1024, 0)
+    yield from cpl_chunk(dut, data, 0x3f000, 0)
+
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
+    for i in range(512):
+        value = yield from read64(dut, 0, i)
+        assert (value & 0xffffffff) == data[2 * i]
+        assert (value >> 32) == data[2 * i + 1]
+
+
 def main():
     dut = ChunkDMA()
     run_simulation(dut, tb_request(dut))
 
     dut = ChunkDMA()
-    run_simulation(dut, tb_request_single(dut))
+    run_simulation(dut, tb_single(dut))
 
-    print("ChunkDMA request simulation OK")
+    print("ChunkDMA simulation OK")
 
 
 if __name__ == "__main__":
