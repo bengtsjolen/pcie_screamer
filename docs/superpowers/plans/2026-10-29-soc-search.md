@@ -1425,7 +1425,9 @@ UART output; host remains alive. Record elapsed time and calculate MB/s.
 ./rescan.sh
 ```
 
-Ask the user to rescan; verify a live VESA dump matches
+Ask the user to rescan; verify the fallback SHA-256 is
+`33848540d0efaacbd975321ff99ea14108051451be81c75fb5eb44f9e9e2297b`
+and a live VESA dump matches
 `5c091e71f7c3190d947f78769b0cc226d1c340c66c5e955244ff40e0f4a4c8db`.
 
 ## Task 8: Documentation and commit
