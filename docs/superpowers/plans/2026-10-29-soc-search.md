@@ -634,6 +634,20 @@ git commit -m "add ChunkDMA completion parser and buffers"
 - Modify: `gateware/chunk_dma.py`
 - Modify: `test/test_chunk_dma.py`
 
+**Required carry-over from Task 2 review:**
+
+- Reset `data_count`, `pending`, `pending_valid`, `cpl_len`, and `cpl_count`
+  in the IDLE start branch before ISSUE. Without this, the second transfer
+  fails because `data_count` is already at `count`.
+- Make the `CPL_H0` remaining-length guard underflow-safe:
+  reject when `data_count >= count` or
+  `cpl_len > count - data_count`.
+- Restore the single-DW regression in `main()` (already done in `438e80e`).
+- Add restart coverage: the ping-pong test is the primary multi-start test;
+  also add a second start after a valid failure.
+- Add negative completions for wrong lower address, wrong byte count, wrong
+  requester ID, and a CplD length larger than the remaining chunk.
+
 - [ ] **Step 1: Add failing split/ping-pong/error tests**
 
 Append:
@@ -798,15 +812,119 @@ Run:
 venv/bin/python test/test_chunk_dma.py
 ```
 
-Expected: the split/ping-pong/partial tests may pass immediately because the
-Task 2 parser already returns to `CPL_H0` after a split CplD. If any test
-fails, use Step 3 to fix the parser; do not weaken the test.
+Expected: `tb_split` and `tb_partial` may pass because the Task 2 parser
+already returns to `CPL_H0` when `data_count < count`. `tb_pingpong` should
+fail on the second start until the IDLE lifecycle reset is added in Step 3.
+`tb_error`/`tb_cpl_error`/`tb_tag_error` should pass. Do not weaken tests.
 
-- [ ] **Step 3: Fix split handling and add timeout/tag coverage**
+- [ ] **Step 3: Fix lifecycle, underflow, and add negative coverage**
+
+First add the resets to the IDLE start branch:
+
+```python
+                    NextValue(data_count, 0),
+                    NextValue(pending, 0),
+                    NextValue(pending_valid, 0),
+                    NextValue(cpl_len, 0),
+                    NextValue(cpl_count, 0),
+```
+
+Then make the `CPL_H0` remaining guard underflow-safe:
+
+```python
+                ).Elif((data_count >= count) |
+                       (Mux(self.tlp_rx.dat[0:10] == 0, 1024,
+                            self.tlp_rx.dat[0:10]) >
+                        (count - data_count)),
+```
 
 The Task 2 parser already returns to `CPL_H0` when `data_count < count`, so a
 split CplD should work. Verify the lower-address check uses the *total* data
 count, not the per-CplD count.
+
+Add these negative/restart tests:
+
+```python
+def start_one(dut, length=1, buffer=0):
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x3f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(length)
+    yield from dut.buffer.write(buffer)
+    yield from dut.start.write(1)
+
+
+def tb_lower_error(dut):
+    yield from start_one(dut)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from beat(dut, (0x4a << 24) | 1, 4, be=0xff, last=0)
+    yield from beat(dut, (REQ_ID << 16) | 4, 0x11111111,
+                    be=0xf0, last=1)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def tb_byte_error(dut):
+    yield from start_one(dut)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from beat(dut, (0x4a << 24) | 1, 8, be=0xff, last=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def tb_requester_error(dut):
+    yield from start_one(dut)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from beat(dut, (0x4a << 24) | 1, 4, be=0xff, last=0)
+    yield from beat(dut, (0x1111 << 16) | 0, 0x11111111,
+                    be=0xf0, last=1)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def tb_long_error(dut):
+    yield from start_one(dut)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from beat(dut, (0x4a << 24) | 2, 8, be=0xff, last=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def tb_retry(dut):
+    yield from start_one(dut, length=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 5
+
+    yield from start_one(dut, length=16)
+    yield from expect_mrd64(dut, 0x3f000, 16, 0)
+    yield from cpl_chunk(dut, [0x60000000 + i for i in range(16)],
+                         0x3f000, 0)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
+```
+
+Add these to `main()`:
+
+```python
+    dut = ChunkDMA()
+    run_simulation(dut, tb_lower_error(dut))
+
+    dut = ChunkDMA()
+    run_simulation(dut, tb_byte_error(dut))
+
+    dut = ChunkDMA()
+    run_simulation(dut, tb_requester_error(dut))
+
+    dut = ChunkDMA()
+    run_simulation(dut, tb_long_error(dut))
+
+    dut = ChunkDMA()
+    run_simulation(dut, tb_retry(dut))
+```
 
 If `tb_split` fails, inspect:
 
