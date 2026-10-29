@@ -30,21 +30,23 @@ def expect_mrd64(dut, addr, length, tag):
         yield
 
     length_field = 0 if length == 1024 else length
-    dw0 = 0x20000000 | length_field
     last_be = 0x0f if length == 1 else 0xff
+    is64 = (addr >> 32) != 0
+    dw0 = (0x20000000 if is64 else 0) | length_field
     dw1 = (REQ_ID << 16) | (tag << 8) | last_be
     expected0 = (dw1 << 32) | dw0
-    expected1 = ((addr >> 32) << 32) | (addr & 0xfffffffc)
+    expected1 = (((addr >> 32) << 32) | (addr & 0xfffffffc)
+                 if is64 else (addr & 0xfffffffc))
 
     assert beats[0][0] == expected0, hex(beats[0][0])
     assert beats[0][1] == 0
     assert beats[0][2] == 0xff
     assert beats[1][0] == expected1, hex(beats[1][0])
     assert beats[1][1] == 1
-    assert beats[1][2] == 0xff
+    assert beats[1][2] == (0xff if is64 else 0x0f)
 
 
-def expect_no_tx(dut, cycles=10):
+def expect_no_tx(dut, cycles=20):
     for _ in range(cycles):
         assert not (yield dut.tlp_tx.valid)
         yield
@@ -93,11 +95,13 @@ def beat(dut, dw0, dw1, be=0xff, last=0):
     yield dut.tlp_rx.valid.eq(0)
 
 
-def cpl_chunk(dut, data, addr, tag):
+def cpl_chunk(dut, data, addr, tag, remaining=None):
     assert 1 <= len(data) <= 1024
+    if remaining is None:
+        remaining = len(data)
     length = len(data) & 0x3ff
     dw0 = (0x4a << 24) | length
-    dw1 = (len(data) * 4) & 0xfff
+    dw1 = (remaining * 4) & 0xfff
     dw2 = (REQ_ID << 16) | ((tag & 0xff) << 8) | (addr & 0x7f)
 
     beats = [(dw0, dw1, 0xff, 0)]
@@ -176,8 +180,8 @@ def tb_split(dut):
     yield from dut.buffer.write(0)
     yield from dut.start.write(1)
     yield from expect_mrd64(dut, 0x3f000, 1024, 0)
-    yield from cpl_chunk(dut, data[:512], 0x3f000, 0)
-    yield from cpl_chunk(dut, data[512:], 0x3f800, 0)
+    yield from cpl_chunk(dut, data[:512], 0x3f000, 0, remaining=1024)
+    yield from cpl_chunk(dut, data[512:], 0x3f800, 0, remaining=512)
     status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
     assert status & STATUS_DONE
     assert not (status & STATUS_ERROR)
@@ -199,8 +203,8 @@ def tb_split_odd(dut):
     yield from dut.buffer.write(0)
     yield from dut.start.write(1)
     yield from expect_mrd64(dut, 0x3f000, 1024, 0)
-    yield from cpl_chunk(dut, data[:513], 0x3f000, 0)
-    yield from cpl_chunk(dut, data[513:], 0x3f804, 0)
+    yield from cpl_chunk(dut, data[:513], 0x3f000, 0, remaining=1024)
+    yield from cpl_chunk(dut, data[513:], 0x3f804, 0, remaining=511)
     status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
     assert status & STATUS_DONE
     assert not (status & STATUS_ERROR)
@@ -354,7 +358,7 @@ def tb_requester_error(dut):
 def tb_long_error(dut):
     yield from start_one(dut)
     yield from expect_mrd64(dut, 0x3f000, 1, 0)
-    yield from beat(dut, (0x4a << 24) | 2, 8, be=0xff, last=0)
+    yield from beat(dut, (0x4a << 24) | 2, 4, be=0xff, last=0)
     yield from wait_status(dut, STATUS_ERROR)
     assert (yield from dut.error.read()) == 8
 
@@ -378,7 +382,7 @@ def tb_restart_error(dut):
     second = [0x71000000 + i for i in range(16)]
     yield from start_one(dut, length=16)
     yield from expect_mrd64(dut, 0x3f000, 16, 0)
-    yield from cpl_chunk(dut, first[:8], 0x3f000, 0)
+    yield from cpl_chunk(dut, first[:8], 0x3f000, 0, remaining=16)
     yield from beat(dut, (0x4a << 24) | 8, 8 * 4, be=0xff, last=0)
     yield from beat(dut, (REQ_ID << 16) | (1 << 8) | 0x20,
                     first[8], be=0xff, last=0)
@@ -414,8 +418,8 @@ def tb_overlength(dut):
     data = [0x72000000 + i for i in range(16)]
     yield from start_one(dut, length=16)
     yield from expect_mrd64(dut, 0x3f000, 16, 0)
-    yield from cpl_chunk(dut, data[:8], 0x3f000, 0)
-    yield from beat(dut, (0x4a << 24) | 9, 9 * 4, be=0xff, last=0)
+    yield from cpl_chunk(dut, data[:8], 0x3f000, 0, remaining=16)
+    yield from beat(dut, (0x4a << 24) | 9, 8 * 4, be=0xff, last=0)
     yield from wait_status(dut, STATUS_ERROR)
     assert (yield from dut.error.read()) == 8
 
@@ -424,7 +428,7 @@ def tb_link_loss(dut):
     data = [0x73000000 + i for i in range(16)]
     yield from start_one(dut, length=16)
     yield from expect_mrd64(dut, 0x3f000, 16, 0)
-    yield from cpl_chunk(dut, data[:8], 0x3f000, 0)
+    yield from cpl_chunk(dut, data[:8], 0x3f000, 0, remaining=16)
     yield dut.link_ready.eq(0)
     yield from wait_status(dut, STATUS_ERROR)
     assert (yield from dut.error.read()) == 1
@@ -448,6 +452,27 @@ def tb_timeout(dut):
     yield from expect_mrd64(dut, 0x3f000, 1, 0)
     yield from wait_status(dut, STATUS_ERROR, timeout=200)
     assert (yield from dut.error.read()) == 4
+
+
+def tb_message(dut):
+    data = [0x74000000 + i for i in range(16)]
+    yield from start_one(dut, length=16)
+    yield from expect_mrd64(dut, 0x3f000, 16, 0)
+    yield from beat(dut, 0x16000000, 0x11111111, be=0xff, last=0)
+    yield from beat(dut, 0x22222222, 0x33333333, be=0xff, last=1)
+    yield from cpl_chunk(dut, data, 0x3f000, 0, remaining=16)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
+    yield from check_buffer(dut, 0, data)
+
+
+def tb_cpl_ur(dut):
+    yield from start_one(dut, length=16)
+    yield from expect_mrd64(dut, 0x3f000, 16, 0)
+    yield from beat(dut, (0x0a << 24) | 4, 1 << 13, be=0xff, last=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 2
 
 
 def main():
@@ -474,6 +499,12 @@ def main():
     run_simulation(dut, tb_cpl_error(dut))
     dut = ChunkDMA()
     run_simulation(dut, tb_tag_error(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_message(dut))
+
+    dut = ChunkDMA()
+    run_simulation(dut, tb_cpl_ur(dut))
+
     dut = ChunkDMA()
     run_simulation(dut, tb_lower_error(dut))
     dut = ChunkDMA()

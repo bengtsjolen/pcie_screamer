@@ -46,6 +46,8 @@ class ChunkDMA(Module, AutoCSR):
         req_tag = Signal(8)
         addr = Signal(64)
         count = Signal(11)
+        is64 = Signal()
+        last_word = Signal(2)
         data_count = Signal(11)
         cpl_len = Signal(11)
         cpl_count = Signal(11)
@@ -109,6 +111,9 @@ class ChunkDMA(Module, AutoCSR):
                                         self.addr_hi.storage) &
                                       0xFFFFFFFFFFFFFFFC),
                     NextValue(count, self.length.storage),
+                    NextValue(is64, self.addr_hi.storage != 0),
+                    NextValue(last_word, Mux(self.addr_hi.storage != 0,
+                                             3, 2)),
                     NextValue(wr_buf, self.buffer.storage),
                     NextValue(word, 0),
                     NextState("ISSUE"),
@@ -121,7 +126,7 @@ class ChunkDMA(Module, AutoCSR):
             sink.valid.eq(self.link_ready),
             sink.be.eq(0xf),
             Case(word, {
-                0: sink.dat.eq(0x20000000 |
+                0: sink.dat.eq(Mux(is64, 0x20000000, 0x00000000) |
                                Mux(count == 1024, 0, count)),
                 1: sink.dat.eq((self.requester_id << 16) |
                                (req_tag << 8) |
@@ -129,7 +134,7 @@ class ChunkDMA(Module, AutoCSR):
                 2: sink.dat.eq(addr[0:32]),
                 3: sink.dat.eq(addr[32:64]),
             }),
-            If(word == 3, sink.last.eq(1)),
+            If(word == last_word, sink.last.eq(1)),
             If(~self.link_ready,
                 packer.reset.eq(1),
                 NextValue(busy, 0),
@@ -137,7 +142,7 @@ class ChunkDMA(Module, AutoCSR):
                 NextValue(error_code, 1),
                 NextState("ERROR"),
             ).Elif(sink.ready,
-                If(word == 3,
+                If(word == last_word,
                     NextValue(timeout, 0),
                     NextState("CPL_H0"),
                 ).Else(
@@ -150,42 +155,77 @@ class ChunkDMA(Module, AutoCSR):
             NextValue(wr_en, 0),
             self.tlp_rx.ready.eq(1),
             If(self.tlp_rx.valid,
-                If(self.tlp_rx.dat[24:32] != 0x4a,
+                If(self.tlp_rx.dat[24:32] == 0x4a,
+                    If(self.tlp_rx.dat[45:48] != 0,
+                        NextValue(debug, self.tlp_rx.dat),
+                        NextValue(busy, 0),
+                        NextValue(error, 1),
+                        NextValue(error_code, 2),
+                        NextState("ERROR"),
+                    ).Elif(data_count >= count,
+                        NextValue(debug, self.tlp_rx.dat),
+                        NextValue(busy, 0),
+                        NextValue(error, 1),
+                        NextValue(error_code, 8),
+                        NextState("ERROR"),
+                    ).Elif(self.tlp_rx.dat[32:44] !=
+                           ((count - data_count) << 2)[0:12],
+                        NextValue(debug, self.tlp_rx.dat),
+                        NextValue(busy, 0),
+                        NextValue(error, 1),
+                        NextValue(error_code, 7),
+                        NextState("ERROR"),
+                    ).Elif(Mux(self.tlp_rx.dat[0:10] == 0, 1024,
+                               self.tlp_rx.dat[0:10]) >
+                           (count - data_count),
+                        NextValue(debug, self.tlp_rx.dat),
+                        NextValue(busy, 0),
+                        NextValue(error, 1),
+                        NextValue(error_code, 8),
+                        NextState("ERROR"),
+                    ).Else(
+                        NextValue(cpl_len, Mux(self.tlp_rx.dat[0:10] == 0,
+                                               1024, self.tlp_rx.dat[0:10])),
+                        NextValue(cpl_count, 0),
+                        NextValue(timeout, 0),
+                        NextState("CPL_H1"),
+                    )
+                ).Elif(self.tlp_rx.dat[24:32] == 0x0a,
                     NextValue(debug, self.tlp_rx.dat),
                     NextValue(busy, 0),
                     NextValue(error, 1),
-                    NextValue(error_code, 6),
-                    NextState("ERROR"),
-                ).Elif(self.tlp_rx.dat[45:48] != 0,
-                    NextValue(busy, 0),
-                    NextValue(error, 1),
-                    NextValue(debug, self.tlp_rx.dat),
-                    NextValue(error_code, 2),
-                    NextState("ERROR"),
-                ).Elif(self.tlp_rx.dat[32:44] !=
-                       Mux(self.tlp_rx.dat[0:10] == 0, 0,
-                           self.tlp_rx.dat[0:10] * 4),
-                    NextValue(busy, 0),
-                    NextValue(error, 1),
-                    NextValue(debug, self.tlp_rx.dat),
-                    NextValue(error_code, 7),
-                    NextState("ERROR"),
-                ).Elif((data_count >= count) |
-                       (Mux(self.tlp_rx.dat[0:10] == 0, 1024,
-                            self.tlp_rx.dat[0:10]) >
-                        (count - data_count)),
-                    NextValue(busy, 0),
-                    NextValue(error, 1),
-                    NextValue(debug, self.tlp_rx.dat),
-                    NextValue(error_code, 8),
+                    NextValue(error_code, Mux(self.tlp_rx.dat[45:48] != 0,
+                                              2, 3)),
                     NextState("ERROR"),
                 ).Else(
-                    NextValue(cpl_len, Mux(self.tlp_rx.dat[0:10] == 0,
-                                           1024, self.tlp_rx.dat[0:10])),
-                    NextValue(cpl_count, 0),
-                    NextValue(timeout, 0),
-                    NextState("CPL_H1"),
+                    If(self.tlp_rx.last,
+                        NextState("CPL_H0"),
+                    ).Else(
+                        NextValue(timeout, 0),
+                        NextState("SKIP"),
+                    )
                 )
+            ).Elif(~self.link_ready,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 1),
+                NextState("ERROR"),
+            ).Elif(timeout == timeout_cycles - 1,
+                NextValue(busy, 0),
+                NextValue(error, 1),
+                NextValue(error_code, 4),
+                NextState("ERROR"),
+            ).Else(
+                NextValue(timeout, timeout + 1),
+            ),
+        )
+
+        fsm.act("SKIP",
+            NextValue(wr_en, 0),
+            self.tlp_rx.ready.eq(1),
+            If(self.tlp_rx.valid & self.tlp_rx.last,
+                NextValue(timeout, 0),
+                NextState("CPL_H0"),
             ).Elif(~self.link_ready,
                 NextValue(busy, 0),
                 NextValue(error, 1),
