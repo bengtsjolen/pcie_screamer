@@ -1025,17 +1025,25 @@ Change the class name to `SoCSearch`, the build name to
 `"test/soc_search_csr.csv"`, and the software directory to
 `"software/soc_search_console"`.
 
-- [ ] **Step 3: Verify elaboration**
+- [ ] **Step 3: Verify gateware elaboration**
 
-Run:
+The scan console does not exist until Task 5, so do not run the full builder
+yet. Verify the gateware top level directly:
 
 ```bash
 python3 -m py_compile soc_search.py gateware/chunk_dma.py
-venv/bin/python soc_search.py
+venv/bin/python - <<'PY'
+from platforms.pcie_squirrel import Platform
+from soc_search import SoCSearch
+
+soc = SoCSearch(Platform())
+soc.finalize()
+print("SoCSearch elaboration OK")
+PY
 ```
 
-Expected: exits 0, builds the BIOS, and `build/soc_search/software/bios/bios.bin`
-exists. The BIOS will not yet contain the scan command.
+Expected: `SoCSearch elaboration OK`; no BIOS build yet. Task 5 creates the
+console and Task 6 runs the full build.
 
 - [ ] **Step 4: Commit**
 
