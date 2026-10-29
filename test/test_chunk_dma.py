@@ -131,6 +131,14 @@ def read64(dut, buffer, index):
     return (yield from dut.rd_data.read())
 
 
+def check_buffer(dut, buffer, data):
+    assert len(data) % 2 == 0
+    for i in range(len(data) // 2):
+        value = yield from read64(dut, buffer, i)
+        assert (value & 0xffffffff) == data[2 * i]
+        assert (value >> 32) == data[2 * i + 1]
+
+
 def tb_single(dut):
     data = [0x10000000 + i for i in range(1024)]
 
@@ -179,6 +187,26 @@ def tb_split(dut):
         assert (value >> 32) == data[2 * i + 1]
 
 
+def tb_split_odd(dut):
+    data = [0x28000000 + i for i in range(1024)]
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x0003f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(1024)
+    yield from dut.buffer.write(0)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x3f000, 1024, 0)
+    yield from cpl_chunk(dut, data[:513], 0x3f000, 0)
+    yield from cpl_chunk(dut, data[513:], 0x3f804, 0)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
+    yield from check_buffer(dut, 0, data)
+
+
 def tb_pingpong(dut):
     first = [0x30000000 + i for i in range(1024)]
     second = [0x40000000 + i for i in range(1024)]
@@ -195,6 +223,7 @@ def tb_pingpong(dut):
     yield from cpl_chunk(dut, first, 0x3f000, 0)
     status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
     assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
 
     yield from dut.addr_lo.write(0x40000)
     yield from dut.addr_hi.write(0)
@@ -205,9 +234,17 @@ def tb_pingpong(dut):
     yield from cpl_chunk(dut, second, 0x40000, 1)
     status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
     assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
 
     assert (yield from read64(dut, 0, 0)) == ((first[1] << 32) | first[0])
     assert (yield from read64(dut, 1, 0)) == ((second[1] << 32) | second[0])
+
+    value = yield from read64(dut, 0, 256)
+    assert value == ((first[513] << 32) | first[512])
+    assert value != 0
+    value = yield from read64(dut, 1, 256)
+    assert value == ((second[513] << 32) | second[512])
+    assert value != 0
 
 
 def tb_partial(dut):
@@ -323,16 +360,80 @@ def tb_long_error(dut):
 
 
 def tb_retry(dut):
+    data = [0x60000000 + i for i in range(16)]
     yield from start_one(dut, length=0)
     yield from wait_status(dut, STATUS_ERROR)
     assert (yield from dut.error.read()) == 5
     yield from start_one(dut, length=16)
     yield from expect_mrd64(dut, 0x3f000, 16, 0)
-    yield from cpl_chunk(dut, [0x60000000 + i for i in range(16)],
-                         0x3f000, 0)
+    yield from cpl_chunk(dut, data, 0x3f000, 0)
     status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
     assert status & STATUS_DONE
     assert not (status & STATUS_ERROR)
+    yield from check_buffer(dut, 0, data)
+
+
+def tb_restart_error(dut):
+    first = [0x70000000 + i for i in range(16)]
+    second = [0x71000000 + i for i in range(16)]
+    yield from start_one(dut, length=16)
+    yield from expect_mrd64(dut, 0x3f000, 16, 0)
+    yield from cpl_chunk(dut, first[:8], 0x3f000, 0)
+    yield from beat(dut, (0x4a << 24) | 8, 8 * 4, be=0xff, last=0)
+    yield from beat(dut, (REQ_ID << 16) | (1 << 8) | 0x20,
+                    first[8], be=0xff, last=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+    yield from check_buffer(dut, 0, first[:8])
+
+    yield from start_one(dut, length=16)
+    yield from expect_mrd64(dut, 0x3f000, 16, 1)
+    yield from cpl_chunk(dut, second, 0x3f000, 1)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
+    yield from check_buffer(dut, 0, second)
+
+
+def tb_odd_length(dut):
+    data = [0x68000000, 0x68000001, 0x68000002]
+    yield from start_one(dut, length=3)
+    yield from expect_mrd64(dut, 0x3f000, 3, 0)
+    yield from cpl_chunk(dut, data, 0x3f000, 0)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
+    assert (yield from read64(dut, 0, 0)) == \
+        ((data[1] << 32) | data[0])
+    value = yield from read64(dut, 0, 1)
+    assert (value & 0xffffffff) == data[2]
+    assert (value >> 32) == 0
+
+
+def tb_overlength(dut):
+    data = [0x72000000 + i for i in range(16)]
+    yield from start_one(dut, length=16)
+    yield from expect_mrd64(dut, 0x3f000, 16, 0)
+    yield from cpl_chunk(dut, data[:8], 0x3f000, 0)
+    yield from beat(dut, (0x4a << 24) | 9, 9 * 4, be=0xff, last=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def tb_link_loss(dut):
+    data = [0x73000000 + i for i in range(16)]
+    yield from start_one(dut, length=16)
+    yield from expect_mrd64(dut, 0x3f000, 16, 0)
+    yield from cpl_chunk(dut, data[:8], 0x3f000, 0)
+    yield dut.link_ready.eq(0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 1
+
+
+def tb_length_error(dut):
+    yield from start_one(dut, length=1025)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 5
 
 
 def tb_timeout(dut):
@@ -362,6 +463,8 @@ def main():
     dut = ChunkDMA()
     run_simulation(dut, tb_split(dut))
     dut = ChunkDMA()
+    run_simulation(dut, tb_split_odd(dut))
+    dut = ChunkDMA()
     run_simulation(dut, tb_pingpong(dut))
     dut = ChunkDMA()
     run_simulation(dut, tb_partial(dut))
@@ -381,6 +484,16 @@ def main():
     run_simulation(dut, tb_long_error(dut))
     dut = ChunkDMA()
     run_simulation(dut, tb_retry(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_restart_error(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_odd_length(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_overlength(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_link_loss(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_length_error(dut))
     dut = ChunkDMA(timeout_cycles=20)
     run_simulation(dut, tb_timeout(dut))
 
