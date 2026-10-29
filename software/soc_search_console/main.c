@@ -183,6 +183,7 @@ static void print_help(void)
 	uart_puts("  help                show this help\r\n");
 	uart_puts("  status              show PCIe/DMA status\r\n");
 	uart_puts("  scan <addr64> <len64> <w0> <w1> <w2> <w3>\r\n");
+	uart_puts("  peek                show first 16 bytes of DMA buffer 0\r\n");
 	uart_puts("                      find a 16-byte-aligned 128-bit pattern\r\n");
 	uart_puts("WARNING: arbitrary physical reads may hang or crash the host!\r\n");
 }
@@ -244,6 +245,25 @@ static int scan_buffer(uint32_t buffer, uint64_t addr, uint32_t len,
 		return 1;
 	}
 	return 0;
+}
+
+static void peek_buffer(void)
+{
+	uint32_t i;
+
+	chunk_dma_rd_buffer_write(0);
+	for (i = 0; i < 2; i++) {
+		uint64_t value;
+
+		chunk_dma_rd_index_write(i);
+		asm volatile("nop; nop; nop; nop;" ::: "memory");
+		value = chunk_dma_rd_data_read();
+		uart_puts("pair");
+		uart_putc('0' + i);
+		uart_puts("=0x");
+		put_hex64(value);
+		uart_puts("\r\n");
+	}
 }
 
 static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4])
@@ -399,6 +419,12 @@ int main(void)
 				continue;
 			}
 			scan_memory(addr, len, pattern);
+		} else if (str_eq(argv[0], "peek")) {
+			if (argc != 1) {
+				uart_puts("error: too many arguments\r\n");
+				continue;
+			}
+			peek_buffer();
 		} else if (str_eq(argv[0], "status")) {
 			if (argc != 1) {
 				uart_puts("error: too many arguments\r\n");
