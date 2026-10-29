@@ -1,7 +1,7 @@
 # Standalone Raw-PCIe Search SoC Design
 
 Date: 2026-10-29
-Status: Proposed — awaiting user review
+Status: Approved for implementation planning
 Branch: `soc`
 
 ## Summary
