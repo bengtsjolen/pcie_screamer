@@ -65,8 +65,9 @@ def expect_mrd64(dut, addr, length, tag):
         yield
 
     length_field = 0 if length == 1024 else length
+    last_be = 0x0f if length == 1 else 0xff
     dw0 = 0x20000000 | length_field
-    dw1 = (REQ_ID << 16) | (tag << 8) | 0x0f
+    dw1 = (REQ_ID << 16) | (tag << 8) | last_be
     expected0 = (dw1 << 32) | dw0
     expected1 = ((addr >> 32) << 32) | (addr & 0xfffffffc)
 
@@ -210,7 +211,8 @@ class ChunkDMA(Module, AutoCSR):
                     NextValue(req_tag, tag),
                     NextValue(tag, tag + 1),
                     NextValue(addr, Cat(self.addr_lo.storage,
-                                        self.addr_hi.storage)),
+                                        self.addr_hi.storage) &
+                                      0xFFFFFFFFFFFFFFFC),
                     NextValue(count, self.length.storage),
                     NextValue(wr_buf, self.buffer.storage),
                     NextValue(word, 0),
@@ -226,7 +228,8 @@ class ChunkDMA(Module, AutoCSR):
                 0: sink.dat.eq(0x20000000 |
                                Mux(count == 1024, 0, count)),
                 1: sink.dat.eq((self.requester_id << 16) |
-                               (req_tag << 8) | 0x0f),
+                               (req_tag << 8) |
+                               Mux(count == 1, 0x0f, 0xff)),
                 2: sink.dat.eq(addr[0:32]),
                 3: sink.dat.eq(addr[32:64]),
             }),
@@ -593,10 +596,13 @@ Notes for the implementer:
 - `data_count` counts DWORDs across all CplDs for the chunk.
 - `pending`/`pending_valid` pack the first data DWORD of a CplD with the next
   DWORD into a 64-bit buffer word.
-- `wr_en` must be a one-cycle write strobe. Drive it low by default in each
-  parser state and assert it only for the cycle that writes a buffer word.
-  Do not leave it asserted after the write; the test reads the complete buffer
-  and will catch repeated writes.
+- `wr_en` must be a one-cycle write strobe. The `NextValue(wr_en, 1)` snippets
+  below are illustrative; implement `wr_en` as a combinational strobe that is
+  low by default and asserted only in the cycle that writes a buffer word, or
+  explicitly clear it in every parser state. Do not leave it asserted after
+  the write; the test reads the complete buffer and will catch repeated writes.
+- Task 1 review fixed Last DW BE to `Mux(count == 1, 0x0f, 0xff)` and masks
+  the captured address to 4-byte alignment. Do not regress those fixes.
 - Handle lower+upper byte enables together in `CPL_D`; do not evaluate the
   upper half using the old `pending_valid` after the lower half has already
   consumed the pending word.
