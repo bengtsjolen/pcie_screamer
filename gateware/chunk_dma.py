@@ -101,6 +101,11 @@ class ChunkDMA(Module, AutoCSR):
                                         self.addr_hi.storage) &
                                       0xFFFFFFFFFFFFFFFC),
                     NextValue(count, self.length.storage),
+                    NextValue(data_count, 0),
+                    NextValue(pending, 0),
+                    NextValue(pending_valid, 0),
+                    NextValue(cpl_len, 0),
+                    NextValue(cpl_count, 0),
                     NextValue(wr_buf, self.buffer.storage),
                     NextValue(word, 0),
                     NextState("ISSUE"),
@@ -159,8 +164,10 @@ class ChunkDMA(Module, AutoCSR):
                     NextValue(error, 1),
                     NextValue(error_code, 3),
                     NextState("ERROR"),
-                ).Elif(Mux(self.tlp_rx.dat[0:10] == 0, 1024,
-                           self.tlp_rx.dat[0:10]) > (count - data_count),
+                ).Elif((data_count >= count) |
+                       (Mux(self.tlp_rx.dat[0:10] == 0, 1024,
+                            self.tlp_rx.dat[0:10]) >
+                        (count - data_count)),
                     NextValue(busy, 0),
                     NextValue(error, 1),
                     NextValue(error_code, 3),

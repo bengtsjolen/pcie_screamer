@@ -156,6 +156,199 @@ def tb_single(dut):
         assert (value >> 32) == data[2 * i + 1]
 
 
+def tb_split(dut):
+    data = [0x20000000 + i for i in range(1024)]
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x0003f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(1024)
+    yield from dut.buffer.write(0)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x3f000, 1024, 0)
+    yield from cpl_chunk(dut, data[:512], 0x3f000, 0)
+    yield from cpl_chunk(dut, data[512:], 0x3f800, 0)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
+    for i in range(512):
+        value = yield from read64(dut, 0, i)
+        assert (value & 0xffffffff) == data[2 * i]
+        assert (value >> 32) == data[2 * i + 1]
+
+
+def tb_pingpong(dut):
+    first = [0x30000000 + i for i in range(1024)]
+    second = [0x40000000 + i for i in range(1024)]
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x3f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(1024)
+    yield from dut.buffer.write(0)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x3f000, 1024, 0)
+    yield from cpl_chunk(dut, first, 0x3f000, 0)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+
+    yield from dut.addr_lo.write(0x40000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(1024)
+    yield from dut.buffer.write(1)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x40000, 1024, 1)
+    yield from cpl_chunk(dut, second, 0x40000, 1)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+
+    assert (yield from read64(dut, 0, 0)) == ((first[1] << 32) | first[0])
+    assert (yield from read64(dut, 1, 0)) == ((second[1] << 32) | second[0])
+
+
+def tb_partial(dut):
+    data = [0x50000000 + i for i in range(16)]
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x0003f010)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(16)
+    yield from dut.buffer.write(0)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x3f010, 16, 0)
+    yield from cpl_chunk(dut, data, 0x3f010, 0)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    for i in range(8):
+        value = yield from read64(dut, 0, i)
+        assert (value & 0xffffffff) == data[2 * i]
+        assert (value >> 32) == data[2 * i + 1]
+
+
+def tb_error(dut):
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x3f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(0)
+    yield from dut.start.write(1)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 5
+
+
+def tb_cpl_error(dut):
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x3f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(1)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from beat(dut, (0x4a << 24) | 1, 1 << 13, be=0xff, last=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 2
+
+
+def tb_tag_error(dut):
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x3f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(1)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from cpl_chunk(dut, [0x12345678], 0x3f000, 1)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def start_one(dut, length=1, buffer=0):
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x3f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(length)
+    yield from dut.buffer.write(buffer)
+    yield from dut.start.write(1)
+
+
+def tb_lower_error(dut):
+    yield from start_one(dut)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from beat(dut, (0x4a << 24) | 1, 4, be=0xff, last=0)
+    yield from beat(dut, (REQ_ID << 16) | 4, 0x11111111,
+                    be=0xf0, last=1)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def tb_byte_error(dut):
+    yield from start_one(dut)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from beat(dut, (0x4a << 24) | 1, 8, be=0xff, last=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def tb_requester_error(dut):
+    yield from start_one(dut)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from beat(dut, (0x4a << 24) | 1, 4, be=0xff, last=0)
+    yield from beat(dut, (0x1111 << 16) | 0, 0x11111111,
+                    be=0xf0, last=1)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def tb_long_error(dut):
+    yield from start_one(dut)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from beat(dut, (0x4a << 24) | 2, 8, be=0xff, last=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 3
+
+
+def tb_retry(dut):
+    yield from start_one(dut, length=0)
+    yield from wait_status(dut, STATUS_ERROR)
+    assert (yield from dut.error.read()) == 5
+    yield from start_one(dut, length=16)
+    yield from expect_mrd64(dut, 0x3f000, 16, 0)
+    yield from cpl_chunk(dut, [0x60000000 + i for i in range(16)],
+                         0x3f000, 0)
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
+
+
+def tb_timeout(dut):
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x3f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(1)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x3f000, 1, 0)
+    yield from wait_status(dut, STATUS_ERROR, timeout=200)
+    assert (yield from dut.error.read()) == 4
+
+
 def main():
     dut = ChunkDMA()
     run_simulation(dut, tb_request(dut))
@@ -165,6 +358,31 @@ def main():
 
     dut = ChunkDMA()
     run_simulation(dut, tb_single(dut))
+
+    dut = ChunkDMA()
+    run_simulation(dut, tb_split(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_pingpong(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_partial(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_error(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_cpl_error(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_tag_error(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_lower_error(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_byte_error(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_requester_error(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_long_error(dut))
+    dut = ChunkDMA()
+    run_simulation(dut, tb_retry(dut))
+    dut = ChunkDMA(timeout_cycles=20)
+    run_simulation(dut, tb_timeout(dut))
 
     print("ChunkDMA simulation OK")
 
