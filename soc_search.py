@@ -7,6 +7,7 @@ from migen import *
 
 from litex.soc.cores.clock import *
 from litex.soc.integration.soc_core import *
+from litex.soc.integration.soc import SoCRegion
 from litex.soc.integration.builder import Builder as LiteXBuilder
 from litex.soc.interconnect.csr import CSRStatus
 
@@ -110,6 +111,11 @@ class SoCSearch(SoCCore):
 
         self.submodules.chunk_dma = chunk_dma = ChunkDMA()
         self.add_csr("chunk_dma")
+        self.bus.add_slave(
+            name="dma_buf",
+            slave=chunk_dma.bus,
+            region=SoCRegion(origin=0x20000000, size=0x2000, mode="r"),
+        )
 
         self.comb += [
             self.pcie_phy.source.connect(chunk_dma.tlp_rx),

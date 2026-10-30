@@ -105,8 +105,9 @@ class TLPDMA(Module, AutoCSR):
             Case(word, {
                 0: sink.dat.eq(Mux(is64, 0x20000001, 0x00000001)),
                 1: sink.dat.eq((self.requester_id << 16) | (req_tag << 8) | 0xF),
-                2: sink.dat.eq(Cat(Constant(0, 2), addr[2:32])),
-                3: sink.dat.eq(addr[32:64]),
+                2: sink.dat.eq(Mux(is64, addr[32:64],
+                                   Cat(Constant(0, 2), addr[2:32]))),
+                3: sink.dat.eq(Cat(Constant(0, 2), addr[2:32])),
             }),
             If(word == last_word,
                 sink.last.eq(1),

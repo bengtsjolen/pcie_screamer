@@ -1,7 +1,7 @@
 # Search SoC DMA Throughput Measurement and CPU-Visible Buffers
 
 **Date:** 2026-10-30
-**Status:** Design approved; spec awaiting user review; implementation not started
+**Status:** Approved; implementation plan created; implementation not started
 **Scope:** Search SoC only. First SoC and PCILeech variants are unchanged.
 
 ## Context
@@ -69,8 +69,8 @@ scan <addr64> <len64> <w0> <w1> <w2> <w3> [stride]
 ```
 
 - Default stride: 16 bytes.
-- Stride must be nonzero, a multiple of 16, and no larger than the scan
-  length.
+- Stride must be nonzero, a multiple of 16, no larger than the scan length,
+  and no larger than one 4 KiB DMA chunk.
 - The scanner checks 16-byte-aligned offsets `0, stride, 2*stride, ...` within
   each DMA buffer.
 - Match addresses remain `chunk_base + offset`.

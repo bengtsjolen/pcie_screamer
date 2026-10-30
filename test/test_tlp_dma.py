@@ -62,7 +62,7 @@ def expect_mrd(dut, addr, expected_tag=0, timeout=200):
     assert beats[0][1] == 0
     assert beats[0][2] == 0xFF
 
-    expected_data = (addr & 0xFFFFFFFC) if not is64 else (((addr >> 32) << 32) | (addr & 0xFFFFFFFC))
+    expected_data = (addr & 0xFFFFFFFC) if not is64 else (((addr & 0xFFFFFFFC) << 32) | (addr >> 32))
     assert beats[1][0] == expected_data, hex(beats[1][0])
     assert beats[1][1] == 1
     assert beats[1][2] == (0xFF if is64 else 0x0F)

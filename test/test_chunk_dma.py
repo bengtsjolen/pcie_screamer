@@ -35,7 +35,7 @@ def expect_mrd64(dut, addr, length, tag):
     dw0 = (0x20000000 if is64 else 0) | length_field
     dw1 = (REQ_ID << 16) | (tag << 8) | last_be
     expected0 = (dw1 << 32) | dw0
-    expected1 = (((addr >> 32) << 32) | (addr & 0xfffffffc)
+    expected1 = (((addr & 0xfffffffc) << 32) | (addr >> 32)
                  if is64 else (addr & 0xfffffffc))
 
     assert beats[0][0] == expected0, hex(beats[0][0])
@@ -50,6 +50,48 @@ def expect_no_tx(dut, cycles=20):
     for _ in range(cycles):
         assert not (yield dut.tlp_tx.valid)
         yield
+
+
+def cpu_read(dut, adr):
+    yield dut.bus.sel.eq(0xf)
+    yield dut.bus.adr.eq(adr)
+    yield dut.bus.cyc.eq(1)
+    yield dut.bus.stb.eq(1)
+    for _ in range(20):
+        yield
+        if (yield dut.bus.ack):
+            break
+    else:
+        raise AssertionError("CPU buffer read did not ack")
+    data = yield dut.bus.dat_r
+    yield dut.bus.cyc.eq(0)
+    yield dut.bus.stb.eq(0)
+    yield
+    return data
+
+
+def tb_cpu_buffer(dut):
+    data = [0x60000000 + i for i in range(16)]
+
+    yield dut.link_ready.eq(1)
+    yield dut.requester_id.eq(REQ_ID)
+    yield dut.tlp_tx.ready.eq(1)
+    yield dut.tlp_rx.valid.eq(0)
+    yield from dut.addr_lo.write(0x3f000)
+    yield from dut.addr_hi.write(0)
+    yield from dut.length.write(16)
+    yield from dut.buffer.write(0)
+    yield from dut.start.write(1)
+    yield from expect_mrd64(dut, 0x3f000, 16, 0)
+    yield from cpl_chunk(dut, data, 0x3f000, 0)
+
+    status = yield from wait_status(dut, STATUS_DONE | STATUS_ERROR)
+    assert status & STATUS_DONE
+    assert not (status & STATUS_ERROR)
+
+    for i in range(16):
+        value = yield from cpu_read(dut, i)
+        assert value == data[i], (i, hex(value), hex(data[i]))
 
 
 def tb_request(dut):
@@ -478,6 +520,9 @@ def tb_cpl_ur(dut):
 def main():
     dut = ChunkDMA()
     run_simulation(dut, tb_request(dut))
+
+    dut = ChunkDMA()
+    run_simulation(dut, tb_cpu_buffer(dut))
 
     dut = ChunkDMA()
     run_simulation(dut, tb_request_single(dut))

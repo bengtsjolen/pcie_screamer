@@ -1,6 +1,7 @@
 from migen import *
 
 from litex.soc.interconnect import stream
+from litex.soc.interconnect import wishbone
 from litex.soc.interconnect.csr import *
 
 from litepcie.common import phy_layout
@@ -21,6 +22,9 @@ class ChunkDMA(Module, AutoCSR):
         self.rd_index = CSRStorage(9)
         self.rd_data = CSRStatus(64)
         self.debug = CSRStatus(64)
+
+        self.bus = bus = wishbone.Interface(
+            data_width=32, address_width=13, addressing="word")
 
         self.link_ready = Signal()
         self.requester_id = Signal(16)
@@ -65,8 +69,16 @@ class ChunkDMA(Module, AutoCSR):
             self.status.status.eq(Cat(self.link_ready, busy, done, error)),
             self.error.status.eq(error_code),
             self.debug.status.eq(debug),
-            rp0.adr.eq(self.rd_index.storage),
-            rp1.adr.eq(self.rd_index.storage),
+            rp0.adr.eq(Mux(bus.cyc & bus.stb & ~bus.adr[10],
+                           bus.adr[1:10], self.rd_index.storage)),
+            rp1.adr.eq(Mux(bus.cyc & bus.stb & bus.adr[10],
+                           bus.adr[1:10], self.rd_index.storage)),
+            bus.dat_r.eq(Mux(bus.adr[10],
+                             Mux(bus.adr[0], rp1.dat_r[32:64],
+                                 rp1.dat_r[0:32]),
+                             Mux(bus.adr[0], rp0.dat_r[32:64],
+                                 rp0.dat_r[0:32]))),
+            bus.err.eq(0),
             self.rd_data.status.eq(Mux(self.rd_buffer.storage,
                                        rp1.dat_r, rp0.dat_r)),
             wp0.adr.eq(wr_addr),
@@ -79,6 +91,13 @@ class ChunkDMA(Module, AutoCSR):
             sink.dat.eq(0),
             sink.be.eq(0),
             sink.last.eq(0),
+        ]
+
+        self.sync += [
+            bus.ack.eq(0),
+            If(bus.cyc & bus.stb & ~bus.ack,
+                bus.ack.eq(1),
+            ),
         ]
 
         self.submodules.fsm = fsm = FSM(reset_state="IDLE")
@@ -131,8 +150,8 @@ class ChunkDMA(Module, AutoCSR):
                 1: sink.dat.eq((self.requester_id << 16) |
                                (req_tag << 8) |
                                Mux(count == 1, 0x0f, 0xff)),
-                2: sink.dat.eq(addr[0:32]),
-                3: sink.dat.eq(addr[32:64]),
+                2: sink.dat.eq(Mux(is64, addr[32:64], addr[0:32])),
+                3: sink.dat.eq(addr[0:32]),
             }),
             If(word == last_word, sink.last.eq(1)),
             If(~self.link_ready,

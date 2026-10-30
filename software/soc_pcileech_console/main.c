@@ -261,9 +261,9 @@ static void send_mrd(uint32_t addr_hi, uint32_t addr_lo, uint8_t tag)
 		bridge_write(TLP_FLAG_MAGIC);
 		bridge_write(dw1);
 		bridge_write(TLP_FLAG_MAGIC);
-		bridge_write(addr_lo);
-		bridge_write(TLP_FLAG_MAGIC);
 		bridge_write(addr_hi);
+		bridge_write(TLP_FLAG_MAGIC);
+		bridge_write(addr_lo);
 		bridge_write(TLP_FLAG_MAGIC | TLP_FLAG_LAST);
 	}
 }

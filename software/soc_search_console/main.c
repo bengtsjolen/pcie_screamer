@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include <generated/csr.h>
+#include <generated/mem.h>
 
 #define STATUS_LINK_READY (1u << 0)
 #define STATUS_DONE       (1u << 2)
@@ -182,7 +183,8 @@ static void print_help(void)
 	uart_puts("commands:\r\n");
 	uart_puts("  help                show this help\r\n");
 	uart_puts("  status              show PCIe/DMA status\r\n");
-	uart_puts("  scan <addr64> <len64> <w0> <w1> <w2> <w3>\r\n");
+	uart_puts("  scan <addr64> <len64> <w0> <w1> <w2> <w3> [stride]\r\n");
+	uart_puts("                      stride defaults to 16 and is a 16-byte multiple\r\n");
 	uart_puts("  peek                show first 16 bytes of DMA buffer 0\r\n");
 	uart_puts("                      find a 16-byte-aligned 128-bit pattern\r\n");
 	uart_puts("WARNING: arbitrary physical reads may hang or crash the host!\r\n");
@@ -226,27 +228,25 @@ static uint32_t bswap32(uint32_t v)
 }
 
 static int scan_buffer(uint32_t buffer, uint64_t addr, uint32_t len,
-		       const uint32_t pattern[4], uint64_t *match)
+		       const uint32_t pattern[4], uint32_t stride,
+		       uint64_t *match)
 {
+	const volatile uint32_t *buf =
+		(const volatile uint32_t *)(DMA_BUF_BASE +
+					    (buffer ? 0x1000u : 0u));
 	uint32_t off;
 
-	chunk_dma_rd_buffer_write(buffer);
-	for (off = 0; off < len; off += 16) {
-		uint64_t pair0;
-		uint64_t pair1;
+	for (off = 0; off + 16u <= len; off += stride) {
+		uint32_t w0 = bswap32(buf[off / 4u + 0u]);
+		uint32_t w1 = bswap32(buf[off / 4u + 1u]);
+		uint32_t w2;
+		uint32_t w3;
 
-		chunk_dma_rd_index_write(off / 8);
-		asm volatile("nop; nop; nop; nop;" ::: "memory");
-		pair0 = chunk_dma_rd_data_read();
-		if (bswap32((uint32_t)pair0) != pattern[0])
+		if (w0 != pattern[0] || w1 != pattern[1])
 			continue;
-
-		chunk_dma_rd_index_write(off / 8 + 1);
-		asm volatile("nop; nop; nop; nop;" ::: "memory");
-		pair1 = chunk_dma_rd_data_read();
-		if (bswap32((uint32_t)(pair0 >> 32)) != pattern[1] ||
-		    bswap32((uint32_t)pair1) != pattern[2] ||
-		    bswap32((uint32_t)(pair1 >> 32)) != pattern[3])
+		w2 = bswap32(buf[off / 4u + 2u]);
+		w3 = bswap32(buf[off / 4u + 3u]);
+		if (w2 != pattern[2] || w3 != pattern[3])
 			continue;
 
 		*match = addr + off;
@@ -274,7 +274,8 @@ static void peek_buffer(void)
 	}
 }
 
-static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4])
+static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4],
+			uint32_t stride)
 {
 	uint64_t scanned = 0;
 	uint64_t next_progress = 256ull * 1024 * 1024;
@@ -319,7 +320,7 @@ static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4])
 		}
 
 		if (scan_buffer(current_buf, current_addr, current_len,
-				pattern, &match)) {
+				pattern, stride, &match)) {
 			if (have_next)
 				(void)wait_chunk();
 			uart_puts("match 0x");
@@ -386,11 +387,12 @@ int main(void)
 			uint64_t addr;
 			uint64_t len;
 			uint32_t pattern[4];
+			uint32_t stride = 16;
 			int bad = 0;
 			int i;
 
-			if (argc != 7) {
-				uart_puts("error: scan needs addr, len, and four pattern words\r\n");
+			if (argc != 7 && argc != 8) {
+				uart_puts("error: scan needs addr, len, four pattern words, and optional stride\r\n");
 				continue;
 			}
 			if (parse_hex64(argv[1], &addr_hi, &addr_lo) != 0 ||
@@ -426,7 +428,21 @@ int main(void)
 				uart_puts("error: address range overflow\r\n");
 				continue;
 			}
-			scan_memory(addr, len, pattern);
+			if (argc == 8) {
+				uint32_t stride_hi;
+				uint32_t stride_lo;
+
+				if (parse_hex64(argv[7], &stride_hi,
+						&stride_lo) != 0 ||
+				    stride_hi != 0 || stride_lo == 0 ||
+				    (stride_lo & 15u) || stride_lo > 4096u ||
+				    stride_lo > len) {
+					uart_puts("error: invalid stride\r\n");
+					continue;
+				}
+				stride = stride_lo;
+			}
+			scan_memory(addr, len, pattern, stride);
 		} else if (str_eq(argv[0], "peek")) {
 			if (argc != 1) {
 				uart_puts("error: too many arguments\r\n");
