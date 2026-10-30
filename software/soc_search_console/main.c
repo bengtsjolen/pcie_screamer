@@ -185,6 +185,7 @@ static void print_help(void)
 	uart_puts("  status              show PCIe/DMA status\r\n");
 	uart_puts("  scan <addr64> <len64> <w0> <w1> <w2> <w3> [stride]\r\n");
 	uart_puts("                      stride defaults to 16 and is a 16-byte multiple\r\n");
+	uart_puts("  bench <addr64> <len64>  raw 4-outstanding PCIe read benchmark\r\n");
 	uart_puts("  peek                show first 16 bytes of DMA buffer 0\r\n");
 	uart_puts("                      find a 16-byte-aligned 128-bit pattern\r\n");
 	uart_puts("WARNING: arbitrary physical reads may hang or crash the host!\r\n");
@@ -274,6 +275,33 @@ static void peek_buffer(void)
 	}
 }
 
+
+static void bench_memory(uint64_t addr, uint64_t len)
+{
+	uint32_t wait_count = 0;
+
+	main_bench_select_write(1);
+	while (!(read_bench_status_read() & STATUS_LINK_READY)) {
+		if ((wait_count++ & 0xfffff) == 0)
+			print_status();
+	}
+	read_bench_addr_lo_write((uint32_t)addr);
+	read_bench_addr_hi_write((uint32_t)(addr >> 32));
+	read_bench_length_lo_write((uint32_t)len);
+	read_bench_length_hi_write((uint32_t)(len >> 32));
+	read_bench_start_write(1);
+	while (!(read_bench_status_read() & (STATUS_DONE | STATUS_ERROR)))
+		;
+	if (read_bench_status_read() & STATUS_ERROR) {
+		uart_puts("bench error: 0x");
+		put_hex32(read_bench_error_read(), 8);
+		uart_puts("\r\n");
+	} else {
+		uart_puts("bench done\r\n");
+	}
+	main_bench_select_write(0);
+}
+
 static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4],
 			uint32_t stride)
 {
@@ -287,6 +315,7 @@ static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4],
 	uint32_t wait_count = 0;
 	int have_next;
 
+	main_bench_select_write(0);
 	if (!(chunk_dma_status_read() & STATUS_LINK_READY))
 		uart_puts("waiting for PCIe link...\r\n");
 	while (!(chunk_dma_status_read() & STATUS_LINK_READY)) {
@@ -443,6 +472,31 @@ int main(void)
 				stride = stride_lo;
 			}
 			scan_memory(addr, len, pattern, stride);
+		} else if (str_eq(argv[0], "bench")) {
+			uint32_t addr_hi;
+			uint32_t addr_lo;
+			uint32_t len_hi;
+			uint32_t len_lo;
+			uint64_t addr;
+			uint64_t len;
+
+			if (argc != 3) {
+				uart_puts("error: bench needs addr and length\r\n");
+				continue;
+			}
+			if (parse_hex64(argv[1], &addr_hi, &addr_lo) != 0 ||
+			    parse_hex64(argv[2], &len_hi, &len_lo) != 0) {
+				uart_puts("error: invalid address or length\r\n");
+				continue;
+			}
+			addr = ((uint64_t)addr_hi << 32) | addr_lo;
+			len = ((uint64_t)len_hi << 32) | len_lo;
+			if ((addr & 3ull) || len == 0 || (len & 3ull) ||
+			    addr + len < addr) {
+				uart_puts("error: invalid bench range\r\n");
+				continue;
+			}
+			bench_memory(addr, len);
 		} else if (str_eq(argv[0], "peek")) {
 			if (argc != 1) {
 				uart_puts("error: too many arguments\r\n");

@@ -9,11 +9,12 @@ from litex.soc.cores.clock import *
 from litex.soc.integration.soc_core import *
 from litex.soc.integration.soc import SoCRegion
 from litex.soc.integration.builder import Builder as LiteXBuilder
-from litex.soc.interconnect.csr import CSRStatus
+from litex.soc.interconnect.csr import CSRStatus, CSRStorage
 
 from litepcie.phy.s7pciephy import S7PCIEPHY
 
 from gateware.chunk_dma import ChunkDMA
+from gateware.read_bench import ReadBench
 
 from platforms.pcie_squirrel import Platform
 
@@ -117,15 +118,53 @@ class SoCSearch(SoCCore):
             region=SoCRegion(origin=0x20000000, size=0x2000, mode="r"),
         )
 
+        self.bench_select = CSRStorage(1)
+        self.add_csr("bench_select")
+        self.submodules.read_bench = read_bench = ReadBench()
+        self.add_csr("read_bench")
+
         self.comb += [
-            self.pcie_phy.source.connect(chunk_dma.tlp_rx),
-            chunk_dma.tlp_tx.connect(self.pcie_phy.sink),
+            chunk_dma.tlp_rx.valid.eq(self.pcie_phy.source.valid
+                                      & ~self.bench_select.storage),
+            chunk_dma.tlp_rx.dat.eq(self.pcie_phy.source.dat),
+            chunk_dma.tlp_rx.be.eq(self.pcie_phy.source.be),
+            chunk_dma.tlp_rx.last.eq(self.pcie_phy.source.last),
+            read_bench.tlp_rx.valid.eq(self.pcie_phy.source.valid
+                                       & self.bench_select.storage),
+            read_bench.tlp_rx.dat.eq(self.pcie_phy.source.dat),
+            read_bench.tlp_rx.be.eq(self.pcie_phy.source.be),
+            read_bench.tlp_rx.last.eq(self.pcie_phy.source.last),
+            self.pcie_phy.source.ready.eq(Mux(self.bench_select.storage,
+                                              read_bench.tlp_rx.ready,
+                                              chunk_dma.tlp_rx.ready)),
+            self.pcie_phy.sink.valid.eq(Mux(self.bench_select.storage,
+                                            read_bench.tlp_tx.valid,
+                                            chunk_dma.tlp_tx.valid)),
+            self.pcie_phy.sink.dat.eq(Mux(self.bench_select.storage,
+                                          read_bench.tlp_tx.dat,
+                                          chunk_dma.tlp_tx.dat)),
+            self.pcie_phy.sink.be.eq(Mux(self.bench_select.storage,
+                                         read_bench.tlp_tx.be,
+                                         chunk_dma.tlp_tx.be)),
+            self.pcie_phy.sink.last.eq(Mux(self.bench_select.storage,
+                                           read_bench.tlp_tx.last,
+                                           chunk_dma.tlp_tx.last)),
+            chunk_dma.tlp_tx.ready.eq(Mux(self.bench_select.storage, 0,
+                                          self.pcie_phy.sink.ready)),
+            read_bench.tlp_tx.ready.eq(Mux(self.bench_select.storage,
+                                           self.pcie_phy.sink.ready, 0)),
             chunk_dma.link_ready.eq(
                 self.pcie_phy._link_status.fields.status
                 & self.pcie_phy._bus_master_enable.status
                 & (self.pcie_phy.id != 0)
             ),
             chunk_dma.requester_id.eq(self.pcie_phy.id),
+            read_bench.link_ready.eq(
+                self.pcie_phy._link_status.fields.status
+                & self.pcie_phy._bus_master_enable.status
+                & (self.pcie_phy.id != 0)
+            ),
+            read_bench.requester_id.eq(self.pcie_phy.id),
         ]
 
     def check_bios_requirements(self):
