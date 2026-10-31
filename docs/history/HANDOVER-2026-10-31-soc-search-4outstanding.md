@@ -1,9 +1,27 @@
 # Handover: 4-Outstanding Search DMA Buffer Bug
 
+> **Resolved 2026-10-31.** The write/commit path was fixed in commit
+> `de0536f` ("fix: deliver four-outstanding completion data to search
+> buffers") and merged to `master` in `c542474`. The four root causes were:
+>
+> 1. the `wr2_*` second write stage drove the BRAM ports but was never
+>    loaded, so `wp*.we` never asserted;
+> 2. `cpl_tag` was registered one cycle after the data capture indexed
+>    the pending/write state with it, so data landed in the previous
+>    tag's slot;
+> 3. CplD byte enables were ignored, producing an extra zero word at the
+>    end of even-length CplDs;
+> 4. the ReadBench Wishbone window was only 11-bit word-addressed
+>    (`address_width=13` is interpreted as bytes), so buffers 2/3
+>    aliased buffers 0/1.
+>
+> The body below is the historical pre-fix failure record. See
+> [VARIANTS.md](../../VARIANTS.md) for current status and verification.
+
 **Date:** 2026-10-31
 **Branch:** `soc`
 **Last commit:** `5c30303 feat: add four-outstanding PCIe read benchmark`
-**Status:** Blocked on a hardware write-path bug. The 2-buffer search is verified working; the 4-outstanding search is not.
+**Status (at time of writing):** Blocked on a hardware write-path bug. The 2-buffer search is verified working; the 4-outstanding search is not.
 
 ## Goal
 

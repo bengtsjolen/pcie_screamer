@@ -15,11 +15,13 @@ stones that separate the hard parts of a PCIe memory-access tool:
 4. a 4 KiB burst DMA engine with CPU-visible buffers;
 5. multiple outstanding 4 KiB reads for high search throughput.
 
-The long-term target is the Lattice ECP5 Versa board, which is already on
-the PCIe bus and is programmed and controlled through an FT2232-family
-JTAG/UART interface. The Versa has no FT601 yet. The variants are arranged
-so that the first ECP5 steps do not depend on FT601, and so that an FT601
-shield can later enable the same host-driven and high-bandwidth paths.
+The current lab target is the Lattice ECP5 Versa Development Board
+(LFE5UM-45F, non-5G), which is already on the PCIe bus and is programmed
+and controlled through an FT2232-family JTAG/UART interface. The Versa has
+no FT601 yet. The ECP5-5G Versa Development Board (LFE5UM5G-45F) is a
+different board with 5 Gbps SERDES. The variants are arranged so that the
+first ECP5 steps do not depend on FT601, and so that an FT601 shield can
+later enable the same host-driven and high-bandwidth paths.
 
 Nothing in this document is an ECP5 implementation plan. It records what
 exists on the Squirrel, what each variant proves, and which dependencies
@@ -35,19 +37,24 @@ must be solved before the same variants can run on ECP5.
 - Vendor/device ID `10ee:0666`, BAR0 `0x40000`.
 - Shared system clock 100 MHz; the PCIe hard IP provides the user clock.
 
-### Target: ECP5 Versa
+### Current ECP5 board: ECP5 Versa (LFE5UM-45F)
 
-- ECP5-5G device with the board's hard PCIe x1 edge connector.
+- ECP5 Versa Development Board, LFE5UM-45F (non-5G), with the board's
+  PCIe x1 edge connector.
 - FT2232-family device for JTAG and UART.
 - No FT601; a shield is planned but not designed or built.
-- The ECP5 has a hard PCIe block, but this tree has no ECP5 platform file
-  and the vendored LitePCIe has no ECP5 PHY. That is the largest open
-  dependency for the port.
+- The ECP5-5G Versa Development Board (LFE5UM5G-45F) is a different board
+  with 5 Gbps SERDES and a different PCIe soft IP core. The non-5G Versa
+  uses Lattice's `PCIE_core` endpoint over SERDES; the 5G board uses
+  `PCIE2_core`.
+- This tree has no ECP5 platform file and the vendored LitePCIe has no
+  ECP5 PHY. That is the largest open dependency for the port.
 
 ### Serial device naming
 
-The Squirrel documentation uses `/dev/ttyUSB1`; the current handover used
-`/dev/ttyUSB2`. Enumeration depends on which FTDI channels the host binds.
+The Squirrel documentation uses `/dev/ttyUSB1`; the 4-outstanding
+bring-up used `/dev/ttyUSB2`. Enumeration depends on which FTDI channels
+the host binds.
 Use `/dev/serial/by-id` or `dmesg` rather than relying on the number.
 
 ## What each transport is for
@@ -237,7 +244,7 @@ The verified saved image is `bitstreams/soc_squirrel-console.bin`
 
 ### ECP5 implication
 
-This is the recommended first ECP5 target. It needs only the hard PCIe
+This is the recommended first ECP5 target. It needs only the ECP5 PCIe
 endpoint, a small CPU/SoC, and the FT2232 UART. The slow FT2232 does not
 matter because the data path is PCIe; the UART carries only commands and
 the final dump. Success here establishes the ECP5 PCIe PHY, BME, MRd32,
@@ -412,8 +419,7 @@ Recent fix: the 4-outstanding write/commit path was repaired in commit
 `de0536f` (2026-10-31). The write stage is now driven into the per-tag
 BRAMs, the completion tag is applied on the header cycle, CplD byte
 enables are honored, and the CPU window is a full 12-bit word address so
-all four buffers are visible. The earlier handover document describes the
-failure as unresolved and is historical.
+all four buffers are visible.
 
 ### Build and run
 
@@ -487,9 +493,11 @@ Required before any variant can run:
   the FT2232 JTAG/UART pins;
 - an ECP5 PCIe endpoint integration. The vendored LitePCIe in this tree
   supports S7, UltraScale+, Cyclone V, Gowin GW5A, and Lattice
-  CertusPro-NX PHYs, but not ECP5. This needs either a new ECP5 hard-PCIe
-  wrapper/LitePCIe PHY or another proven endpoint core;
-- a constraints/timing strategy for the ECP5 hard PCIe block and the
+  CertusPro-NX PHYs, but not ECP5. ECP5 PCIe is SERDES plus Lattice's soft
+  endpoint IP (`PCIE_core` on the non-5G Versa, `PCIE2_core` on the
+  ECP5-5G board), so this needs a new ECP5 PHY/integration or another
+  proven endpoint core;
+- a constraints/timing strategy for the ECP5 SERDES/PCIe endpoint and the
   100 MHz system clock;
 - a host-visible device ID and BAR layout, ideally matching the Squirrel
   (`10ee:0666`, BAR0 `0x40000`) so the existing console software and
@@ -526,7 +534,7 @@ match, no completion errors, and a stable 4 KiB chunk stream.
 
 ### Step 3 - V5 and the FT601 shield
 
-V5 (4 outstanding) depends on the ECP5 hard PCIe block's tag/outstanding
+V5 (4 outstanding) depends on the ECP5 PCIe endpoint's tag/outstanding
 behavior. Test V4 first; move to V5 only if the endpoint can keep multiple
 tagged 4 KiB reads in flight without completion loss.
 
@@ -545,7 +553,12 @@ controller. It should not block the SoC bring-up.
 ### ECP5 risk list
 
 - No ECP5 LitePCIe PHY in the current tree.
-- ECP5 hard-PCIe outstanding/tag capabilities may differ from the S7 IP.
+- ECP5 soft PCIe endpoint outstanding/tag capabilities may differ from
+  the S7 hard IP.
+- The non-5G LFE5UM-45F is not the 5G board; do not assume PCIe Gen2.
+  Confirm the achievable link rate before promising the Squirrel's
+  426.7 MiB/s raw number, and re-measure the 149 MiB/s search target on
+  the actual link.
 - ECP5 BRAM/LUT budget and 100 MHz timing.
 - FT2232 UART enumeration and baud-rate handling.
 - FT601 shield electrical design, pin count, and USB 3.0 signal integrity.
@@ -617,5 +630,3 @@ buffer with `rpeek`.
   CPU-visible buffers and the V4/V5 decision point.
 - `docs/superpowers/plans/2026-10-30-soc-search-throughput.md` - V4/V5
   implementation plan.
-- `docs/HANDOVER-2026-10-31-soc-search-4outstanding.md` - historical
-  record of the V5 write-path failure; resolved in `de0536f`.
