@@ -122,6 +122,11 @@ class SoCSearch(SoCCore):
         self.add_csr("bench_select")
         self.submodules.read_bench = read_bench = ReadBench()
         self.add_csr("read_bench")
+        self.bus.add_slave(
+            name="read_buf",
+            slave=read_bench.bus,
+            region=SoCRegion(origin=0x20008000, size=0x4000, mode="r"),
+        )
 
         self.comb += [
             chunk_dma.tlp_rx.valid.eq(self.pcie_phy.source.valid

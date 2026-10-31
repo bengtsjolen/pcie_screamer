@@ -187,6 +187,8 @@ static void print_help(void)
 	uart_puts("                      stride defaults to 16 and is a 16-byte multiple\r\n");
 	uart_puts("  bench <addr64> <len64>  raw 4-outstanding PCIe read benchmark\r\n");
 	uart_puts("  peek                show first 16 bytes of DMA buffer 0\r\n");
+	uart_puts("  rpeek               show first 32 bytes of ReadBench buffer 0\r\n");
+	uart_puts("  wtest               write 0x1122334455667788 to ReadBench word 0\r\n");
 	uart_puts("                      find a 16-byte-aligned 128-bit pattern\r\n");
 	uart_puts("WARNING: arbitrary physical reads may hang or crash the host!\r\n");
 }
@@ -233,8 +235,8 @@ static int scan_buffer(uint32_t buffer, uint64_t addr, uint32_t len,
 		       uint64_t *match)
 {
 	const volatile uint32_t *buf =
-		(const volatile uint32_t *)(DMA_BUF_BASE +
-					    (buffer ? 0x1000u : 0u));
+		(const volatile uint32_t *)(READ_BUF_BASE +
+					    (buffer * 0x1000u));
 	uint32_t off;
 
 	for (off = 0; off + 16u <= len; off += stride) {
@@ -256,10 +258,81 @@ static int scan_buffer(uint32_t buffer, uint64_t addr, uint32_t len,
 	return 0;
 }
 
+
+
+static void peek_read_buffer(void);
+
+static void test_buffer_write(void)
+{
+	read_bench_test_addr_write(0);
+	read_bench_test_data_write(0x1122334455667788ull);
+	read_bench_test_we_write(1);
+	read_bench_test_we_write(0);
+	uart_puts("mem0=0x");
+	put_hex64(read_bench_mem0_read());
+	uart_puts("\r\n");
+	peek_read_buffer();
+}
+
+static void peek_read_buffer(void)
+{
+	const volatile uint32_t *buf =
+		(const volatile uint32_t *)READ_BUF_BASE;
+	uint32_t i;
+
+	for (i = 0; i < 8; i++) {
+		put_hex32(buf[i], 8);
+		uart_putc(' ');
+	}
+	uart_puts("\r\n");
+	uart_puts("debug=0x");
+	put_hex64(read_bench_debug_read());
+	uart_puts("\r\n");
+	uart_puts("mem0=0x");
+	put_hex64(read_bench_mem0_read());
+	uart_puts("\r\n");
+	uart_puts("first_addr=0x");
+	put_hex32(read_bench_first_addr_read(), 3);
+	uart_puts(" first_data=0x");
+	put_hex64(read_bench_first_data_read());
+	uart_puts(" first_tag=0x");
+	put_hex32(read_bench_first_tag_read(), 2);
+	uart_puts(" first_wp_we=");
+	uart_putc(read_bench_first_wp_we_read() ? '1' : '0');
+	uart_puts(" first_test_we=");
+	uart_putc(read_bench_first_test_we_read() ? '1' : '0');
+	uart_puts("\r\n");
+	uart_puts("fifo_seen=");
+	uart_putc(read_bench_fifo_seen_read() ? '1' : '0');
+	uart_puts(" fifo_tag=0x");
+	put_hex32(read_bench_fifo_tag_read(), 1);
+	uart_puts(" fifo_addr=0x");
+	put_hex32(read_bench_fifo_addr_read(), 3);
+	uart_puts(" fifo_data=0x");
+	put_hex64(read_bench_fifo_data_read());
+	uart_puts(" fifo_wp_we=");
+	uart_putc(read_bench_fifo_wp_we_read() ? '1' : '0');
+	uart_puts("\r\n");
+	uart_puts("cnt_seen=");
+	uart_putc(read_bench_cnt_seen_read() ? '1' : '0');
+	uart_puts(" cnt_tag=0x");
+	put_hex32(read_bench_cnt_tag_read(), 1);
+	uart_puts(" cnt_count=0x");
+	put_hex32(read_bench_cnt_count_read(), 3);
+	uart_puts(" cnt_data=0x");
+	put_hex32(read_bench_cnt_data_read(), 3);
+	uart_puts(" cnt_len=0x");
+	put_hex32(read_bench_cnt_len_read(), 3);
+	uart_puts(" cnt_new=0x");
+	put_hex32(read_bench_cnt_new_read(), 3);
+	uart_puts("\r\n");
+}
+
 static void peek_buffer(void)
 {
 	uint32_t i;
 
+	main_bench_select_write(0);
 	chunk_dma_rd_buffer_write(0);
 	for (i = 0; i < 2; i++) {
 		uint64_t value;
@@ -281,6 +354,8 @@ static void bench_memory(uint64_t addr, uint64_t len)
 	uint32_t wait_count = 0;
 
 	main_bench_select_write(1);
+	read_bench_auto_release_write(1);
+	read_bench_stop_write(0);
 	while (!(read_bench_status_read() & STATUS_LINK_READY)) {
 		if ((wait_count++ & 0xfffff) == 0)
 			print_status();
@@ -308,70 +383,68 @@ static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4],
 	uint64_t scanned = 0;
 	uint64_t next_progress = 256ull * 1024 * 1024;
 	uint64_t match;
-	uint32_t current_len;
-	uint32_t next_len = 0;
-	uint32_t current_buf = 0;
-	uint32_t next_buf = 0;
+	uint32_t tag = 0;
 	uint32_t wait_count = 0;
-	int have_next;
+	uint32_t settle;
 
-	main_bench_select_write(0);
-	if (!(chunk_dma_status_read() & STATUS_LINK_READY))
+	main_bench_select_write(1);
+	read_bench_auto_release_write(0);
+	read_bench_stop_write(0);
+	if (!(read_bench_status_read() & STATUS_LINK_READY))
 		uart_puts("waiting for PCIe link...\r\n");
-	while (!(chunk_dma_status_read() & STATUS_LINK_READY)) {
+	while (!(read_bench_status_read() & STATUS_LINK_READY)) {
 		if ((wait_count++ & 0xfffff) == 0)
 			print_status();
 	}
+	read_bench_addr_lo_write((uint32_t)addr);
+	read_bench_addr_hi_write((uint32_t)(addr >> 32));
+	read_bench_length_lo_write((uint32_t)len);
+	read_bench_length_hi_write((uint32_t)(len >> 32));
+	read_bench_start_write(1);
 
-	current_len = (len > 4096) ? 4096 : (uint32_t)len;
-	if (start_chunk(addr, current_len, current_buf) != 0) {
-		uart_puts("error: bad chunk\r\n");
-		return;
-	}
+	while (scanned < len) {
+		uint32_t current_len = ((len - scanned) > 4096ull) ?
+			4096u : (uint32_t)(len - scanned);
 
-	for (;;) {
-		uint64_t current_addr;
-
-		if (wait_chunk() != 0)
-			return;
-
-		current_addr = addr + scanned;
-		scanned += current_len;
-		have_next = scanned < len;
-		if (have_next) {
-			next_len = ((len - scanned) > 4096) ? 4096
-				: (uint32_t)(len - scanned);
-			next_buf = current_buf ^ 1;
-			if (start_chunk(addr + scanned, next_len, next_buf) != 0) {
-				uart_puts("error: bad chunk\r\n");
+		while (!(read_bench_tag_ready_read() & (1u << tag))) {
+			if (read_bench_status_read() & STATUS_ERROR) {
+				uart_puts("error: ring dma 0x");
+				put_hex32(read_bench_error_read(), 8);
+				uart_puts("\r\n");
+				main_bench_select_write(0);
 				return;
 			}
 		}
+		for (settle = 0; settle < 16; settle++)
+			asm volatile("nop;" ::: "memory");
 
-		if (scan_buffer(current_buf, current_addr, current_len,
+		if (scan_buffer(tag, addr + scanned, current_len,
 				pattern, stride, &match)) {
-			if (have_next)
-				(void)wait_chunk();
+			read_bench_stop_write(1);
+			while (!(read_bench_status_read() & (STATUS_DONE | STATUS_ERROR)))
+				;
+			main_bench_select_write(0);
 			uart_puts("match 0x");
 			put_hex64(match);
 			uart_puts("\r\n");
 			return;
 		}
 
-		if (!have_next)
-			break;
-
+		read_bench_release_write(1u << tag);
+		scanned += current_len;
+		tag = (tag + 1) & 3;
 		if (scanned >= next_progress) {
 			uart_puts("scan ");
 			put_hex64(scanned);
 			uart_puts("\r\n");
 			next_progress += 256ull * 1024 * 1024;
 		}
-
-		current_buf = next_buf;
-		current_len = next_len;
 	}
 
+	read_bench_stop_write(1);
+	while (!(read_bench_status_read() & (STATUS_DONE | STATUS_ERROR)))
+		;
+	main_bench_select_write(0);
 	uart_puts("no match\r\n");
 }
 
@@ -497,6 +570,18 @@ int main(void)
 				continue;
 			}
 			bench_memory(addr, len);
+		} else if (str_eq(argv[0], "wtest")) {
+			if (argc != 1) {
+				uart_puts("error: too many arguments\r\n");
+				continue;
+			}
+			test_buffer_write();
+		} else if (str_eq(argv[0], "rpeek")) {
+			if (argc != 1) {
+				uart_puts("error: too many arguments\r\n");
+				continue;
+			}
+			peek_read_buffer();
 		} else if (str_eq(argv[0], "peek")) {
 			if (argc != 1) {
 				uart_puts("error: too many arguments\r\n");
