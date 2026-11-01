@@ -141,6 +141,127 @@ Completing an open-source ECP5 PCIe stack is a separate, larger project;
 the wrapper boundary in this design is what makes that replacement
 possible without touching the SoC.
 
+### Assessment of ECP5-PCIe as the open-source base
+
+A second-opinion review of connecting LitePCIe to ECP5-PCIe concluded
+that ECP5-PCIe is the right open-source base, but that this is an
+endpoint-completion project, not a small adapter. The verdict is:
+technically viable and the best available open-source starting point,
+with a realistic effort of months rather than weeks for a solo
+developer.
+
+What the review gets right:
+
+- ECP5-PCIe already has an LTSSM through L0/Recovery, DLLP/DLL control,
+  InitFC/UpdateFC parsing, LCRC, sequence numbers, a replay buffer,
+  ACK/NAK, and a config-space responder. Yumewatari stops at the
+  PHY/LTSSM level and would require the DLL and TLP layers as well.
+- The missing pieces are a LitePCIe TLP-stream wrapper, a proper Type 0
+  config space, MSI, and TX credit gating. The seven gaps in the review
+  (stream adapter, config space, TLP demux/mux, credit gating, DLL
+  robustness, non-5G configuration, reset plumbing) match the code.
+- Generating ECP5-PCIe Verilog and instantiating it in LiteX is the
+  right first step. A full Migen translation is a later cleanup, not a
+  prerequisite for the first link.
+- The review's board notes are relevant: `lattice_versa_ecp5.py` has
+  `pcie_x1` and the ispCLOCK/PRSNT path, and the non-5G DCU/clocking
+  defaults came from 5G sample code.
+
+Where this assessment adds emphasis:
+
+1. **RX buffer and credit sizing is a first-order task.** The current
+   receiver buffer is small (512-byte default) and the advertised
+   credits are modest. A 4 KiB MRd returns 256-byte CplDs from the root
+   complex; four outstanding reads produce many completions. Size the RX
+   buffer and advertised credits for 256-byte CplDs before V2 is
+   considered reliable, not only before V4/V5.
+2. **DLL TX replay and credit gating are likely hard blockers for
+   search DMA.** The replay buffer is only four TLPs
+   (`2**len(replay_num)`), `sending_tlp` is an unconnected TODO,
+   `accepts_tlps` uses a suspicious `>= 2048` comparison, and the
+   replay timer counts `rx` cycles rather than symbol times. Treat these
+   as required work before sustained DMA, not corner cases.
+3. **Config-space scope depends on the milestone.** For V2-V5, the
+   must-haves are BAR0 size-mask, Command/Memory/BME, Device Control
+   (MPS/MRRS), ID capture, and UR for invalid config. MSI can be
+   deferred because the SoC uses UART and bus-master reads, not a host
+   driver. The full LitePCIe kernel/MMIO/DMA path needs MSI and the
+   complete Type 0 config space.
+4. **The wrapper still needs Amaranth surgery.** `PCIePhy` instantiates
+   `TLP` and connects it to the DLL TLP stream. To pass memory TLPs to
+   LitePCIe, expose the raw DLL TLP stream (or replace `TLP` with a
+   demux/mux) in the Amaranth top and regenerate Verilog.
+5. **Simulation coverage is config-only today.** The existing
+   `virtual_tlp_gen` produces config TLPs; it does not exercise
+   MRd/CplD, credit exhaustion, or replay. New stimulus is needed for
+   the memory TLP path and DLL corner cases.
+6. **Non-5G is off the tested path.** The reference hardware is the 5G
+   Versa and 5G EVN. The `speed_5GTps=False` path exists, but the
+   DCU/CMU/PLL/CTC defaults and the 100 MHz refclk path need a hardware
+   validation.
+7. **The review's effort estimate is optimistic.** Steps 1-4 may be a
+   few weeks for a PCIe/DLL expert working full time; a solo developer
+   should budget roughly two to six months to a reliable V2, with the
+   DLL/credit/RX work dominating, and longer for V4/V5.
+
+| Milestone | Viability | Main risk |
+|---|---|---|
+| Generate Verilog, instantiate in LiteX, reach L0/DL_Active | High | Amaranth 0.4 environment, non-5G DCU/refclk |
+| Enumerate, BAR0, Command/BME, config reads/writes | Medium-high | Config-space rewrite, TLP demux, ID capture |
+| V2 single-word TLPDMA | Medium | Stream adapter, RX buffer/credits, reset |
+| V4/V5 search DMA | Medium-low | Replay buffer, TX credit gating, 256-byte CplDs |
+| Full LitePCIe MMIO/DMA/MSI | Lower | MSI, full config space, DLL maturity |
+
+#### Amaranth environment
+
+This repository uses Migen/LiteX and does not use Amaranth. The
+Amaranth version in the main venv is irrelevant. ECP5-PCIe is an
+external Amaranth 0.4-era project; create a dedicated venv with
+Amaranth 0.4 and the matching `amaranth-boards` version to generate its
+Verilog. Keep the main Migen/LiteX venv untouched. The current
+Amaranth 0.5 install cannot elaborate ECP5-PCIe as-is because
+`amaranth.hdl.ast.Part` no longer exists.
+
+#### Non-5G build and deployment expectation
+
+- **Build:** the code has a `speed_5GTps=False` path and tests that
+  override the platform device to LFE5UM-45F/25F. A non-5G Versa
+  bitstream looks feasible using the Versa pinout, but it is not the
+  reference configuration; expect platform, DCU, PLL, CTC, and refclk
+  work.
+- **Deploy:** if the LTSSM/DLL train, the first realistic observable is
+  a PCIe endpoint in `lspci`. The current config space uses VID/DID
+  `0x1234:0x5678` and a PCIe capability, so the host may show
+  `1234:5678` with class 0.
+- **Do not expect a usable device yet.** The current config space is a
+  plain RAM: BAR0 has no size mask, Command/BME semantics are absent,
+  there is no MSI, and memory TLPs are not handled. The host may report
+  a bogus BAR size or fail resource assignment; there is no driver,
+  MMIO, or DMA. Enumeration is the first hardware milestone, not a
+  usable endpoint.
+- The project's published hardware evidence is L0/DLLP observation on
+  a 5G Versa. Host enumeration on a real machine is the next thing to
+  prove, not a guaranteed result of deploying the current code.
+
+#### Recommended open-source spike
+
+Before committing to the full open-source stack:
+
+1. Create the dedicated Amaranth 0.4 venv and generate the ECP5-PCIe
+   endpoint top-level (DCU/SERDES plus `PCIePhy`) Verilog with
+   `speed_5GTps=False` for LFE5UM-45F.
+2. Instantiate it in LiteX on the non-5G Versa and expose LTSSM/DLL
+   state through CSRs/UARTBone.
+3. Reach L0/DL_Active, then add the stream adapter, TLP demux/mux, and
+   minimal config space; verify enumeration and BAR0/BME.
+4. Only then attempt TLPDMA. Fix RX buffer/credits and TX replay/credit
+   gating before V4/V5.
+
+Go/no-go: if the spike cannot reach L0 and enumeration, keep the
+vendor-IP eval as the stepping stone and treat the open-source stack as
+a separate project. Do not commit to the full LitePCIe stack before the
+spike proves the DCU, toolchain, and enumeration path.
+
 ## Goals
 
 1. Add an ECP5 Versa platform file with device selection for
@@ -528,6 +649,8 @@ the least invasive option after Phase 0.
 - The open-source references are 5G-first. Start the open-source backend
   on the 5G Versa, or explicitly port and validate it for the non-5G
   LFE5UM-45F. Do not assume an untested non-5G path.
+- Start with the open-source spike in the assessment above; do not
+  attempt the full LitePCIe stack before L0 and enumeration work.
 - This is a separate project and separate spec; it is not required for
   the vendor-IP stepping stone.
 
@@ -630,6 +753,12 @@ Phase 2:
   clocking and constraints; do not transfer non-5G assumptions to it.
 - Both open-source references are 5G-first; the non-5G LFE5UM-45F
   Versa is off their tested path and needs a board port and validation.
+- Open-source backend: RX buffer and credit sizing for 256-byte CplDs
+  and TX replay/credit gating are first-order; the current values are
+  marginal.
+- Open-source backend: ECP5-PCIe is Amaranth 0.4-era code. Use a
+  dedicated Amaranth 0.4 venv; the main Migen/LiteX venv is not
+  involved.
 - The open-source backend depends on a working Yosys/nextpnr-ecp5/
   ecppack installation; the local environment currently needs one.
 
