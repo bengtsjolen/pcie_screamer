@@ -106,21 +106,40 @@ for shipping or long unattended runs.
 
 ### Open-source alternatives
 
+Both open-source references are 5G-first; neither targets the non-5G
+LFE5UM-45F Versa as its primary board.
+
 - **Yumewatari** (whitequark) is written in Migen, not Amaranth. It
-  implements the ECP5 DCU/SERDES and LTSSM up to L0 (PHY-level) and
-  targets the ECP5-5G Versa at 2.5 Gbps. It has no DLL, TLP, config
-  space, BAR decode, or DMA.
+  implements the ECP5 DCU/SERDES and LTSSM up to L0 (PHY-level). It
+  targets the ECP5-5G Versa (LFE5UM5G-45F): the testbench imports
+  `migen.build.platforms.versaecp55g`, the OpenOCD config is
+  `ecp5-versa5g.cfg`, and the ispClock images are `versa5g-pcie-*`.
+  It runs the DCU at 2.5 Gbps, but on the 5G board. It has no DLL,
+  TLP, config space, BAR decode, or DMA.
 - **ECP5-PCIe** (ECP5-PCIe/ECP5-PCIe) is written in Amaranth and goes
   further: PHY, LTSSM, DLL/DLLP, and TLP. It is research-grade and
-  incomplete; its README says "PHY mostly done", its TODO list is open,
-  and it targets a custom PCIe adapter for the ECP5 EVN. It is inspired
-  by LitePCIe's layering, but it is not a drop-in LitePCIe PHY.
+  incomplete; its README says "PHY mostly done", its TODO list is open.
+  Its primary hardware is the ECP5-5G Versa plus a custom PCIe adapter
+  for the ECP5 5G EVN (`LFE5UM5G-85F`). Most tests use
+  `amaranth_boards.versa_ecp5_5g`; `Tests/pcie_adapter.py` defines an
+  adapter platform with `device = "LFE5UM5G-85F"`. Some tests override
+  the device to LFE5UM-45F/25F on the Versa 5G platform, so non-5G is
+  not entirely absent, but it is not the reference configuration.
 
-Neither project is a complete endpoint today. The vendor IP is the
-shortest path to a working ECP5 link and transaction layer and is used
-only as an evaluation stepping stone. Completing an open-source ECP5
-PCIe stack is a separate, larger project; the wrapper boundary in this
-design is what makes that replacement possible without touching the SoC.
+Neither project is a complete endpoint today. The non-5G LFE5UM-45F
+Versa is not the tested board for either; using it would require a
+board port and validation. The 5G Versa is the natural open-source
+target and also gives Gen2 x1 with a 64-bit TLP path.
+
+These facts affect the open-source backend only. They do not change the
+vendor-IP phase ordering, which remains non-5G first until the order is
+decided.
+
+The vendor IP is the shortest path to a working ECP5 link and
+transaction layer and is used only as an evaluation stepping stone.
+Completing an open-source ECP5 PCIe stack is a separate, larger project;
+the wrapper boundary in this design is what makes that replacement
+possible without touching the SoC.
 
 ## Goals
 
@@ -506,8 +525,9 @@ the least invasive option after Phase 0.
 - Keep the wrapper interface unchanged for both device variants.
 - Replace the vendor IP with an open-source ECP5 PCIe stack
   (ECP5-PCIe/Yumewatari plus the missing link and transaction layers).
-- Validate non-5G first, then 5G; the 5G path may be easier to drive at
-  Gen2 but has its own SERDES/clocking constraints.
+- The open-source references are 5G-first. Start the open-source backend
+  on the 5G Versa, or explicitly port and validate it for the non-5G
+  LFE5UM-45F. Do not assume an untested non-5G path.
 - This is a separate project and separate spec; it is not required for
   the vendor-IP stepping stone.
 
@@ -608,6 +628,8 @@ Phase 2:
   still needs measurement.
 - The 5G board is a different device/IP with different SERDES/PCIe
   clocking and constraints; do not transfer non-5G assumptions to it.
+- Both open-source references are 5G-first; the non-5G LFE5UM-45F
+  Versa is off their tested path and needs a board port and validation.
 - The open-source backend depends on a working Yosys/nextpnr-ecp5/
   ecppack installation; the local environment currently needs one.
 
