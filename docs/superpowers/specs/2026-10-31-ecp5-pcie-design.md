@@ -17,8 +17,11 @@ software-facing contract as `S7PCIEPHY`, so the existing SoC variants
 (V2 single-word, V4 double-buffer DMA, V5 four-outstanding search) can
 run unchanged once the PHY is swapped. The first backend uses Lattice
 Diamond and the Lattice PCI Express Endpoint IP for the link and
-transaction layers. The wrapper boundary is deliberately PHY-agnostic so
-an open-source backend can replace the vendor IP later.
+transaction layers. The vendor IP is used only as an evaluation and
+bring-up stepping stone; the long-term goal is an open-source ECP5 PCIe
+implementation that does not depend on Lattice IP. The wrapper boundary
+is deliberately PHY-agnostic so the open-source backend can replace the
+vendor IP later without changing the SoC.
 
 ## Context
 
@@ -54,8 +57,17 @@ DCU/SERDES plus Lattice's soft endpoint IP:
 
 The vendor endpoint IP is a mix of hard and soft blocks, is placed in a
 specific DCU location, and is delivered through Diamond/Clarity Designer.
-A production IP license is required; the hardware evaluation mode is
-time-limited (approximately four hours).
+The x1 native ECP5 core has a 16-bit TLP data path (about 6,207 LUTs,
+4 EBRs, 4,188 registers); 16 bits at 125 MHz is 250 MB/s, matching PCIe
+Gen1 x1.
+
+A production IP license is required. Without a license, Diamond embeds a
+hardware timer in the bitstream that typically allows 30 minutes to 4
+hours of operation (the PCIe core page says about 4 hours). The IP stops
+when the timer expires, and reprogramming the FPGA resets the timer.
+Full timing simulation is not available without a license. The
+evaluation mode is suitable for bring-up and short test sessions, not
+for shipping or long unattended runs.
 
 ### Open-source alternatives
 
@@ -70,8 +82,10 @@ time-limited (approximately four hours).
   by LitePCIe's layering, but it is not a drop-in LitePCIe PHY.
 
 Neither project is a complete endpoint today. The vendor IP is the
-shortest path to a working ECP5 link and transaction layer. The
-open-source stacks remain references and a possible future backend.
+shortest path to a working ECP5 link and transaction layer and is used
+only as an evaluation stepping stone. Completing an open-source ECP5
+PCIe stack is a separate, larger project; the wrapper boundary in this
+design is what makes that replacement possible without touching the SoC.
 
 ## Goals
 
@@ -88,10 +102,16 @@ open-source stacks remain references and a possible future backend.
    code.
 6. Measure the real Gen1 x1 throughput and update the variant targets
    accordingly.
+7. Deliver the vendor-IP path only as an evaluation/bring-up stepping
+   stone. The long-term destination is a fully open-source ECP5 PCIe
+   implementation, which is a separate project.
 
 ## Non-Goals
 
-- Implementing a full open-source PCIe link and transaction stack.
+- Implementing a full open-source PCIe link and transaction stack in
+  this spec. That is the long-term destination and a separate project.
+- Shipping or production use of the evaluation IP. The evaluation
+  bitstream is for bring-up only.
 - Upstreaming the vendor IP backend to LitePCIe. The vendor netlist and
   Diamond flow are local to this project.
 - PCILeech-over-FT601 on ECP5. That remains the V1 path and needs the
@@ -117,6 +137,8 @@ open-source stacks remain references and a possible future backend.
 ### Link expectations
 
 - PCIe Gen1 x1, 2.5 GT/s.
+- Vendor x1 core: 16-bit TLP data path at 125 MHz; the wrapper converts
+  16-bit to/from 64-bit LitePCIe words.
 - Raw 8b/10b line rate: 250 MB/s.
 - After TLP framing and completion overhead, expect roughly
   200-225 MB/s of payload, not the Squirrel's 426.7 MiB/s.
@@ -126,8 +148,10 @@ open-source stacks remain references and a possible future backend.
 
 ### Prerequisites
 
-- Lattice Diamond installation and a valid license for the ECP5 PCIe
-  endpoint IP.
+- Lattice Diamond installation. The PCIe endpoint IP evaluation mode is
+  sufficient for Phase 0 and short Phase 1/2 test sessions; a
+  production IP license is required for long unattended runs or
+  shipping.
 - The Versa board's PCIe reference clock and PERST# wiring confirmed
   from the board documentation and the vendor reference design.
 - FT2232 JTAG/UART enumeration and programming flow.
@@ -192,15 +216,34 @@ iteration, but the table above is the minimal compatible set.
 - The IP includes the link and transaction layers, config space, and
   BAR decode. The user-facing TLP interface is the boundary the wrapper
   consumes.
+- The x1 native ECP5 core uses a 16-bit TLP data path at 125 MHz. This
+  is the width the wrapper's gearbox must handle; it is not an open
+  question.
+
+### Evaluation-license constraints
+
+- The evaluation IP is a netlist embedded in the user design through
+  Diamond; it is not limited to the vendor demo.
+- Unlicensed bitstreams contain a hardware timer, typically 30 minutes
+  to 4 hours (the PCIe core page says about 4 hours).
+- When the timer expires, the IP stops. Reprogramming the FPGA resets
+  the timer, so repeated short test sessions are possible.
+- Full timing simulation is not available without a license.
+- Evaluation use is for bring-up and validation only. Do not ship it,
+  and do not rely on it for long unattended scans or soak testing.
+- Practical plan: use the evaluation IP for Phase 0 and short Phase 1/2
+  tests, reflashing between sessions. Long 1 GiB/6 GiB or V5 tests
+  either fit inside the timer, use a temporary license, or wait for the
+  open-source backend.
 
 ### Phase 0 questions to answer from the generated wrapper
 
-These are deliberately not guessed; Phase 0 resolves them before the
-wrapper is written:
+The x1 core's 16-bit width is known from the IP documentation. The
+remaining items are resolved in Phase 0 before the wrapper is written:
 
-1. What is the exact user TLP interface width (16/32/64-bit) and
-   handshake (`trn_*`, AXI-Stream, or another local bus) for the x1
-   core?
+1. What is the exact 16-bit TLP handshake and timing (`trn_*`,
+   AXI-Stream, or another local bus), and how are the end-of-TLP,
+   byte count, and valid bytes encoded?
 2. Does the TLP TX interface expect the requester ID in the user header,
    or does the IP insert it? This determines whether the wrapper's `id`
    is informational only or must be used by the SoC header builder.
@@ -221,22 +264,23 @@ wrapper is written:
 
 - Present a 64-bit LitePCIe `phy_layout` (`dat` 64, `be` 8) on both
   `sink` and `source`.
-- If the vendor TLP path is narrower than 64 bits, add a width adapter
-  (accumulate/split DWORDs) and generate `last` from the vendor end-of-
-  packet indication.
+- The vendor x1 core is 16-bit. Implement a 16<->64 gearbox:
+  - TX: pack four 16-bit vendor words into one 64-bit LitePCIe word,
+    with a partial final word and correct `be`/`last`.
+  - RX: unpack each 64-bit LitePCIe word into four 16-bit vendor words,
+    preserving the vendor end-of-TLP and valid-byte markers.
 - Map vendor byte enables to `be`; map the vendor end-of-TLP marker to
   `last`.
-- Preserve TLP order and do not merge or split TLPs beyond what the
-  width adapter requires.
-- Use LitePCIe's `PHYTXDatapath`/`PHYRXDatapath` where their clock
-  domains and widths fit; otherwise implement the adapter inside the
-  wrapper.
+- Preserve TLP order. Do not merge or reorder TLPs; the gearbox is a
+  pure width conversion.
+- LitePCIe's `PHYTXDatapath`/`PHYRXDatapath` support 64/128-bit paths,
+  not 16-bit. The 16<->64 gearbox must be implemented in the wrapper.
 
 ### Status and configuration mapping
 
 - `_link_status.status`: vendor link-up.
-- `_link_status.rate`: Gen1 (0) for the non-5G board; expose Gen2 only if
-  the board/Ip supports it.
+- `_link_status.rate`: Gen1 (0) for the non-5G board; expose Gen2 only
+  if the board/IP supports it.
 - `_link_status.width`: x1 (0).
 - `_link_status.ltssm`: vendor LTSSM state, truncated to six bits.
 - `_bus_master_enable`: vendor Device Control bit 2.
@@ -250,8 +294,9 @@ wrapper is written:
 
 ### Clocking and reset
 
-- Use the vendor IP's 125 MHz user clock for the LitePCIe side (or a
-  clock domain crossing if the SoC runs at 100 MHz).
+- The vendor IP's user interface is 16 bits at 125 MHz.
+- Use that 125 MHz user clock for the vendor side of the gearbox, with a
+  clock-domain crossing to the 100 MHz SoC side where needed.
 - Drive `pcie_rst_n` from PERST# and the SoC reset policy used by the
   Squirrel variants.
 - Hold the vendor IP in reset until the reference clock and PERST# are
@@ -329,9 +374,11 @@ least invasive option after Phase 0.
   - PCIe enumeration and link rate;
   - BAR0 access and config space;
   - basic TLP loopback / vendor demo behavior.
+- Record the evaluation timer behavior and license state.
 - Inspect the generated wrapper and answer the six Phase 0 questions.
 - Deliverable: a known-good vendor bitstream and a written record of
-  the TLP interface, config signals, and build flow.
+  the 16-bit TLP interface, config signals, evaluation timer, and build
+  flow.
 
 ### Phase 1: Wrapper and V2
 
@@ -343,6 +390,8 @@ least invasive option after Phase 0.
   - one MRd32 and one MRd64;
   - VESA dump matches;
   - no completion errors.
+- Keep each test session within the evaluation timer and reflash
+  between sessions.
 - Acceptance: V2 behaves like the Squirrel V2 on low memory, with the
   ECP5 link reporting Gen1 x1.
 
@@ -353,27 +402,30 @@ least invasive option after Phase 0.
 - Run V5 four-outstanding only if the vendor IP supports the required
   outstanding/tag behavior. Otherwise keep V4 on ECP5.
 - Measure 1 GiB and 6 GiB scan rates at sparse strides.
+- Long scans may exceed the evaluation timer. Fit them inside a session,
+  use a temporary license, or defer them until the open-source backend.
 - Acceptance: no completion errors, correct buffer contents, and a
   recorded throughput appropriate for Gen1 x1.
 
-### Phase 3: Optional open-source backend
+### Phase 3: Long-term open-source backend
 
+- This is the destination, not an optional extra.
 - Keep the wrapper interface unchanged.
-- If the vendor IP license/toolchain is unacceptable, evaluate an
-  open-source backend (ECP5-PCIe/Yumewatari plus the missing link and
-  transaction layers).
-- This is a separate project and is not required for the first working
-  ECP5 path.
+- Replace the vendor IP with an open-source ECP5 PCIe stack
+  (ECP5-PCIe/Yumewatari plus the missing link and transaction layers).
+- This is a separate project and separate spec; it is not required for
+  the vendor-IP stepping stone.
 
 ## Data flow and timing
 
 - SoC TLP builders (TLPDMA, ChunkDMA, ReadBench) produce 64-bit TLPs
   with `dat`, `be`, and `last`.
-- The wrapper converts to/from the vendor TLP interface.
+- The wrapper's 16<->64 gearbox converts between the 64-bit LitePCIe
+  stream and the vendor's 16-bit TLP path.
 - The vendor IP handles link training, retry, flow control, config
   space, and completions.
-- The ECP5 user clock is 125 MHz for Gen1 x1; the SoC clock remains
-  100 MHz, so the wrapper may need a clock-domain crossing.
+- The vendor user interface is 16 bits at 125 MHz; the SoC clock
+  remains 100 MHz, so the wrapper may need a clock-domain crossing.
 - At Gen1 x1, a 4 KiB MRd takes about 20-25 microseconds at the raw
   line rate, plus completion latency. The four-outstanding V5 benefit
   depends on the vendor IP's outstanding-request support and the host
@@ -397,7 +449,7 @@ least invasive option after Phase 0.
 ### Simulation
 
 - Unit-test the wrapper against a mock vendor TLP interface:
-  - 64-bit and narrower width conversion;
+  - 16<->64 gearbox, including partial final words;
   - `last` and `be` generation;
   - TLP ordering;
   - link-status and config mapping.
@@ -418,7 +470,8 @@ Phase 1:
 Phase 2:
 - V4 VESA/high scan matches.
 - 1 GiB scan completes with no completion errors.
-- 6 GiB scan completes if stable.
+- 6 GiB scan completes if stable and, if needed, within the evaluation
+  timer or with a temporary license.
 - Buffer contents are validated through the existing CPU window or
   `rpeek` diagnostics.
 
@@ -430,11 +483,17 @@ Phase 2:
   read must match.
 - The link rate and measured throughput are recorded; no assumption of
   Squirrel Gen2 numbers.
+- The evaluation timer is documented and the tests fit its window, or a
+  license is present. The result is a stepping stone, not a shipping
+  configuration.
 
 ## Risks and open questions
 
-- Lattice endpoint IP licensing and Diamond integration.
-- Vendor x1 TLP interface width and handshake semantics.
+- Lattice endpoint IP licensing (evaluation timer) and Diamond
+  integration.
+- Vendor x1 16-bit TLP handshake semantics, end-of-TLP encoding, and
+  byte-count handling.
+- Evaluation timer limits long test sessions and unattended scans.
 - Requester-ID ownership (user header vs IP insertion).
 - Config/BME signal mapping and whether the vendor IP exposes a
   `cfg_mgmt` equivalent.
@@ -469,6 +528,8 @@ Phase 2:
 - Lattice FPGA-UG-02006 - PCI Express Demos for the ECP5 and ECP5-5G
   Versa Development Boards.
 - Lattice FPGA-TN-02045 - ECP5/ECP5-5G PCI Express Soft IP Ease of Use.
+- Lattice IP Support - hardware evaluation timer behavior and licensing:
+  https://www.latticesemi.com/Support/LatticeIPSupport
 - Yumewatari: https://github.com/whitequark/Yumewatari (Migen,
   PHY/LTSSM reference).
 - ECP5-PCIe: https://codeberg.org/ECP5-PCIe/ECP5-PCIe (Amaranth,
@@ -476,7 +537,8 @@ Phase 2:
 
 ## Out of scope
 
-- Open-source ECP5 PCIe stack implementation.
+- Open-source ECP5 PCIe stack implementation in this spec. It is the
+  long-term destination and a separate project.
 - ECP5-5G support.
 - FT601 shield and PCILeech V1 on ECP5.
 - Production timing closure, long-term reliability, and full error
