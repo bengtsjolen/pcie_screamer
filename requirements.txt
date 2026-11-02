@@ -1,0 +1,34 @@
+# Project venv (Python 3.12):  python3 -m venv venv && venv/bin/pip install -r requirements.txt
+# The litex/* trees are local clones (see README); Migen must be at
+# https://github.com/m-labs/migen.git e19524c. Editable installs use compat mode so
+# the litex/ checkout directory does not shadow the litex package when run from here.
+-e ./litex/migen --config-settings editable_mode=compat
+-e ./litex/litex --config-settings editable_mode=compat
+-e ./litex/litex-boards --config-settings editable_mode=compat
+-e ./litex/litepcie --config-settings editable_mode=compat
+-e ./litex/liteiclink --config-settings editable_mode=compat
+-e ./litex/litedram --config-settings editable_mode=compat
+-e ./litex/liteeth --config-settings editable_mode=compat
+-e ./litex/litescope --config-settings editable_mode=compat
+-e ./litex/litespi --config-settings editable_mode=compat
+-e ./litex/litesdcard --config-settings editable_mode=compat
+-e ./litex/litesata --config-settings editable_mode=compat
+-e ./litex/litei2c --config-settings editable_mode=compat
+-e ./litex/litejesd204b --config-settings editable_mode=compat
+-e ./litex/pythondata-cpu-vexriscv --config-settings editable_mode=compat
+-e ./litex/pythondata-cpu-vexriscv-smp --config-settings editable_mode=compat
+-e ./litex/pythondata-cpu-vexiiriscv --config-settings editable_mode=compat
+-e ./litex/pythondata-cpu-naxriscv --config-settings editable_mode=compat
+-e ./litex/pythondata-cpu-serv --config-settings editable_mode=compat
+-e ./litex/pythondata-cpu-lm32 --config-settings editable_mode=compat
+-e ./litex/pythondata-cpu-minerva --config-settings editable_mode=compat
+-e ./litex/pythondata-cpu-mor1kx --config-settings editable_mode=compat
+-e ./litex/pythondata-cpu-sentinel --config-settings editable_mode=compat
+-e ./litex/pythondata-misc-tapcfg --config-settings editable_mode=compat
+-e ./litex/pythondata-misc-usb_ohci --config-settings editable_mode=compat
+-e ./litex/pythondata-software-compiler_rt --config-settings editable_mode=compat
+-e ./litex/pythondata-software-picolibc --config-settings editable_mode=compat
+
+# ECP5-PCIe core generation (tools/gen_ecp5_pcie_core.py). Emits RTLIL only;
+# Verilog is written by the OSS CAD Suite Yosys, so no amaranth-yosys.
+amaranth==0.4.5

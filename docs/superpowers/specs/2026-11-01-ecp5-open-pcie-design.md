@@ -77,6 +77,13 @@ Facts that shape this design:
 - The hardware tests use `amaranth_boards.versa_ecp5_5g` with the device
   overridden to `LFE5UM-25F`. LFE5UM-45F on the non-5G Versa has never
   been the build target.
+- With `fabric_clk=True` (the x1 top's setting) the DCU reference clock
+  is the Amaranth `sync` clock, i.e. a board oscillator on a fabric pin,
+  and `EXTREFB` is not instantiated. With `fabric_clk=False` it uses
+  `EXTREFB` at `EXTREF0`, fed by the ispCLOCK. The published bring-up
+  therefore most likely ran with a refclk independent of the host. That
+  works only if the host does not use spread-spectrum clocking, because
+  CTC absorbs about 600 ppm, not SSC's 5000 ppm downspread.
 - The bundled ispCLOCK images (`ispCLOCK/versa5g-pcie-*.svf`) are for
   the 5G Versa only.
 - `Gateware/setup.py` requires unpinned `amaranth`; the code uses
@@ -160,7 +167,11 @@ TLP symbol path.
   `lattice_versa_ecp5.py` defaults to `device="LFE5UM5G"`; every build
   entry point must pass the device explicitly and assert it.
 - PCIe x1 pins from litex-boards: DCU0 CH0, `perst` on A6,
-  `refclk_en` C12, `refclk_rst_n` R1.
+  `refclk_en` C12, `refclk_rst_n` R1. The DCU pins are dedicated and
+  placed by the `DCUA` `LOC`; requesting litex-boards' `pcie_x1`
+  resource fails in nextpnr (`pcie_x1_tx_p constrained to W4 does not
+  exist`), so `platforms/pcie_versa.py` adds a separate `pcie_perst_n`
+  resource for A6 only.
 - The slot refclk reaches the DCU through the onboard ispCLOCK. Before
   any LTSSM debugging, confirm the routing and the PRSNT strap with the
   Lattice demo bitstream and, if needed, the J4 jumper.
@@ -253,17 +264,49 @@ has plain clock and reset ports.
 
 ### Generation
 
-- `tools/gen_ecp5_pcie_core.py` runs in a dedicated venv
-  (`.venv-amaranth04`, Amaranth 0.4.x pinned in
-  `third_party/requirements-amaranth04.txt`) and writes
-  `gateware/ecp5pcie/verilog/ecp5_pcie_core_gen{1,2}.v`.
-- The generated Verilog is committed with a header recording the
-  submodule commit and generator arguments, so the main Migen/LiteX venv
-  never needs Amaranth. CI regenerates and fails on a diff.
+- Amaranth 0.4.5 and Migen share the project `venv` (Python 3.12); the
+  packages do not overlap. Pins live in `requirements.txt`: `migen` from
+  `litex/migen` at GitHub `e19524c`, the LiteX packages editable from
+  `litex/`, and `amaranth==0.4.5`. The editable installs use
+  `editable_mode=compat`: with the default mode, running from the repo
+  root makes the `litex/` directory shadow the `litex` package as a
+  namespace package.
+- `tools/gen_ecp5_pcie_core.py` writes
+  `gateware/ecp5pcie/verilog/ecp5_pcie_core_gen{1,2}.v` in four steps:
+  1. elaborate the core top with a minimal `LatticeECP5Platform`
+     subclass for the target device (no `amaranth-boards` needed) and
+     emit RTLIL with `amaranth.back.rtlil.convert`;
+  2. rename ports that Amaranth 0.4 gives private `$signal…` ids (unnamed
+     `Signal`s crossing a module boundary) to public `\anon_signal…`
+     ids, which current Yosys requires;
+  3. run the OSS CAD Suite Yosys:
+     `read_verilog -lib +/ecp5/cells_bb.v; read_rtlil; hierarchy -check;
+     proc; flatten; opt_clean; write_verilog`;
+  4. prepend a header with the submodule commit and generator arguments.
+- Amaranth's own `back.verilog` is not used: it calls `read_ilang`, which
+  `amaranth-yosys` 0.50 dropped, and the Verilog written by
+  `amaranth-yosys` 0.40 has attributes on empty case branches that Yosys
+  0.70 rejects. The flattened output keeps `LOC` attributes such as
+  `DCU0`.
+- The generated Verilog is committed, so builds do not need Amaranth.
+  CI regenerates and fails on a diff.
+- Toolchain from `tools/ensure_fpga_toolchain.sh` (OSS CAD Suite,
+  wrappers in `tools/bin`). nextpnr's device flag for both Versa parts is
+  `--um-45k`/`--um5g-45k`; `--45k` is the SERDES-less LFE5U and fails
+  with `no DCU location`.
 - `ECP5PCIeCore` (Migen) does `platform.add_source()` and `Instance()`;
   Yosys reads both sources and nextpnr places one design.
 - Gen1: `speed_5GTps=False` (SerDes) and `support_5GTps=False` (PHY and
   LTSSM). Gen2: both `True`.
+- Clock constraints: the SerDes clocks are internal nets, so LiteX's
+  `add_period_constraint` (which emits `FREQUENCY PORT`) does not reach
+  them, and constraints on the Migen-side signal names are dropped
+  because those nets are driven inside the black box. `ECP5PCIeCore`
+  adds `FREQUENCY NET` constraints on the driver names inside the
+  flattened core: `<core>.serdes.pcie_clk` and `<core>.aligner_tx_clk`
+  at the word clock (62.5 MHz Gen1, 125 MHz Gen2), and
+  `<core>.serdes.rxf_clk` and `<core>.serdes.tx_fifo.txf_clk` at twice
+  that.
 
 ## Migen layers
 
@@ -371,6 +414,10 @@ code is unchanged.
   engines abort and flush.
 - The platform's `refclk_en` and `refclk_rst_n` are driven to enable the
   ispCLOCK output.
+- The core is built with `fabric_clk=False`, so the DCU uses the slot
+  refclk through `EXTREF0` (common clock with the host, SSC-safe). A
+  `fabric_clk=True` build from the Versa's 100 MHz oscillator is kept as
+  an M2 diagnostic for separating refclk-path problems from DCU problems.
 
 ## Platform and build
 
@@ -381,9 +428,11 @@ code is unchanged.
   `ECP5PCIEPHY`, reusing the existing SoC cores, with
   `--device LFE5UM|LFE5UM5G` and `--variant v2|v4|v5`. The existing
   Squirrel tops are not modified.
-- Toolchain: Yosys, nextpnr-ecp5 and ecppack via LiteX's
-  `LatticeTrellisToolchain`. The installed nextpnr-ecp5 is 0.6; M1
-  confirms it handles the DCU and timing, and upgrades if not.
+- Toolchain: Yosys, nextpnr-ecp5 and ecppack from
+  `tools/ensure_fpga_toolchain.sh` (OSS CAD Suite; Yosys 0.70 and
+  nextpnr 0.11.1 as of 2026-11-01), driven by LiteX's
+  `LatticeTrellisToolchain` with `tools/bin` first on `PATH`. The system
+  nextpnr-ecp5 0.6 is not used.
 - CI-equivalent `make` targets: regenerate the core, run all simulations,
   build both `um-45k` and `um5g-45k` bitstreams.
 
@@ -431,11 +480,34 @@ Each milestone has a gate; do not start the next one until it passes.
   the LFE5UM-45F Versa (if Lattice ships one; otherwise skip). Gate: the
   host enumerates the demo. A failure here is a board, slot or refclk
   problem, not ours.
-- **M1 Environment and builds.** Submodule, Amaranth 0.4 venv, generator,
+- **M1 Environment and builds.** Submodule, `requirements.txt`, generator,
   `ECP5PCIeCore` black box, `platforms/pcie_versa.py`, a minimal
   `soc_ecp5.py` with UARTBone and status CSRs only. Gate: both `um-45k`
   and `um5g-45k` bitstreams build and meet timing on `rx`, `tx`, `pcie`
   and `sys`.
+
+  Spike result (2026-11-01, `build/smoke_ecp5_pcie_gen.py`, unmodified
+  upstream `LatticeECP5PCIePhy(support_5GTps=False)` including its `TLP`,
+  `fabric_clk=True`, no clock constraints): generation, synthesis,
+  `nextpnr-ecp5 --um-45k` and `ecppack` all succeed for LFE5UM-45F.
+  4109 `TRELLIS_COMB` (9%), 2215 FF (5%), 4 DP16KD, 1 DCUA. Post-route
+  unconstrained Fmax of the `rx` domain is 89 MHz against 62.5 MHz
+  required; all other domains exceed 220 MHz.
+
+  Gate result (2026-11-01, fork `6d92448`, `soc_ecp5.py --build`, all
+  four SerDes clocks constrained, `fabric_clk=False`, no transaction
+  layer): all three variants route and pass timing. Post-route Fmax in
+  MHz:
+
+  | Build | `pcie_clk` (rx) | `aligner_tx_clk` | `rxf_clk` | `txf_clk` | `sys` |
+  |---|---|---|---|---|---|
+  | LFE5UM Gen1 | 117.3 / 62.5 | 224.1 / 62.5 | 266.5 / 125 | 306.9 / 125 | 136.3 / 100 |
+  | LFE5UM5G Gen1 | 146.2 / 62.5 | 248.1 / 62.5 | 281.8 / 125 | 347.0 / 125 | 167.3 / 100 |
+  | LFE5UM5G Gen2 | 145.2 / 125 | 238.1 / 125 | 304.1 / 250 | 344.8 / 250 | 161.0 / 100 |
+
+  The LFE5UM Gen1 SoC uses 5403 LUT4 (12%), 2988 FF, 3 DP16KD and one
+  of two DCUs. Gen2 `pcie_clk` has the least slack (16%); watch it as
+  Migen layers are added to the `pcie` domain.
 - **M2 Link to L0.** Gate as in the hardware table. This is the highest
   risk milestone: non-5G DCU, PLL and CTC settings, refclk path and
   LFE5UM-45F are all off ECP5-PCIe's tested path. Go/no-go for the
@@ -481,7 +553,9 @@ months dominated by DLL corner cases.
 
 - **Refclk on the non-5G Versa.** Whether the factory ispCLOCK image
   routes the slot refclk to DCU0 with this host and slot, and whether
-  PRSNT must be strapped. M0 answers this.
+  PRSNT must be strapped. M0 answers this. ECP5-PCIe's x1 top used a
+  fabric oscillator (`fabric_clk=True`), so the `EXTREF0` path is
+  unproven in that code base too.
 - **LFE5UM DCU settings.** CMU/PLL, CDR and CTC values in
   `ecp5_serdes.py` came from 5G bring-up. Trellis models the DCU the same
   for both families, but the non-5G silicon is only rated to 3.2 Gb/s and
@@ -494,13 +568,16 @@ months dominated by DLL corner cases.
 - **No backpressure on the DLL RX path** until the full-buffer Nak fix
   lands; until then `CompletionBudget` and line-rate draining are the
   only protection.
-- **Old Amaranth.** Amaranth 0.4 must stay installable for the life of
-  the black-box phase; the pinned venv and committed Verilog limit the
-  exposure.
-- **nextpnr-ecp5 0.6** may be too old for clean timing on the DCU
-  domains.
+- **Old Amaranth.** Amaranth 0.4.5 must stay installable for the life of
+  the black-box phase; the pin and committed Verilog limit the exposure.
+  The RTLIL rename step depends on Amaranth 0.4's private-name scheme
+  and is checked by `hierarchy -check` on every generation.
 - **Gen2 is unvalidated** until the 5G board is available; keep its
-  build and simulation green so it does not rot.
+  build and simulation green so it does not rot. ECP5-PCIe never ran a
+  link at 5 GT/s (its x1 top forces `lane.speed` to 2.5 GT/s), and the
+  Gen2 DCU configuration expects a 200 MHz refclk, so the ispCLOCK
+  output must be reprogrammed or the DCU reference multiplier changed
+  for the 100 MHz slot clock.
 - **License.** ECP5-PCIe has no license declared (`# TODO license=''` in
   `setup.py`). Ask the authors before redistributing the fork or
   upstreaming a port.
@@ -510,8 +587,10 @@ months dominated by DLL corner cases.
 | File | Purpose |
 |---|---|
 | `third_party/ECP5-PCIe` (submodule) | Fork of ECP5-PCIe at `c511d2e` plus the changes above |
-| `third_party/requirements-amaranth04.txt` | Pinned Amaranth 0.4 environment for generation |
+| `requirements.txt` | Project `venv`: editable `litex/*` packages, Migen `e19524c`, `amaranth==0.4.5` |
+| `tools/ensure_fpga_toolchain.sh` | OSS CAD Suite toolchain (exists) |
 | `tools/gen_ecp5_pcie_core.py` | Generates the core Verilog for Gen1 and Gen2 |
+| `tools/ecp5_pcie_status.py` | Reads status CSRs and drains the LTSSM/DLL trace over UARTBone |
 | `gateware/ecp5pcie/verilog/` | Committed generated Verilog |
 | `gateware/ecp5pcie/core.py` | `ECP5PCIeCore` Migen black-box wrapper |
 | `gateware/ecp5pcie/adapter.py` | `TLPStreamAdapter` |

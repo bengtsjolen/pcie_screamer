@@ -1,1 +1,5 @@
 __pycache__
+tools/oss-cad-suite/
+tools/bin/
+venv/
+build/soc_ecp5_*

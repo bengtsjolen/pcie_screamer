@@ -1,0 +1,4 @@
+[submodule "third_party/ECP5-PCIe"]
+	path = third_party/ECP5-PCIe
+	url = git@github.com:bengtsjolen/ECP5-PCIe.git
+	branch = pcie-screamer
