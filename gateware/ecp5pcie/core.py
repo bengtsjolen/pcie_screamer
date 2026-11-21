@@ -3,11 +3,15 @@ import sys
 from pathlib import Path
 
 from migen import *
-from migen.genlib.cdc import MultiReg, GrayCounter, GrayDecoder
+from migen.genlib.cdc import MultiReg, GrayCounter
 
 from litex.soc.interconnect import stream
 from litex.soc.interconnect.csr import *
 from litex.soc.cores.freqmeter import FreqMeter
+
+from .capture import TLPCapture
+from .config_space import ConfigSpace
+from .router import TLPRouter
 
 ROOT        = Path(__file__).resolve().parents[2]
 VERILOG_DIR = Path(__file__).resolve().parent / "verilog"
@@ -47,11 +51,16 @@ class _GrayEventCounter(Module):
         self.value = Signal(width)
 
         counter = ClockDomainsRenamer(cd)(GrayCounter(width))
-        decoder = GrayDecoder(width)
-        self.submodules += counter, decoder
+        self.submodules += counter
         self.comb += counter.ce.eq(event)
-        self.specials += MultiReg(counter.q, decoder.i)
-        self.comb += self.value.eq(decoder.o)
+        gray = Signal(width)
+        self.specials += MultiReg(counter.q, gray)
+        # Log-depth prefix XOR; GrayDecoder's serial chain misses 100 MHz at 32 bits.
+        binary, shift = gray, 1
+        while shift < width:
+            binary = binary ^ (binary >> shift)
+            shift *= 2
+        self.sync += self.value.eq(binary)
 
 
 class ECP5PCIeCore(Module, AutoCSR):
@@ -63,7 +72,7 @@ class ECP5PCIeCore(Module, AutoCSR):
     EXTREF0 at `refclk_freq` (Gen1: 100 or 156.25 MHz; Gen2: 200 MHz).
     """
     def __init__(self, platform, perst_n, gen=1, refclk_freq=None, fabric_clk=False,
-                 transaction_layer=False, ignore_perst=False, trace_depth=64):
+                 transaction_layer=False, ignore_perst=False, trace_depth=64, config=None):
         self.gen = gen
         name = core_name(gen, refclk_freq, fabric_clk, transaction_layer)
         platform.add_source(str(core_verilog(gen, refclk_freq, fabric_clk, transaction_layer)))
@@ -151,11 +160,47 @@ class ECP5PCIeCore(Module, AutoCSR):
             o_tlp_tx_ready = self.tlp_tx_ready,
         )
 
-        # Until the TLP layers exist, drain received TLPs and send none.
-        self.comb += [
-            self.tlp_rx_ready.eq(1),
-            self.tlp_tx_valid.eq(0),
-        ]
+        self.submodules.capture = TLPCapture(self.tlp_rx_data, self.tlp_rx_valid,
+                                             self.tlp_tx_data, self.tlp_tx_valid)
+
+        if transaction_layer:
+            # The core answers config requests itself.
+            self.comb += [
+                self.tlp_rx_ready.eq(1),
+                self.tlp_tx_valid.eq(0),
+            ]
+        else:
+            # Config space and routing state reset with the link (Hot Reset, link loss).
+            config_space = ConfigSpace(gen=gen, **(config or {}))
+            router = TLPRouter(config_space,
+                self.tlp_rx_data, self.tlp_rx_valid, self.tlp_rx_ready,
+                self.tlp_tx_data, self.tlp_tx_valid, self.tlp_tx_ready,
+                self.retry_buffer_occupation)
+            config_space = ResetInserter(["pcie_rx"])(config_space)
+            router       = ResetInserter(["pcie_rx"])(router)
+            self.submodules.config_space = config_space
+            self.submodules.router       = router
+            self.comb += [
+                config_space.reset_pcie_rx.eq(~self.dll_up),
+                router.reset_pcie_rx.eq(~self.dll_up),
+            ]
+            for name, event in [("cfg_rd", router.cfg_rd), ("cfg_wr", router.cfg_wr), ("ur", router.ur),
+                                ("dropped", router.dropped), ("cpl", router.cpl)]:
+                counter = _GrayEventCounter(event, "pcie_rx")
+                setattr(self.submodules, f"tl_{name}_counter", counter)
+                csr = CSRStatus(32, name=f"tl_{name}", description=f"Router {name} events")
+                setattr(self, f"_tl_{name}", csr)
+                self.comb += csr.status.eq(counter.value)
+            self._cfg = CSRStatus(fields=[
+                CSRField("command", size=16, description="Command register"),
+                CSRField("id",      size=16, description="Bus/device/function from the last CfgWr0"),
+            ])
+            self._bar0 = CSRStatus(32, description="BAR0 as programmed by the host")
+            self.specials += [
+                MultiReg(config_space.command, self._cfg.fields.command),
+                MultiReg(router.id,            self._cfg.fields.id),
+                MultiReg(config_space.bar0,    self._bar0.status),
+            ]
 
         # Status CSRs -----------------------------------------------------------------------------
         self._status = CSRStatus(fields=[
