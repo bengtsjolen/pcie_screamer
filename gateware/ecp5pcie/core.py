@@ -15,16 +15,24 @@ VERILOG_DIR = Path(__file__).resolve().parent / "verilog"
 TRACE_LAYOUT = [("time", 32), ("ltssm", 8), ("dll", 8)]
 
 
-def core_name(gen=1, fabric_clk=False, transaction_layer=False):
+def default_refclk_freq(gen):
+    return 100e6 if gen == 1 else 200e6
+
+
+def core_name(gen=1, refclk_freq=None, fabric_clk=False, transaction_layer=False):
+    refclk_freq = refclk_freq or default_refclk_freq(gen)
     return (f"ecp5_pcie_core_gen{gen}"
+            + ("" if refclk_freq == default_refclk_freq(gen) else f"_ref{int(refclk_freq/1e6)}")
             + ("_fabclk" if fabric_clk else "")
             + ("_tl" if transaction_layer else ""))
 
 
-def core_verilog(gen=1, fabric_clk=False, transaction_layer=False):
-    path = VERILOG_DIR / f"{core_name(gen, fabric_clk, transaction_layer)}.v"
+def core_verilog(gen=1, refclk_freq=None, fabric_clk=False, transaction_layer=False):
+    refclk_freq = refclk_freq or default_refclk_freq(gen)
+    path = VERILOG_DIR / f"{core_name(gen, refclk_freq, fabric_clk, transaction_layer)}.v"
     if not path.exists():
-        cmd = [sys.executable, str(ROOT / "tools" / "gen_ecp5_pcie_core.py"), "--gen", str(gen)]
+        cmd = [sys.executable, str(ROOT / "tools" / "gen_ecp5_pcie_core.py"), "--gen", str(gen),
+               "--refclk-mhz", str(refclk_freq/1e6)]
         if fabric_clk:
             cmd.append("--fabric-clk")
         if transaction_layer:
@@ -51,13 +59,14 @@ class ECP5PCIeCore(Module, AutoCSR):
 
     The generated core runs in `pcie_rx` (DCU recovered clock, 62.5 MHz at Gen1, 125 MHz at
     Gen2). `pcie_tx` is frequency-locked to it. `sys` must be 100 MHz: the core uses it for
-    SCI access and, with `fabric_clk`, as DCU reference clock.
+    SCI access and, with `fabric_clk`, as DCU reference clock. Otherwise the DCU reference is
+    EXTREF0 at `refclk_freq` (Gen1: 100 or 156.25 MHz; Gen2: 200 MHz).
     """
-    def __init__(self, platform, perst_n, gen=1, fabric_clk=False, transaction_layer=False,
-                 ignore_perst=False, trace_depth=64):
+    def __init__(self, platform, perst_n, gen=1, refclk_freq=None, fabric_clk=False,
+                 transaction_layer=False, ignore_perst=False, trace_depth=64):
         self.gen = gen
-        name = core_name(gen, fabric_clk, transaction_layer)
-        platform.add_source(str(core_verilog(gen, fabric_clk, transaction_layer)))
+        name = core_name(gen, refclk_freq, fabric_clk, transaction_layer)
+        platform.add_source(str(core_verilog(gen, refclk_freq, fabric_clk, transaction_layer)))
 
         self.clock_domains.cd_pcie_rx = ClockDomain(reset_less=True)
         self.clock_domains.cd_pcie_tx = ClockDomain(reset_less=True)
@@ -180,22 +189,27 @@ class ECP5PCIeCore(Module, AutoCSR):
         self._rx_sym_errors = CSRStatus(32, description="Cycles with an 8b10b error while training or in L0")
         self._rx_tlps       = CSRStatus(32, description="TLPs delivered by the DLL")
 
-        status_rx = Cat(self.link_up, self.dll_up, self.rx_present, self.rx_locked,
-                        self.rx_aligned, self.tx_locked, self.reset_done, self.det_status)
-        status_sys = Signal(len(status_rx))
-        perst_n_sys = Signal()
-        self.specials += [
-            MultiReg(status_rx, status_sys),
-            MultiReg(self.perst_n, perst_n_sys),
-            MultiReg(Cat(self.ltssm_state, self.dll_state), self._state.status),
-            MultiReg(Cat(self.fc["ph"],   self.fc["pd"]),   self._fc_p.status),
-            MultiReg(Cat(self.fc["nph"],  self.fc["npd"]),  self._fc_np.status),
-            MultiReg(Cat(self.fc["cplh"], self.fc["cpld"]), self._fc_cpl.status),
-            MultiReg(Cat(self.tx_seq_num, self.rx_seq_num,
-                         self.retry_buffer_occupation[:4], self.receive_buffer_occupation[:4]),
-                     self._dll.status),
-        ]
-        self.comb += self._status.status.eq(Cat(status_sys, perst_n_sys))
+        # A CSRStatus with fields drives .status from its field signals, so drive the fields.
+        def sync_fields(csr, sources):
+            for name, src in sources.items():
+                self.specials += MultiReg(src, getattr(csr.fields, name))
+
+        sync_fields(self._status, {
+            "link_up":    self.link_up,    "dll_up":     self.dll_up,
+            "rx_present": self.rx_present, "rx_locked":  self.rx_locked,
+            "rx_aligned": self.rx_aligned, "tx_locked":  self.tx_locked,
+            "reset_done": self.reset_done, "det_status": self.det_status,
+            "perst_n":    self.perst_n,
+        })
+        sync_fields(self._state,  {"ltssm": self.ltssm_state, "dll": self.dll_state})
+        sync_fields(self._fc_p,   {"hdr": self.fc["ph"],   "data": self.fc["pd"]})
+        sync_fields(self._fc_np,  {"hdr": self.fc["nph"],  "data": self.fc["npd"]})
+        sync_fields(self._fc_cpl, {"hdr": self.fc["cplh"], "data": self.fc["cpld"]})
+        sync_fields(self._dll, {
+            "tx_seq": self.tx_seq_num, "rx_seq": self.rx_seq_num,
+            "retry_occupancy":   self.retry_buffer_occupation[:4],
+            "receive_occupancy": self.receive_buffer_occupation[:4],
+        })
 
         tlp_rx_valid_d = Signal()
         self.sync.pcie_rx += tlp_rx_valid_d.eq(self.tlp_rx_valid != 0)

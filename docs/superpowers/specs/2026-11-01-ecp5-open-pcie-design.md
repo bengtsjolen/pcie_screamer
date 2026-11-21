@@ -172,9 +172,16 @@ TLP symbol path.
   resource fails in nextpnr (`pcie_x1_tx_p constrained to W4 does not
   exist`), so `platforms/pcie_versa.py` adds a separate `pcie_perst_n`
   resource for A6 only.
-- The slot refclk reaches the DCU through the onboard ispCLOCK. Before
-  any LTSSM debugging, confirm the routing and the PRSNT strap with the
-  Lattice demo bitstream and, if needed, the J4 jumper.
+- `EXTREF0` is driven by the Versa's onboard synthesizer at 156.25 MHz
+  (enabled by `refclk_en`/`refclk_rst_n`), not by the slot refclk:
+  measured on 2026-11-21 as a 97.66 MHz DCU word clock with the 25x
+  multiplier (156.25 × 25 / 40). Gen1 therefore uses the 16x multiplier
+  (`--refclk-mhz 156.25`, the `soc_ecp5.py` default). This is a separate
+  reference from the host: fine at Gen1 within ±300 ppm, but not with a
+  host that enables spread-spectrum clocking.
+- SW4 must select SPI flash configuration; in JTAG-only mode the flash is
+  invisible (JEDEC ID 00) and the FPGA stays unconfigured after power-up.
+  The flash is a Micron N25Q128.
 - Power the Versa from its own 12 V supply, not the slot, so the FPGA can
   be reprogrammed over JTAG with the host running. Re-enumerate with the
   root port's `remove`/`rescan` in sysfs.
@@ -414,10 +421,10 @@ code is unchanged.
   engines abort and flush.
 - The platform's `refclk_en` and `refclk_rst_n` are driven to enable the
   ispCLOCK output.
-- The core is built with `fabric_clk=False`, so the DCU uses the slot
-  refclk through `EXTREF0` (common clock with the host, SSC-safe). A
-  `fabric_clk=True` build from the Versa's 100 MHz oscillator is kept as
-  an M2 diagnostic for separating refclk-path problems from DCU problems.
+- The core is built with `fabric_clk=False`, so the DCU uses `EXTREF0`
+  (156.25 MHz from the onboard synthesizer, see the hardware section). A
+  `fabric_clk=True` build from the Versa's 100 MHz oscillator is kept as a
+  diagnostic.
 
 ## Platform and build
 
@@ -514,6 +521,22 @@ Each milestone has a gate; do not start the next one until it passes.
   open-source path.
 - **M3 DL_Active.** DLL fixes from the core section that affect bring-up
   (`sending_tlp`, Ack sequence check). Gate as in the table.
+
+  M2/M3 result (2026-11-21, fork `633b0f5`, LFE5UM-45F Versa in a
+  Xeon Scalable (C622) server slot, SRAM-loaded): L0 about 80 ms after
+  PERST# release, DL_Active 1 µs later, the root port's
+  Set_Slot_Power_Limit received and acknowledged, stable with no replays
+  or Recovery. The root port is hidden by the BIOS (nothing trained during
+  POST), so `LnkSta` could not be read and the 10-minute soak is still
+  open. Fixes needed:
+  - wrapper: field-based CSRs must drive `csr.fields.*`, not `.status`
+    (all status flags read 0 before);
+  - 156.25 MHz refclk (16x) instead of the assumed 100 MHz;
+  - LTSSM: keep LinkUp through Recovery (the DLL dropped to DL_Inactive on
+    every retrain while the host stayed DL_Active);
+  - LTSSM: Recovery.RcvrCfg → Configuration only on TS1s with mismatched
+    Link/Lane numbers;
+  - DLL: an Ack scheduled while the previous one is sent is kept.
 - **M4 Enumeration.** `TLPRouter`, `ConfigSpace`, `TLPStreamAdapter`,
   status mapping; host-model simulation first. Gate as in the table.
 - **M5 V2.** `CreditGate`, `CompletionBudget`, remaining DLL fixes,
@@ -551,11 +574,11 @@ months dominated by DLL corner cases.
 
 ## Risks and open questions
 
-- **Refclk on the non-5G Versa.** Whether the factory ispCLOCK image
-  routes the slot refclk to DCU0 with this host and slot, and whether
-  PRSNT must be strapped. M0 answers this. ECP5-PCIe's x1 top used a
-  fabric oscillator (`fabric_clk=True`), so the `EXTREF0` path is
-  unproven in that code base too.
+- **Refclk on the non-5G Versa.** `EXTREF0` carries the onboard
+  156.25 MHz synthesizer, not the slot refclk, so the endpoint runs on a
+  separate reference. Hosts with spread-spectrum clocking will not hold
+  the link; routing the slot refclk to the DCU (board rework or
+  synthesizer reprogramming) is open.
 - **LFE5UM DCU settings.** CMU/PLL, CDR and CTC values in
   `ecp5_serdes.py` came from 5G bring-up. Trellis models the DCU the same
   for both families, but the non-5G silicon is only rated to 3.2 Gb/s and

@@ -33,7 +33,7 @@ class _CRG(Module):
 
 
 class SoCECP5PCIe(SoCMini):
-    def __init__(self, platform, gen=1, fabric_clk=False, transaction_layer=False,
+    def __init__(self, platform, gen=1, refclk_freq=None, fabric_clk=False, transaction_layer=False,
                  ignore_perst=False, uart_baudrate=115200, analyzer_csv=None):
         sys_clk_freq = int(100e6)
         SoCMini.__init__(self, platform, sys_clk_freq,
@@ -44,7 +44,8 @@ class SoCECP5PCIe(SoCMini):
         self.submodules.crg = _CRG(platform)
         self.add_uartbone(uart_name="serial", baudrate=uart_baudrate)
 
-        # ispCLOCK: enable the PCIe refclk output.
+        # Enable the onboard clock synthesizer that drives EXTREF0 (156.25 MHz as shipped,
+        # measured with the DCU word-clock meters).
         self.comb += [
             platform.request("refclk_en").eq(1),
             platform.request("refclk_rst_n").eq(1),
@@ -52,6 +53,7 @@ class SoCECP5PCIe(SoCMini):
 
         self.submodules.pcie_core = core = ECP5PCIeCore(platform, platform.request("pcie_perst_n"),
             gen               = gen,
+            refclk_freq       = refclk_freq,
             fabric_clk        = fabric_clk,
             transaction_layer = transaction_layer,
             ignore_perst      = ignore_perst,
@@ -86,16 +88,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", choices=DEVICES, required=True, help="LFE5UM (Versa) or LFE5UM5G (Versa 5G)")
     parser.add_argument("--gen", type=int, choices=[1, 2], default=1)
+    parser.add_argument("--refclk-mhz", type=float,
+                        help="EXTREF0 frequency (Gen1: 156.25 default, the Versa's onboard synthesizer, "
+                             "or 100; Gen2: 200)")
     parser.add_argument("--fabric-clk", action="store_true",
-                        help="Diagnostic: DCU refclk from the 100 MHz board oscillator instead of the slot")
+                        help="Diagnostic: DCU refclk from the 100 MHz board oscillator instead of EXTREF0")
     parser.add_argument("--transaction-layer", action="store_true",
                         help="Diagnostic: include ECP5-PCIe's own config-space responder")
     parser.add_argument("--ignore-perst", action="store_true", help="Treat PERST# as always released")
     parser.add_argument("--uart-baudrate", type=int, default=115200)
     parser.add_argument("--with-analyzer", action="store_true", help="LiteScope on lane symbols")
     parser.add_argument("--build", action="store_true", help="Build bitstream")
-    parser.add_argument("--load",  action="store_true", help="Load bitstream over JTAG")
+    parser.add_argument("--load",  action="store_true", help="Load bitstream into SRAM over JTAG")
+    parser.add_argument("--flash", action="store_true", help="Write bitstream to SPI flash over JTAG")
     args = parser.parse_args()
+
+    if args.fabric_clk:
+        refclk_freq = 100e6
+    elif args.refclk_mhz:
+        refclk_freq = args.refclk_mhz * 1e6
+    else:
+        refclk_freq = 156.25e6 if args.gen == 1 else 200e6
 
     if args.gen == 2 and args.device != "LFE5UM5G":
         parser.error("--gen 2 needs --device LFE5UM5G")
@@ -108,6 +121,8 @@ def main():
 
     platform = Platform(device=args.device)
     build_name = f"soc_ecp5_{args.device.lower()}_gen{args.gen}"
+    if not args.fabric_clk:
+        build_name += f"_ref{int(refclk_freq/1e6)}"
     if args.fabric_clk:
         build_name += "_fabclk"
     if args.transaction_layer:
@@ -116,6 +131,7 @@ def main():
 
     soc = SoCECP5PCIe(platform,
         gen               = args.gen,
+        refclk_freq       = refclk_freq,
         fabric_clk        = args.fabric_clk,
         transaction_layer = args.transaction_layer,
         ignore_perst      = args.ignore_perst,
@@ -125,9 +141,11 @@ def main():
     builder = Builder(soc, output_dir=str(output_dir), csr_csv=str(output_dir / "csr.csv"))
     builder.build(run=args.build, build_name=build_name)
 
+    bitstream = os.path.join(builder.gateware_dir, build_name + ".bit")
     if args.load:
-        prog = platform.create_programmer()
-        prog.load_bitstream(os.path.join(builder.gateware_dir, build_name + ".bit"))
+        platform.create_programmer().load_bitstream(bitstream)
+    if args.flash:
+        platform.create_programmer().flash(0, bitstream, verify=True)
 
 
 if __name__ == "__main__":

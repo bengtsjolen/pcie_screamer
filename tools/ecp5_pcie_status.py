@@ -68,13 +68,15 @@ def show_status(bus):
           f"tx={read(bus, 'tx_freq_value')/1e6:.3f} MHz")
 
 
-def drain_trace(bus, gen):
+def drain_trace(bus, gen, limit=None):
+    """Print queued trace entries, at most `limit` (the LTSSM can refill the FIFO as fast
+    as UARTBone drains it)."""
     clk = WORD_CLK_HZ[gen]
     level = read(bus, "trace_level")
     if field(level, 1, 1):
         print("trace     : overflow, entries were dropped")
     n = 0
-    while field(read(bus, "trace_level"), 0, 1):
+    while (limit is None or n < limit) and field(read(bus, "trace_level"), 0, 1):
         entry = read(bus, "trace_data")
         bus.regs.pcie_core_trace_pop.write(1)
         t = field(entry, 0, 32)
@@ -99,10 +101,10 @@ def main():
         if args.command == "status":
             show_status(bus)
         elif args.command == "trace":
-            drain_trace(bus, args.gen)
+            drain_trace(bus, args.gen, limit=64)
         else:
             while True:
-                drain_trace(bus, args.gen)
+                drain_trace(bus, args.gen, limit=64)
                 time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
