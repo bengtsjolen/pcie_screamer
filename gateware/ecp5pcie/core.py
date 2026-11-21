@@ -161,7 +161,7 @@ class ECP5PCIeCore(Module, AutoCSR):
         )
 
         self.submodules.capture = TLPCapture(self.tlp_rx_data, self.tlp_rx_valid,
-                                             self.tlp_tx_data, self.tlp_tx_valid)
+                                             self.tlp_tx_data, self.tlp_tx_valid, active=self.dll_up)
 
         if transaction_layer:
             # The core answers config requests itself.

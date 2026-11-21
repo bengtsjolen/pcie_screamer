@@ -20,7 +20,7 @@ class ConfigSpace(Module):
     changes. A write with `we` applies `wr_data` to the bytes in `wr_be` that are writable.
     Byte i of `rd_data`/`wr_data` is config space byte offset*4 + i.
     """
-    def __init__(self, vendor_id=0x10ee, device_id=0x0666, revision=0, class_code=0x020000,
+    def __init__(self, vendor_id=0x10ee, device_id=0x0667, revision=0, class_code=0x020000,
                  subsystem_vendor_id=None, subsystem_id=None, bar0_size=4096, gen=1):
         self.reg     = Signal(10)
         self.rd_data = Signal(32)

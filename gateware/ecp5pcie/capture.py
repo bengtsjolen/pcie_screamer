@@ -16,7 +16,7 @@ class TLPCapture(Module, AutoCSR):
     counter. Words that find the FIFO full, or both directions active in the same cycle (the
     received word wins), set the sticky overflow bit, which clears while capture is disabled.
     """
-    def __init__(self, rx_data, rx_valid, tx_data, tx_valid, depth=4096):
+    def __init__(self, rx_data, rx_valid, tx_data, tx_valid, active=1, depth=4096):
         fifo = stream.AsyncFIFO(CAPTURE_LAYOUT, depth, buffered=True)
         fifo = ClockDomainsRenamer({"write": "pcie_rx", "read": "sys"})(fifo)
         self.submodules.fifo = fifo
@@ -40,7 +40,7 @@ class TLPCapture(Module, AutoCSR):
         self.comb += [
             rx_active.eq(rx_valid != 0),
             tx_active.eq(tx_valid != 0),
-            fifo.sink.valid.eq(enable & (rx_active | tx_active)),
+            fifo.sink.valid.eq(enable & active & (rx_active | tx_active)),
             fifo.sink.time.eq(time),
             If(rx_active,
                 fifo.sink.data.eq(rx_data),
