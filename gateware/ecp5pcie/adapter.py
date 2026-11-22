@@ -136,7 +136,11 @@ class TLPStreamAdapter(Module):
         tx_fifo = ClockDomainsRenamer({"write": "sys", "read": "pcie_rx"})(tx_fifo)
         self.submodules.tx_fifo = tx_fifo
 
-        psrc = pkt_fifo.source
+        # Register the packet FIFO's block-RAM output before the unpacker (timing).
+        self.submodules.pkt_buf = pkt_buf = stream.Buffer(phy_layout(64), pipe_valid=True)
+        self.comb += pkt_fifo.source.connect(pkt_buf.sink)
+
+        psrc = pkt_buf.source
         tx_hi = Signal()
         hi_valid = Signal()
         self.comb += hi_valid.eq(psrc.be[4:8] != 0)

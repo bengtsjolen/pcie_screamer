@@ -64,8 +64,20 @@ class TLPSysRouter(Module):
         self.comb += discard.ready.eq(1)
         self.comb += If(discard.valid & discard.first, self.dropped.eq(1))
 
+        # Register valid/payload and ready on both LitePCIe-facing ports. Without this the
+        # depacketizer/packetizer handshakes chain combinationally through the router into the
+        # adapter's FIFOs, which does not close 100 MHz on the ECP5.
+        self.submodules.rx_buf = rx_buf = stream.Buffer(
+            phy_layout(data_width), pipe_valid=True, pipe_ready=True)
+        self.submodules.tx_buf = tx_buf = stream.Buffer(
+            phy_layout(data_width), pipe_valid=True, pipe_ready=True)
+        self.comb += [
+            rx_buf.source.connect(self.phy_source),
+            self.phy_sink.connect(tx_buf.sink),
+        ]
+
         self.submodules.dispatcher = dispatcher = Dispatcher(
-            self.sink, [cfg_in, self.phy_source, ur_in, discard])
+            self.sink, [cfg_in, rx_buf.sink, ur_in, discard])
         sel = Signal(2)
         self.comb += [
             If(is_cfg0,         sel.eq(0)
@@ -190,4 +202,4 @@ class TLPSysRouter(Module):
         )
 
         # TX merge ---------------------------------------------------------------------------------
-        self.submodules.arbiter = Arbiter([cfg_cpl, ur_cpl, self.phy_sink], self.source)
+        self.submodules.arbiter = Arbiter([cfg_cpl, ur_cpl, tx_buf.source], self.source)

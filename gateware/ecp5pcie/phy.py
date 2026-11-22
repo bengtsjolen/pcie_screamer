@@ -87,11 +87,12 @@ class ECP5PCIePHY(Module, AutoCSR):
             router.reset.eq(~dll_up_sys),
         ]
 
-        # Router event counters (sys) -> CSR.
+        # Router event counters (sys) -> CSR. 16-bit wrapping: they are debug aids, and wider
+        # counters only add to the CSR read mux on the `sys` critical path.
         for name, pulse in events.items():
-            counter = Signal(32)
+            counter = Signal(16)
             self.sync += If(pulse, counter.eq(counter + 1))
-            csr = CSRStatus(32, name=f"tl_{name}", description=f"Router {name} events")
+            csr = CSRStatus(16, name=f"tl_{name}", description=f"Router {name} events (wraps)")
             setattr(self, f"_tl_{name}", csr)
             self.comb += csr.status.eq(counter)
 
