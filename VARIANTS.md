@@ -1,8 +1,11 @@
 # PCIe Screamer bring-up variants
 
-Date: 2026-10-31
+Date: 2026-10-31 (ECP5 results added 2026-11-22)
 Status: Five variants are functional on the PCIe Screamer Squirrel
-(Xilinx Artix-7). The ECP5/Versa port has not been started.
+(Xilinx Artix-7). On the ECP5 Versa (LFE5UM-45F, Gen1 x1), V2, V4, and
+the V5 search path run from `soc_ecp5_v2.py`, `soc_ecp5_v4.py`, and
+`soc_ecp5_search.py`. The Gen1 1 GiB measurement is in
+[PERFORMANCE.md](PERFORMANCE.md).
 
 ## Purpose
 
@@ -23,9 +26,10 @@ different board with 5 Gbps SERDES. The variants are arranged so that the
 first ECP5 steps do not depend on FT601, and so that an FT601 shield can
 later enable the same host-driven and high-bandwidth paths.
 
-Nothing in this document is an ECP5 implementation plan. It records what
-exists on the Squirrel, what each variant proves, and which dependencies
-must be solved before the same variants can run on ECP5.
+The variant sections record what each step proves on the Squirrel. The
+ECP5 measurements are collected under V5 and in
+[PERFORMANCE.md](PERFORMANCE.md). V1 still needs an FT601 shield. The 5G
+Versa has not been measured.
 
 ## Hardware baseline and target
 
@@ -41,14 +45,15 @@ must be solved before the same variants can run on ECP5.
 
 - ECP5 Versa Development Board, LFE5UM-45F (non-5G), with the board's
   PCIe x1 edge connector.
-- FT2232-family device for JTAG and UART.
+- FT2232-family device for JTAG and UART. Console:
+  `/dev/serial/by-id/usb-Lattice_Lattice_ECP5_Versa_Board-if01-port0`
+  at 115200.
 - No FT601; a shield is planned but not designed or built.
 - The ECP5-5G Versa Development Board (LFE5UM5G-45F) is a different board
-  with 5 Gbps SERDES and a different PCIe soft IP core. The non-5G Versa
-  uses Lattice's `PCIE_core` endpoint over SERDES; the 5G board uses
-  `PCIE2_core`.
-- This tree has no ECP5 platform file and the vendored LitePCIe has no
-  ECP5 PHY. That is the largest open dependency for the port.
+  with 5 Gbps SERDES and has not been measured.
+- The open-source Gen1 endpoint in this tree enumerates on the non-5G
+  Versa. Measured link: Gen1 x1, BAR0 4 KiB. See
+  [PERFORMANCE.md](PERFORMANCE.md).
 
 ### Serial device naming
 
@@ -460,6 +465,21 @@ snapshots.
 The sparse-stride search rate meets or exceeds the 149 MiB/s
 PCILeech-over-USB reference. Dense strides are CPU-limited, not DMA-limited.
 
+### Measured results (ECP5 Versa, Gen1 x1)
+
+2026-11-22, `soc_ecp5_search.py`, nextpnr seed 24 (clk100 100.19 MHz).
+Host Rechner2, endpoint `0000:ad:00.0`, BAR0 `e6600000` (4 KiB). Full
+tables are in [PERFORMANCE.md](PERFORMANCE.md).
+
+- VESA at `0x3f000`: a 64-byte `bench` matched the known header, a 4 KiB
+  `bench` completed with `cnt_count=0x400`, and a `scan` of that buffer
+  matched at `0x3f000`.
+- Raw 1 GiB `bench` from `0x100000000`: 5.21 s, 196.7 MiB/s (206 MB/s).
+- 1 GiB `scan`, stride `0x400`: 5.21 s, 196.7 MiB/s, `no match`.
+- The scan matched the raw bench, so at this stride the Gen1 link is the
+  limit. The four-outstanding engine is the same `ReadBench` as the
+  Squirrel image above.
+
 ### Limitations
 
 - Dense-stride scans are limited by the VexRiscv scan loop.
@@ -474,16 +494,17 @@ PCILeech-over-USB reference. Dense strides are CPU-limited, not DMA-limited.
 
 ### ECP5 implication
 
-V5 is the highest-value but not the first ECP5 step. It needs the ECP5 PCIe
-endpoint to support multiple outstanding tagged reads and split
-completions at least as well as the S7 hard IP. If that is not reliable,
-V4 is the safe search fallback. It does not need FT601; the serial console
-reports progress and matches while PCIe carries the data.
+V5 is running on the non-5G Versa. A 1 GiB read with four 4 KiB requests
+in flight measured 196.7 MiB/s (206 MB/s), on the Gen1 payload ceiling.
+The serial console reports progress and matches while PCIe carries the
+data. The 5G board and an FT601 shield are still unmeasured.
 
 ## ECP5 stepping-stone roadmap
 
-This section is a plan, not an implementation. No ECP5 code exists in this
-tree yet.
+This section is the 2026-10-31 plan, written before the port. V2, V4, and
+the V5 search path have since run on the non-5G Versa; the Gen1 numbers
+are in [PERFORMANCE.md](PERFORMANCE.md). The notes below are the original
+stepping-stone list.
 
 ### Step 0 - ECP5 platform and PCIe PHY
 
@@ -552,15 +573,14 @@ controller. It should not block the SoC bring-up.
 
 ### ECP5 risk list
 
-- No ECP5 LitePCIe PHY in the current tree.
-- ECP5 soft PCIe endpoint outstanding/tag capabilities may differ from
-  the S7 hard IP.
-- The non-5G LFE5UM-45F is not the 5G board; do not assume PCIe Gen2.
-  Confirm the achievable link rate before promising the Squirrel's
-  426.7 MiB/s raw number, and re-measure the 149 MiB/s search target on
-  the actual link.
-- ECP5 BRAM/LUT budget and 100 MHz timing.
-- FT2232 UART enumeration and baud-rate handling.
+- The non-5G Versa link is Gen1 x1. The measured 1 GiB search rate is
+  196.7 MiB/s (206 MB/s), on the Gen1 payload ceiling. The Squirrel's
+  426.7 MiB/s raw number is Gen2 x1 and does not apply here.
+- clk100 for `soc_ecp5_search` closed at nextpnr seed 24 (100.19 MHz).
+  Other seeds in that sweep missed 100 MHz.
+- The 5G Versa (Gen2) has not been measured.
+- ECP5 BRAM/LUT budget for a larger image, and an FT601 shield, are still
+  open.
 - FT601 shield electrical design, pin count, and USB 3.0 signal integrity.
 - Host software assumes the Squirrel device ID/BAR layout unless changed.
 

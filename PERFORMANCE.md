@@ -1,8 +1,122 @@
-# PCIe Squirrel read-throughput measurements
+# PCIe read-throughput measurements
+
+Date: 2026-10-26 (Squirrel, updated 2026-10-27). ECP5 Versa added 2026-11-22.
+
+This document collects memory-read throughput for two platforms. The ECP5
+section is the on-chip search engine (`ReadBench`, four outstanding 4 KiB
+reads, UART console). The Squirrel section is the FT601/PCILeech path.
+
+## ECP5 Versa (LFE5UM-45F, Gen1 x1)
+
+### TL;DR
+
+* The search image keeps four 4 KiB Memory Reads in flight and scans each
+  buffer from the on-chip CPU. A 1 GiB run from `0x100000000` measured
+  **196.7 MiB/s (206 MB/s)** both as a raw `bench` and as a `scan` at
+  stride `0x400`.
+* That is the Gen1 x1 payload ceiling (raw line rate 250 MB/s; expected
+  payload after TLP overhead about 200–225 MB/s). The Squirrel's 426.7
+  MiB/s raw figure is the same test on Gen2 x1.
+* At stride `0x400` the CPU kept up with the DMA: the scan time matched
+  the raw benchmark. The link is the limit at that stride.
+* The VESA option ROM at `0x3f000` completed as a 64-byte read and as a
+  4 KiB read, and a scan of that 4 KiB matched at `0x3f000`.
+
+### Test setup
+
+Hardware:
+
+* Lattice ECP5 Versa Development Board, LFE5UM-45F (non-5G)
+* PCIe Gen1 x1, on-board 156.25 MHz reference clock
+* FT2232 JTAG/UART. Console:
+  `/dev/serial/by-id/usb-Lattice_Lattice_ECP5_Versa_Board-if01-port0`
+  at 115200
+* No FT601. The UART only carries commands and results
+
+Host:
+
+* Rechner2. Root port `0000:ac:00.0`, endpoint `0000:ad:00.0`
+* After rescan: `Mem+ BusMaster+`, BAR0 `e6600000` (32-bit,
+  non-prefetchable, 4 KiB)
+* IOMMU off, `nokaslr`, `pcie_aspm=off`
+
+Gateware:
+
+* `soc_ecp5_search.py --device LFE5UM --gen 1 --refclk-mhz 156 --seed 24`
+* nextpnr seed 24 closed clk100 at 100.19 MHz
+* Bitstream
+  `build/soc_ecp5_search_lfe5um_gen1_ref156/gateware/soc_ecp5_search_lfe5um_gen1_ref156.bit`,
+  flashed 2026-11-22
+* Engine: `gateware/read_bench.py` (four tags, four 4 KiB buffers). The
+  console is `software/soc_search_console`
+
+Method: wall clock from sending the UART command until the `soc> ` prompt
+returns. The reply is a few dozen bytes, so the 5.21 s figure is the DMA.
+`1 MiB = 1024*1024` and `1 MB = 1000*1000`.
+
+```text
+bench 100000000 40000000
+scan 100000000 40000000 deadbeef feedface cafebabe 12345678 400
+```
+
+The scan pattern is chosen so the run covers the whole range. Progress
+lines every 256 MiB (`0x10000000`, `0x20000000`, `0x30000000`,
+`0x40000000`) confirmed the full 1 GiB was scanned.
+
+### Theoretical limit
+
+| Stage | Calculation | Limit |
+|-------|-------------|-------|
+| PCIe Gen1 x1 raw | 2.5 GT/s × 1 lane × 8/10 | 250 MB/s |
+| Payload after TLP overhead | 4 KiB MRd plus CplD framing | ~200–225 MB/s |
+| Measured 1 GiB `bench` | wall clock 5.21 s, 196.7 MiB/s | **206 MB/s** |
+
+Device Control reset still advertises a 512-byte max read request. The
+4 KiB reads are larger than that advertisement, and the host completed
+them. The 100 MHz, 64-bit on-chip path (800 MB/s) is above the link rate.
+
+### Results
+
+| Command | Range | Elapsed s | MiB/s | MB/s | Result |
+|---------|-------|-----------|-------|------|--------|
+| `bench` | `0x100000000` + 1 GiB | 5.21 | 196.7 | 206 | `bench done` |
+| `scan` stride `0x400` | `0x100000000` + 1 GiB | 5.21 | 196.7 | 206 | `no match` |
+
+Correctness checks on the same image, before the 1 GiB runs:
+
+| Command | What it checked | Result |
+|---------|-----------------|--------|
+| `bench 3f000 40`, then `rpeek` | first 32 bytes of the VESA ROM | `56455341 000300f1 00300100 000022f0 00300001 029407f1 00301af1 003024f1` |
+| `bench 3f000 1000` | one 4 KiB read (1024 dwords) | `bench done`, `cnt_count=0x400` |
+| `scan 3f000 1000 41534556 f1000300 00013000 f0220000` | VESA signature in that buffer | `match 0x000000000003f000` |
+
+Printed high byte first, the header is
+`56 45 53 41 00 03 00 f1 00 30 01 00 00 00 22 f0`.
+
+An earlier ChunkDMA-only image (`soc_ecp5_v4.py`, one outstanding 4 KiB
+read) also dumped `0x3f000` for `0x40` and `0x1000` and matched this ROM.
+That image was not timed.
+
+### Observations
+
+* A 4 KiB `bench` is one Memory Read, so it does not fill the four tags.
+  The 1 GiB length is 262144 chunks of 4 KiB, which is the run that keeps
+  four reads in flight.
+* The sparse scan and the raw bench took the same 5.21 s. On the Squirrel
+  (Gen2 x1) the same stride was 330–338 MiB/s against a 426.7 MiB/s raw
+  bench, so the CPU still had headroom there. Here both sit on the Gen1
+  payload ceiling.
+* Dense strides (`0x10`, `0x100`) were CPU-bound on the Squirrel and were
+  not re-run on this link.
+* Link replay/corruption was not visible in these runs: the 4 KiB VESA
+  read completed with the expected dword count, the signature matched, and
+  the 1 GiB runs returned `bench done` / `no match` with no error code.
+
+## PCIe Squirrel read-throughput measurements
 
 Date: 2026-10-26 (updated 2026-10-27)
 
-This document collects the memory-read throughput measured on the PCIe
+This section collects the memory-read throughput measured on the PCIe
 Squirrel with our LiteX/Migen gateware and with the original
 `ufrisk/pcileech-fpga` PCIeSquirrel gateware v4.14.
 

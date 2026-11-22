@@ -240,7 +240,8 @@ def main():
     parser.add_argument("--refclk-mhz", type=float)
     parser.add_argument("--fabric-clk", action="store_true")
     parser.add_argument("--ignore-perst", action="store_true")
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=24,
+                        help="nextpnr seed (24 closed clk100 at 100.19 MHz)")
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--load", action="store_true")
     parser.add_argument("--flash", action="store_true")

@@ -85,8 +85,12 @@ class ReadBench(Module, AutoCSR):
         next_addr = Signal(64)
         end_addr = Signal(64)
         end = Signal(65)
-        remaining = Signal(64)
-        chunk_len = Signal(13)
+        # The 64-bit remaining subtract used to reach `outstanding` in one
+        # cycle. These hold that result so the carry chain ends at a register.
+        addr_more = Signal()
+        addr_chunk = Signal(13)
+        addr_live = Signal()
+        addr_kill = Signal()
         count = Signal(11)
         is64 = Signal()
         last_word = Signal(2)
@@ -189,8 +193,6 @@ class ReadBench(Module, AutoCSR):
                     & 0xFFFFFFFFFFFFFFFC),
             length.eq(Cat(self.length_lo.storage, self.length_hi.storage)),
             end.eq(base + length),
-            remaining.eq(end_addr - next_addr),
-            chunk_len.eq(Mux(remaining > 4096, 4096, remaining[0:13])),
             count.eq(req_len >> 2),
             is64.eq(req_addr[32:64] != 0),
             last_word.eq(Mux(is64, 3, 2)),
@@ -284,6 +286,7 @@ class ReadBench(Module, AutoCSR):
             dhi.eq(0),
             flush.eq(0),
             cpl_end.eq(0),
+            addr_kill.eq(0),
             sink.valid.eq(0),
             sink.dat.eq(0),
             sink.be.eq(0),
@@ -416,12 +419,17 @@ class ReadBench(Module, AutoCSR):
                 fifo_data.eq(wr_req_data),
                 fifo_wp_we.eq(wp0.we),
             ),
+            addr_more.eq(next_addr < end_addr),
+            addr_chunk.eq(Mux((end_addr - next_addr) > 4096,
+                             4096, (end_addr - next_addr)[0:13])),
+            addr_live.eq(~addr_kill),
         ]
 
         self.submodules.fsm = fsm = FSM(reset_state="IDLE")
 
         fsm.act("IDLE",
             If(self.start.re & self.start.storage & ~busy,
+                addr_kill.eq(1),
                 NextValue(done, 0),
                 NextValue(error, 0),
                 NextValue(error_code, 0),
@@ -472,28 +480,31 @@ class ReadBench(Module, AutoCSR):
                 NextValue(tag_ready, tag_ready & ~release_mask),
                 NextValue(outstanding, outstanding - release_count),
                 NextState("ISSUE"),
-            ).Elif(next_addr < end_addr,
+            ).Elif(~addr_live,
+                NextState("ISSUE"),
+            ).Elif(addr_more,
                 If(tag_available,
+                    addr_kill.eq(1),
                     NextValue(req_addr, next_addr),
-                    NextValue(req_len, chunk_len),
+                    NextValue(req_len, addr_chunk),
                     NextValue(req_tag, tag_sel),
                     NextValue(tag_busy, tag_busy | (1 << tag_sel)),
                     NextValue(outstanding, outstanding + 1),
-                    NextValue(next_addr, next_addr + chunk_len),
+                    NextValue(next_addr, next_addr + addr_chunk),
                     NextValue(word, 0),
                     Case(tag_sel, {
                         0: [NextValue(wr0, 0), NextValue(pending_valid0, 0),
                             NextValue(tag_data0, 0),
-                            NextValue(tag_count0, chunk_len >> 2)],
+                            NextValue(tag_count0, addr_chunk >> 2)],
                         1: [NextValue(wr1, 0), NextValue(pending_valid1, 0),
                             NextValue(tag_data1, 0),
-                            NextValue(tag_count1, chunk_len >> 2)],
+                            NextValue(tag_count1, addr_chunk >> 2)],
                         2: [NextValue(wr2, 0), NextValue(pending_valid2, 0),
                             NextValue(tag_data2, 0),
-                            NextValue(tag_count2, chunk_len >> 2)],
+                            NextValue(tag_count2, addr_chunk >> 2)],
                         3: [NextValue(wr3, 0), NextValue(pending_valid3, 0),
                             NextValue(tag_data3, 0),
-                            NextValue(tag_count3, chunk_len >> 2)],
+                            NextValue(tag_count3, addr_chunk >> 2)],
                     }),
                     NextState("TX"),
                 ).Else(
@@ -704,7 +715,7 @@ class ReadBench(Module, AutoCSR):
             If(self.auto_release.storage | stop,
                 NextValue(tag_busy, tag_busy & ~cpl_mask),
                 NextValue(outstanding, outstanding - 1),
-                If((next_addr < end_addr) & ~stop,
+                If(addr_more & ~stop,
                     NextState("ISSUE"),
                 ).Elif(outstanding == 1,
                     NextValue(busy, 0),
@@ -715,7 +726,7 @@ class ReadBench(Module, AutoCSR):
                 ),
             ).Else(
                 NextValue(tag_ready, tag_ready | cpl_mask),
-                If(next_addr < end_addr,
+                If(addr_more,
                     NextState("ISSUE"),
                 ).Else(
                     NextState("WAIT"),
