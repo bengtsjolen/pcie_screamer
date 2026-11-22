@@ -561,6 +561,31 @@ Each milestone has a gate; do not start the next one until it passes.
   endpoint symbol-error counter stays frozen, so host→EP is clean). Also
   still open: duplicate 10EE vendor ID, untrained junk TLPs, and the
   10-minute soak.
+
+  LitePCIe wiring result (2026-11-22, parent `48b6af0`, same board,
+  flash-loaded, seed 1, clk100 105.20 MHz): `soc_ecp5.py --litepcie`
+  builds the core with `external_tl` and moves all TLP handling to `sys`.
+  `TLPStreamAdapter` crosses the 32-bit `pcie_rx` ports to 64-bit `sys`
+  beats; `TLPSysRouter` answers CfgRd0/CfgWr0 from `ConfigSpace`,
+  forwards MRd32/MWr32/Cpl/CplD to `LitePCIeEndpoint`, completes other
+  non-posted requests with UR and drops the rest; BAR0 is a
+  `LitePCIeWishboneMaster` on a 4K wishbone SRAM. For this build that
+  replaces the `pcie_rx`-domain config deviation above. Host MMIO to BAR0
+  was planned for V5; it was pulled forward as the first hardware check
+  of the LitePCIe path.
+
+  After a host remove/rescan the endpoint enumerated at `ad:00.0` with
+  BAR0 at `0xe6600000` (183 CfgRd0, 24 CfgWr0, 207 completions, no UR,
+  no replays), and `devmem` writes to BAR0 offsets 0 and 4 read back
+  correctly (`0xdeadbeef`, `0x12345678`), each seen on the endpoint as
+  MWr32, MRd32 and an acknowledged CplD. Timing needed `stream.Buffer`
+  stages on the router's LitePCIe-facing ports: without them clk100
+  reached 93-99 MHz over ten nextpnr seeds.
+
+  Not yet tested on this build: cold-boot enumeration, multi-dword or
+  sub-dword accesses, a soak, and root-port AER after the run. The
+  capture log shows some config requests from the rescan burst split
+  into fragments; the counters match, cause not investigated.
 - **M5 V2.** `CreditGate`, `CompletionBudget`, remaining DLL fixes,
   `soc_ecp5.py --variant v2`. Gate as in the table.
 - **M6 V4/V5 and throughput.** Gate as in the table; update
