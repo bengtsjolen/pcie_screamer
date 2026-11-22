@@ -72,7 +72,8 @@ class ECP5PCIeCore(Module, AutoCSR):
     EXTREF0 at `refclk_freq` (Gen1: 100 or 156.25 MHz; Gen2: 200 MHz).
     """
     def __init__(self, platform, perst_n, gen=1, refclk_freq=None, fabric_clk=False,
-                 transaction_layer=False, ignore_perst=False, trace_depth=64, config=None):
+                 transaction_layer=False, external_tl=False, ignore_perst=False,
+                 trace_depth=64, config=None):
         self.gen = gen
         name = core_name(gen, refclk_freq, fabric_clk, transaction_layer)
         platform.add_source(str(core_verilog(gen, refclk_freq, fabric_clk, transaction_layer)))
@@ -186,6 +187,9 @@ class ECP5PCIeCore(Module, AutoCSR):
                 self.tlp_rx_ready.eq(1),
                 self.tlp_tx_valid.eq(0),
             ]
+        elif external_tl:
+            # The TLP ports are exposed; routing and config space live in `sys` (ECP5PCIePHY).
+            pass
         else:
             # Config space and routing state reset with the link (Hot Reset, link loss).
             config_space = ConfigSpace(gen=gen, **(config or {}))
