@@ -539,6 +539,28 @@ Each milestone has a gate; do not start the next one until it passes.
   - DLL: an Ack scheduled while the previous one is sent is kept.
 - **M4 Enumeration.** `TLPRouter`, `ConfigSpace`, `TLPStreamAdapter`,
   status mapping; host-model simulation first. Gate as in the table.
+
+  M4 result (2026-11-22, fork `d7d5fb5`, parent `b73f254`, LFE5UM-45F
+  Versa flash-loaded, seed 1, clk100 103.48 MHz): the host boots and
+  enumerates the endpoint at `ad:00.0` as `10ee:0667`, class `0x020000`,
+  BAR0 4K at `0xe6600000`. Endpoint `DevSta` clean; root port `ac:00.0`
+  shows no uncorrectable/fatal AER and no URs. Over a boot the router
+  answered 24k+ config requests with a matching completion for each,
+  2 dropped (untrained junk TLPs), and 6 DLL replays. **Gate met.**
+
+  The config layer runs in the `pcie_rx` domain as a deviation from the
+  spec's TL plan; the LitePCIe transaction layer is not yet wired. Fixes
+  that unblocked enumeration (all in fork `d7d5fb5`): replay timer must
+  run while any TLP is unacknowledged (a dead timer hung the BIOS on the
+  first lost Ack); per-symbol TX/RX scrambling decisions; no unscrambled
+  word after a SKP; modulo-4096 duplicate-sequence check.
+
+  Open after M4: the root port logs recovered *correctable* errors under
+  load (`BadTLP+ BadDLLP+ Timeout+`) — occasional corruption on the
+  endpoint's TX that replay hides (~1 in a few thousand packets; the
+  endpoint symbol-error counter stays frozen, so host→EP is clean). Also
+  still open: duplicate 10EE vendor ID, untrained junk TLPs, and the
+  10-minute soak.
 - **M5 V2.** `CreditGate`, `CompletionBudget`, remaining DLL fixes,
   `soc_ecp5.py --variant v2`. Gate as in the table.
 - **M6 V4/V5 and throughput.** Gate as in the table; update
