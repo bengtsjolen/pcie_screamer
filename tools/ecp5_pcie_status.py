@@ -72,6 +72,29 @@ def show_status(bus):
         print(f"router    : {counts}")
         print(f"config    : command=0x{field(cfg, 0, 16):04x} id={field(cfg, 24, 8):02x}:"
               f"{field(cfg, 19, 5):02x}.{field(cfg, 16, 3)} bar0=0x{read(bus, 'bar0'):08x}")
+    if hasattr(bus.regs, "pcie_core_retry_debug"):
+        print(f"retry     : {describe_retry(read(bus, 'retry_debug'))}")
+
+
+REPLAY_STATES = ["Idle", "Replay", "Replay-Start", "Replay-End"]
+
+
+def describe_retry(dbg):
+    slots = " ".join(f"{field(dbg, 34 + 12 * i, 12)}" if field(dbg, 30 + i, 1) else "-" for i in range(4))
+    return (f"ackd={field(dbg, 0, 12)} fifo_level={field(dbg, 24, 3)} fifo_head="
+            f"{field(dbg, 12, 12) if field(dbg, 27, 1) else '-'} replay={REPLAY_STATES[field(dbg, 28, 2)]} "
+            f"slots=[{slots}]")
+
+
+def describe_event(data):
+    parts = []
+    if data >> 31 & 1:
+        parts.append(f"{'Ack' if data >> 30 & 1 else 'Nak'} {data & 0xfff}")
+    if data >> 29 & 1:
+        parts.append(f"replay of {data >> 12 & 0xfff}")
+    if data >> 28 & 1:
+        parts.append(f"replay of {data >> 12 & 0xfff} abandoned")
+    return ", ".join(parts)
 
 
 TLP_TYPES = {
@@ -118,6 +141,11 @@ def drain_capture(bus, gen, limit=None):
         entry = read(bus, "capture_data")
         bus.regs.pcie_core_capture_pop.write(1)
         n += 1
+        if field(entry, 32, 4) == 0:
+            flush()
+            tlp = None
+            print(f"{field(entry, 38, 16)/clk*1e6:9.2f} us DL {describe_event(field(entry, 0, 32))}")
+            continue
         word = field(entry, 0, 32).to_bytes(4, "little")[:bin(field(entry, 32, 4)).count("1")]
         direction = "TX" if field(entry, 36, 1) else "RX"
         if field(entry, 37, 1) or tlp is None or tlp[0] != direction:

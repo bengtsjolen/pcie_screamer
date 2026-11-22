@@ -15,8 +15,12 @@ class TLPCapture(Module, AutoCSR):
     (0 = received, 1 = transmitted), start of TLP and the low 16 bits of a pcie_rx cycle
     counter. Words that find the FIFO full, or both directions active in the same cycle (the
     received word wins), set the sticky overflow bit, which clears while capture is disabled.
+
+    `event` (1 cycle) with `event_data` records an entry with be = 0 once neither port is
+    active; an event arriving while one is still pending sets overflow.
     """
-    def __init__(self, rx_data, rx_valid, tx_data, tx_valid, active=1, depth=4096):
+    def __init__(self, rx_data, rx_valid, tx_data, tx_valid, active=1, depth=4096,
+                 event=0, event_data=0):
         fifo = stream.AsyncFIFO(CAPTURE_LAYOUT, depth, buffered=True)
         fifo = ClockDomainsRenamer({"write": "pcie_rx", "read": "sys"})(fifo)
         self.submodules.fifo = fifo
@@ -36,31 +40,43 @@ class TLPCapture(Module, AutoCSR):
         time     = Signal(16)
         rx_active, tx_active = Signal(), Signal()
         rx_prev,   tx_prev   = Signal(), Signal()
+        pending      = Signal()
+        pending_data = Signal(32)
         self.specials += MultiReg(self._ctrl.fields.enable, enable, "pcie_rx")
         self.comb += [
             rx_active.eq(rx_valid != 0),
             tx_active.eq(tx_valid != 0),
-            fifo.sink.valid.eq(enable & active & (rx_active | tx_active)),
+            fifo.sink.valid.eq(enable & active & (rx_active | tx_active | pending)),
             fifo.sink.time.eq(time),
             If(rx_active,
                 fifo.sink.data.eq(rx_data),
                 fifo.sink.be.eq(rx_valid),
                 fifo.sink.dir.eq(0),
                 fifo.sink.sop.eq(~rx_prev),
-            ).Else(
+            ).Elif(tx_active,
                 fifo.sink.data.eq(tx_data),
                 fifo.sink.be.eq(tx_valid),
                 fifo.sink.dir.eq(1),
                 fifo.sink.sop.eq(~tx_prev),
+            ).Else(
+                fifo.sink.data.eq(pending_data),
+                fifo.sink.be.eq(0),
+                fifo.sink.sop.eq(1),
             ),
         ]
         self.sync.pcie_rx += [
             time.eq(time + 1),
             rx_prev.eq(rx_active),
             tx_prev.eq(tx_active),
+            If(~rx_active & ~tx_active, pending.eq(0)),
+            If(event,
+                pending.eq(1),
+                pending_data.eq(event_data),
+            ),
             If(~enable,
                 overflow.eq(0),
-            ).Elif((fifo.sink.valid & ~fifo.sink.ready) | (rx_active & tx_active),
+            ).Elif((fifo.sink.valid & ~fifo.sink.ready) | (rx_active & tx_active) |
+                   (event & pending & (rx_active | tx_active)),
                 overflow.eq(1),
             ),
         ]

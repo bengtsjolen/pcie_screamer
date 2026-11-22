@@ -98,6 +98,7 @@ def main():
     parser.add_argument("--ignore-perst", action="store_true", help="Treat PERST# as always released")
     parser.add_argument("--uart-baudrate", type=int, default=115200)
     parser.add_argument("--with-analyzer", action="store_true", help="LiteScope on lane symbols")
+    parser.add_argument("--seed", type=int, default=1, help="nextpnr placement seed")
     parser.add_argument("--build", action="store_true", help="Build bitstream")
     parser.add_argument("--load",  action="store_true", help="Load bitstream into SRAM over JTAG")
     parser.add_argument("--flash", action="store_true", help="Write bitstream to SPI flash over JTAG")
@@ -139,7 +140,7 @@ def main():
         analyzer_csv      = output_dir / "analyzer.csv" if args.with_analyzer else None,
     )
     builder = Builder(soc, output_dir=str(output_dir), csr_csv=str(output_dir / "csr.csv"))
-    builder.build(run=args.build, build_name=build_name)
+    builder.build(run=args.build, build_name=build_name, seed=args.seed)
 
     bitstream = os.path.join(builder.gateware_dir, build_name + ".bit")
     if args.load:

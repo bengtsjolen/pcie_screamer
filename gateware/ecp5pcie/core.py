@@ -117,6 +117,12 @@ class ECP5PCIeCore(Module, AutoCSR):
         self.receive_buffer_occupation = Signal(8)
         self.tx_seq_num   = Signal(12)
         self.rx_seq_num   = Signal(12)
+        self.ack_nak_valid    = Signal()
+        self.ack_nak_ack      = Signal()
+        self.ack_nak_id       = Signal(12)
+        self.replay_started   = Signal()
+        self.replay_abandoned = Signal()
+        self.retry_debug      = Signal(96)
         self.tlp_rx_data  = Signal(32)
         self.tlp_rx_valid = Signal(4)
         self.tlp_rx_ready = Signal()
@@ -152,6 +158,12 @@ class ECP5PCIeCore(Module, AutoCSR):
             o_receive_buffer_occupation = self.receive_buffer_occupation,
             o_tx_seq_num   = self.tx_seq_num,
             o_rx_seq_num   = self.rx_seq_num,
+            o_ack_nak_valid    = self.ack_nak_valid,
+            o_ack_nak_ack      = self.ack_nak_ack,
+            o_ack_nak_id       = self.ack_nak_id,
+            o_replay_started   = self.replay_started,
+            o_replay_abandoned = self.replay_abandoned,
+            o_retry_debug      = self.retry_debug,
             o_tlp_rx_data  = self.tlp_rx_data,
             o_tlp_rx_valid = self.tlp_rx_valid,
             i_tlp_rx_ready = self.tlp_rx_ready,
@@ -160,8 +172,13 @@ class ECP5PCIeCore(Module, AutoCSR):
             o_tlp_tx_ready = self.tlp_tx_ready,
         )
 
+        # Capture events: [31] Ack/Nak received, [30] it was an Ack, [29] replay started,
+        # [28] replay abandoned, [23:12] oldest unacknowledged sequence number, [11:0] Ack/Nak ID.
         self.submodules.capture = TLPCapture(self.tlp_rx_data, self.tlp_rx_valid,
-                                             self.tlp_tx_data, self.tlp_tx_valid, active=self.dll_up)
+            self.tlp_tx_data, self.tlp_tx_valid, active=self.dll_up,
+            event=self.ack_nak_valid | self.replay_started | self.replay_abandoned,
+            event_data=Cat(self.ack_nak_id, self.retry_debug[12:24], C(0, 4), self.replay_abandoned,
+                           self.replay_started, self.ack_nak_ack & self.ack_nak_valid, self.ack_nak_valid))
 
         if transaction_layer:
             # The core answers config requests itself.
@@ -233,6 +250,9 @@ class ECP5PCIeCore(Module, AutoCSR):
         self._rx_lol_errors = CSRStatus(32, description="Cycles without CDR lock while training or in L0")
         self._rx_sym_errors = CSRStatus(32, description="Cycles with an 8b10b error while training or in L0")
         self._rx_tlps       = CSRStatus(32, description="TLPs delivered by the DLL")
+        self._retry_debug   = CSRStatus(96, description="ackd_seq[11:0], FIFO r_data[23:12], "
+            "r_level[26:24], r_rdy[27], replay state[29:28], slot valid[33:30], slot IDs[81:34]")
+        self.specials += MultiReg(self.retry_debug, self._retry_debug.status)
 
         # A CSRStatus with fields drives .status from its field signals, so drive the fields.
         def sync_fields(csr, sources):
