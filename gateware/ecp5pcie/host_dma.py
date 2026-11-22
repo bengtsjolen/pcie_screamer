@@ -132,7 +132,7 @@ class HostDMAScratch(Module, AutoCSR):
             dma.addr.eq(Cat(self._addr_lo.storage, self._addr_hi.storage)),
             dma.wdata.eq(self._wdata.storage),
             dma.we.eq(self._ctrl.fields.we),
-            dma.start.eq(self._start.we),
+            dma.start.eq(self._start.re),   # CSR.re is the *write* strobe
             self._rdata.status.eq(dma.rdata),
             self._status.fields.busy.eq(dma.busy),
             self._status.fields.done.eq(done_sticky),
