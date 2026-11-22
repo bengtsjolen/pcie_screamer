@@ -28,6 +28,14 @@ class ConfigSpace(Module):
         self.wr_be   = Signal(4)
         self.wr_data = Signal(32)
 
+        # Local write from the SoC (the Squirrel cfg_mgmt port). Same masked update as a
+        # host CfgWr. A host write in the same cycle wins; `mgmt_done` stays low then.
+        self.mgmt_we   = Signal()
+        self.mgmt_reg  = Signal(10)
+        self.mgmt_be   = Signal(4)
+        self.mgmt_data = Signal(32)
+        self.mgmt_done = Signal()
+
         self.command    = Signal(16)
         self.dev_ctl    = Signal(16)
         self.bar0       = Signal(32)
@@ -76,10 +84,14 @@ class ConfigSpace(Module):
                 storage[idx] = Signal(32, reset=reset, name=f"cfg_{idx*4:03x}")
 
         byte_mask = Cat(*[Replicate(self.wr_be[i], 8) for i in range(4)])
+        mgmt_mask = Cat(*[Replicate(self.mgmt_be[i], 8) for i in range(4)])
         for idx, sig in storage.items():
             writable = regs[idx][1]
             self.sync.pcie_rx += If(self.we & (self.reg == idx),
-                sig.eq((sig & ~(byte_mask & writable)) | (self.wr_data & byte_mask & writable)))
+                sig.eq((sig & ~(byte_mask & writable)) | (self.wr_data & byte_mask & writable))
+            ).Elif(self.mgmt_we & (self.mgmt_reg == idx),
+                sig.eq((sig & ~(mgmt_mask & writable)) | (self.mgmt_data & mgmt_mask & writable)))
+        self.sync.pcie_rx += self.mgmt_done.eq(self.mgmt_we & ~self.we)
 
         cases = {idx: self.rd_data.eq(storage[idx] if idx in storage else reset)
                  for idx, (reset, _) in regs.items()}

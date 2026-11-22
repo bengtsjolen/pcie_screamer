@@ -16,12 +16,16 @@ class ECP5PCIePHY(Module, AutoCSR):
     """LitePCIe PHY front-end for the ECP5-PCIe soft core.
 
     Presents the interface `LitePCIeEndpoint` expects - `sink`, `source`, `data_width`,
-    `bar0_size`/`bar0_mask`, `id`, `max_request_size`, `max_payload_size` - while the DCU/PHY/
-    LTSSM/DLL run in the core's `pcie_rx` domain. `TLPStreamAdapter` crosses the 32-bit TLP
-    ports into 64-bit `sys` beats; `TLPSysRouter` answers config space from `ConfigSpace` and
-    forwards memory requests and completions to/from LitePCIe.
+    `bar0_size`/`bar0_mask`, `id`, `max_request_size`, `max_payload_size` - and the Squirrel
+    SoC contract on the same ports: `_link_status`, `_bus_master_enable`, `cfg_mgmt_*` and
+    `cd_pcie`. The DCU/PHY/LTSSM/DLL run in the core's `pcie_rx` domain. `TLPStreamAdapter`
+    crosses the 32-bit TLP ports into 64-bit `sys` beats; `TLPSysRouter` answers config space
+    from `ConfigSpace` and forwards memory requests and completions.
 
-    `source` carries TLPs *into* LitePCIe (depacketizer), `sink` TLPs *out* of it (packetizer).
+    `source` carries TLPs toward the SoC (completions in, depacketizer for LitePCIe), `sink`
+    carries TLPs from the SoC (requests out, packetizer for LitePCIe). Both use the S7 dword
+    order `TLPDMA` already speaks: `dat[31:0]` is DW0 and bits `[31:24]` are the first byte
+    on the wire. `cd_pcie` tracks `sys`, because that is the clock the TLP streams use.
     """
     data_width = 64
 
@@ -76,6 +80,30 @@ class ECP5PCIePHY(Module, AutoCSR):
         self.bar0       = config_space.bar0
         self.command    = config_space.command
 
+        # Squirrel cfg_mgmt: one masked config write, retried if a host CfgWr lands the same cycle.
+        self.cfg_mgmt_dwaddr     = Signal(10)
+        self.cfg_mgmt_di         = Signal(32)
+        self.cfg_mgmt_byte_en    = Signal(4)
+        self.cfg_mgmt_wr_en      = Signal()
+        self.cfg_mgmt_rd_wr_done = Signal()
+        mgmt_hold = Signal()
+        self.comb += [
+            config_space.mgmt_we.eq((self.cfg_mgmt_wr_en | mgmt_hold) & ~config_space.we),
+            config_space.mgmt_reg.eq(self.cfg_mgmt_dwaddr),
+            config_space.mgmt_be.eq(self.cfg_mgmt_byte_en),
+            config_space.mgmt_data.eq(self.cfg_mgmt_di),
+            self.cfg_mgmt_rd_wr_done.eq(config_space.mgmt_done),
+        ]
+        self.sync += mgmt_hold.eq((self.cfg_mgmt_wr_en | mgmt_hold) & config_space.we)
+
+        # The SoC's BME timer uses `sync.pcie`. The TLP streams are in `sys`, so this domain
+        # follows `sys` rather than the 62.5 MHz DCU word clock.
+        self.clock_domains.cd_pcie = ClockDomain()
+        self.comb += [
+            self.cd_pcie.clk.eq(ClockSignal("sys")),
+            self.cd_pcie.rst.eq(ResetSignal("sys")),
+        ]
+
         # Event pulses and CSR fields (read before wrapping so the inner signals stay reachable).
         events = {n: getattr(router, n) for n in ["cfg_rd", "cfg_wr", "ur", "cpl", "dropped"]}
         router_id   = router.id
@@ -83,7 +111,11 @@ class ECP5PCIePHY(Module, AutoCSR):
         cfg_bar0    = config_space.bar0
 
         dll_up_sys = Signal()
-        self.specials += MultiReg(core.dll_up, dll_up_sys)
+        ltssm_sys  = Signal(8)
+        self.specials += [
+            MultiReg(core.dll_up, dll_up_sys),
+            MultiReg(core.ltssm_state, ltssm_sys),
+        ]
         config_space = ResetInserter()(config_space)
         router       = ResetInserter()(router)
         self.submodules.config_space = config_space
@@ -107,8 +139,27 @@ class ECP5PCIePHY(Module, AutoCSR):
             CSRField("id",      size=16, description="Bus/device/function from the last CfgWr0"),
         ])
         self._bar0 = CSRStatus(32, description="BAR0 as programmed by the host")
+        # Same field layout as S7PCIEPHY, so the Squirrel SoC's link_ready expression applies.
+        self._link_status = CSRStatus(fields=[
+            CSRField("status", size=1, description="DLL active"),
+            CSRField("rate",   size=1, description="0 = 2.5 GT/s, 1 = 5.0 GT/s"),
+            CSRField("width",  size=2, description="0 = x1"),
+            CSRField("ltssm",  size=6, description="ECP5-PCIe LTSSM state index"),
+        ])
+        self._bus_master_enable = CSRStatus(description="1 when Command[BME] is set")
+        self._msi_enable        = CSRStatus(description="MSI enable (stuck at 0)")
+        self._msix_enable       = CSRStatus(description="MSI-X enable (stuck at 0)")
+        self._max_request_size  = CSRStatus(16, description="Max read request size (bytes)")
+        self._max_payload_size  = CSRStatus(16, description="Max payload size (bytes)")
         self.comb += [
             self._cfg.fields.command.eq(cfg_command),
             self._cfg.fields.id.eq(router_id),
             self._bar0.status.eq(cfg_bar0),
+            self._link_status.fields.status.eq(dll_up_sys),
+            self._link_status.fields.rate.eq(gen == 2),
+            self._link_status.fields.width.eq(0),
+            self._link_status.fields.ltssm.eq(ltssm_sys),
+            self._bus_master_enable.status.eq(self.bus_master),
+            self._max_request_size.status.eq(self.max_request_size),
+            self._max_payload_size.status.eq(self.max_payload_size),
         ]
