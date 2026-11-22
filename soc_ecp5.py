@@ -59,6 +59,7 @@ class SoCECP5PCIe(SoCMini):
             # Full transaction layer: LitePCIe endpoint with a BAR0 wishbone-SRAM MMIO target.
             from litepcie.core import LitePCIeEndpoint
             from litepcie.frontend.wishbone import LitePCIeWishboneMaster
+            from gateware.ecp5pcie.host_dma import HostDMAScratch
             self.submodules.pcie_phy = phy = ECP5PCIePHY(platform, perst_n,
                 gen          = gen,
                 refclk_freq  = refclk_freq,
@@ -68,10 +69,16 @@ class SoCECP5PCIe(SoCMini):
             )
             self.add_csr("pcie_phy")
             core = phy.core
+            # address_width=64 so the DMA engine can target any host physical address
+            # (the packetizer emits MWr32/MRd32 when the high dword is zero, MWr64/MRd64 otherwise).
             self.submodules.pcie_endpoint = endpoint = LitePCIeEndpoint(phy,
-                max_pending_requests=2, endianness="big")
+                max_pending_requests=2, address_width=64, endianness="big")
+            # BAR0 MMIO scratch (host -> endpoint).
             self.submodules.pcie_wb = wb = LitePCIeWishboneMaster(endpoint)
             self.submodules.bar0_sram = wishbone.SRAM(bar0_size, bus=wb.bus)
+            # Host-memory DMA (endpoint -> host), gated on Bus Master Enable. pcileech-shaped.
+            self.submodules.pcie_dma = HostDMAScratch(endpoint, enable=phy.bus_master)
+            self.add_csr("pcie_dma")
         else:
             self.submodules.pcie_core = core = ECP5PCIeCore(platform, perst_n,
                 gen               = gen,

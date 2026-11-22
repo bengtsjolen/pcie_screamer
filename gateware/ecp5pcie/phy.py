@@ -2,8 +2,9 @@ from migen import *
 from migen.genlib.cdc import MultiReg
 
 from litex.soc.interconnect.csr import *
+from litex.soc.interconnect import stream
 
-from litepcie.common import get_bar_mask
+from litepcie.common import get_bar_mask, phy_layout
 
 from .core import ECP5PCIeCore
 from .adapter import TLPStreamAdapter
@@ -50,8 +51,13 @@ class ECP5PCIePHY(Module, AutoCSR):
             core.tlp_rx_data, core.tlp_rx_valid, core.tlp_rx_ready,
             core.tlp_tx_data, core.tlp_tx_valid, core.tlp_tx_ready,
             core.retry_buffer_occupation)
+        # Register the RX stream between the adapter's packing FSM and the router's classification/
+        # config-capture logic; that combinational cone is the sys critical path otherwise.
+        rx_pipe = stream.Buffer(phy_layout(64), pipe_valid=True, pipe_ready=True)
+        self.submodules.rx_pipe = rx_pipe
         self.comb += [
-            adapter.source.connect(router.sink),      # core RX -> router
+            adapter.source.connect(rx_pipe.sink),     # core RX -> pipe
+            rx_pipe.source.connect(router.sink),      # pipe -> router
             router.source.connect(adapter.sink),      # router -> core TX
         ]
 
