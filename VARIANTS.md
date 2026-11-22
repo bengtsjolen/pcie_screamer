@@ -101,13 +101,13 @@ words: 0x41534556 0xf1000300 0x00013000 0xf0220000
 | V1 | PCILeech over FT601 | `pcileech_squirrel.py` | `pcileech` binary over USB 3.0 | PCILeechFIFO, RX128, FT601 | Yes | 147-149 MiB/s on 1 GiB; VESA dump matches |
 | V2 | SoC single-word reads | `soc_squirrel.py` | UART console | TLPDMA, one DWORD per MRd, 4 KiB page | No | VESA dump matches; high address simulation-only |
 | V3 | CPU-fed PCILeech FIFO | `soc_pcileech.py` | UART console | PCILeechFIFO + CPU bridge, one DWORD per MRd | No | VESA dump matches; bridge tests pass |
-| V4 | SoC double-buffer DMA | `soc_search.py`, ChunkDMA | UART console | 2 x 4 KiB buffers, one outstanding 4 KiB MRd | No | 2-buffer VESA/high scan verified; raw DMA ~319 MiB/s |
-| V5 | SoC 4-outstanding search | `soc_search.py`, ReadBench | UART console | 4 x 4 KiB buffers, up to 4 outstanding 4 KiB MRds | No | VESA/high match; 330-338 MiB/s at 1/1024 stride; raw 426.7 MiB/s |
+| V4 | SoC double-buffer DMA | `soc_squirrel_search.py`, ChunkDMA | UART console | 2 x 4 KiB buffers, one outstanding 4 KiB MRd | No | 2-buffer VESA/high scan verified; raw DMA ~319 MiB/s |
+| V5 | SoC 4-outstanding search | `soc_squirrel_search.py`, ReadBench | UART console | 4 x 4 KiB buffers, up to 4 outstanding 4 KiB MRds | No | VESA/high match; 330-338 MiB/s at 1/1024 stride; raw 426.7 MiB/s |
 
 The originally requested four variants are V1, V2, V4, and V5. V3 is the
 intermediate CPU-fed PCILeech variant described above.
 
-V4 and V5 share the `soc_search.py` top level and one bitstream. The
+V4 and V5 share the `soc_squirrel_search.py` top level and one bitstream. The
 `bench_select` CSR muxes the PCIe TX/RX between `ChunkDMA` and
 `ReadBench`. The current console runs its `scan` and `bench` commands on
 `ReadBench` (V5); its `peek` command reads the `ChunkDMA` buffers (V4).
@@ -340,13 +340,13 @@ CPU reads buffer 0/1 through the read-only window at 0x20000000
 ### Components
 
 - Engine: `gateware/chunk_dma.py`.
-- Top level: `soc_search.py` (the same top level also contains V5).
+- Top level: `soc_squirrel_search.py` (the same top level also contains V5).
 - Legacy console: `e2ba260:software/soc_search_console/main.c`.
 - CPU window: `0x20000000`, size `0x2000` (two buffers).
 
 ### Build and run
 
-The current `soc_search.py --build` image contains both V4 and V5.
+The current `soc_squirrel_search.py --build` image contains both V4 and V5.
 `bench_select=0` selects `ChunkDMA`; `bench_select=1` selects `ReadBench`.
 The current console's `scan` uses `ReadBench`, so a full V4 scan needs the
 legacy console above. The current console's `peek` command reads the
@@ -354,8 +354,8 @@ ChunkDMA buffers, which is enough for a buffer sanity check.
 
 ```sh
 source env.sh
-venv/bin/python soc_search.py --build
-./program.sh build/soc_search/gateware/soc_search.bin
+venv/bin/python soc_squirrel_search.py --build
+./program.sh build/soc_squirrel_search/gateware/soc_squirrel_search.bin
 ./rescan.sh
 ```
 
@@ -411,7 +411,7 @@ at 0x20008000 (16 KiB)
 ### Components
 
 - Engine: `gateware/read_bench.py`.
-- Top level: `soc_search.py` (shared with V4).
+- Top level: `soc_squirrel_search.py` (shared with V4).
 - Console: `software/soc_search_console/main.c`.
 - CPU window: `0x20008000`, size `0x4000` (four buffers).
 
@@ -425,8 +425,8 @@ all four buffers are visible.
 
 ```sh
 source env.sh
-venv/bin/python soc_search.py --build
-./program.sh build/soc_search/gateware/soc_search.bin
+venv/bin/python soc_squirrel_search.py --build
+./program.sh build/soc_squirrel_search/gateware/soc_squirrel_search.bin
 ./rescan.sh
 ```
 
@@ -438,9 +438,9 @@ Console commands:
 - `peek` (ChunkDMA/V4 buffer diagnostics)
 
 The current verified image is
-`build/soc_search/gateware/soc_search.bin`
+`build/soc_squirrel_search/gateware/soc_squirrel_search.bin`
 (SHA-256 `1b4e739acb8318fbea3107ce3901d52e46a5231fde8ce0c692e4db3873c7eaee`).
-The images under `bitstreams/soc_search-*.bin` are older bring-up
+The images under `bitstreams/soc_squirrel_search-*.bin` are older bring-up
 snapshots.
 
 ### Measured results (Artix-7 Squirrel)
@@ -454,7 +454,7 @@ snapshots.
   (CPU-bound).
 - Low VESA scan matched at `0x3f000`; high 4 GiB scan matched at
   `0x100000000`; both still matched after the 6 GiB run.
-- Resource use of the current unified `soc_search` build: 3,902 LUTs,
+- Resource use of the current unified `soc_squirrel_search` build: 3,902 LUTs,
   3,820 registers, 22/50 BRAM tiles (20 RAMB36 + 4 RAMB18).
 
 The sparse-stride search rate meets or exceeds the 149 MiB/s
@@ -581,7 +581,7 @@ venv/bin/python soc_squirrel.py --build
 venv/bin/python soc_pcileech.py --build
 
 # V4/V5
-venv/bin/python soc_search.py --build
+venv/bin/python soc_squirrel_search.py --build
 
 # Flash the resulting .bin, then rescan
 ./program.sh build/<variant>/gateware/<variant>.bin
@@ -595,8 +595,8 @@ venv/bin/python soc_search.py --build
 | V1 | `bitstreams/pcie_squirrel-cleanup-rx128.bin` | `test/test_pcie.py`, host PCILeech runs |
 | V2 | `bitstreams/soc_squirrel-console.bin` | `test/test_tlp_dma.py` |
 | V3 | `bitstreams/soc_pcileech-console.bin` | `test/test_pcileech_bridge.py`, `test/test_pcileech_bridge_integration.py` |
-| V4 | current `soc_search` image | `test/test_chunk_dma.py` |
-| V5 | `build/soc_search/gateware/soc_search.bin` | `test/test_read_bench.py` |
+| V4 | current `soc_squirrel_search` image | `test/test_chunk_dma.py` |
+| V5 | `build/soc_squirrel_search/gateware/soc_squirrel_search.bin` | `test/test_read_bench.py` |
 
 Run the unit tests before and after a rebuild:
 

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""Squirrel search image: ChunkDMA and ReadBench, one console.
+
+soc_ecp5_search.py is the ECP5 pair. The bitstream is soc_squirrel_search.
+"""
 
 import os
 import argparse
@@ -187,9 +191,10 @@ def main():
 
     platform = Platform()
     soc = SoCSearch(platform)
-    soc.build_name = "soc_search"
+    soc.build_name = "soc_squirrel_search"
 
-    builder = Builder(soc, output_dir="build/soc_search", csr_csv="test/soc_search_csr.csv")
+    builder = Builder(soc, output_dir="build/soc_squirrel_search",
+                      csr_csv="test/soc_squirrel_search_csr.csv")
     builder.software_packages = []
     builder.software_libraries = []
 

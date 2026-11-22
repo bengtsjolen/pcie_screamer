@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """ECP5 Versa V4: VexRiscv plus ChunkDMA (one MRd per chunk) on ECP5PCIePHY.
 
-On-chip buffers only; the Versa DDR3 is unused. ReadBench stays on the Squirrel
-search top: its completion path does not close 100 MHz here.
+On-chip buffers only; the Versa DDR3 is unused. The full search console,
+including ReadBench, is soc_ecp5_search.py.
 """
 
 import argparse

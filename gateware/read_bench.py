@@ -151,6 +151,15 @@ class ReadBench(Module, AutoCSR):
         wr_req_addr = Signal(9)
         wr_req_data = Signal(64)
         wr_req_tag = Signal(2)
+        # One cycle after the TLP beat. The beat decode and the buffer write
+        # were one cone, and that cone missed 100 MHz on the ECP5.
+        cmd_we = Signal()
+        cmd_flush = Signal()
+        cmd_tag = Signal(2)
+        cmd_dlo_valid = Signal()
+        cmd_dhi_valid = Signal()
+        cmd_dlo = Signal(32)
+        cmd_dhi = Signal(32)
         rp_dat = Signal(64)
         debug = Signal(64)
         first_addr = Signal(11)
@@ -291,40 +300,40 @@ class ReadBench(Module, AutoCSR):
             p = pending[t]
             pv = pending_valid[t]
             return [
-                If(dlo_valid & dhi_valid,
+                If(cmd_dlo_valid & cmd_dhi_valid,
                     wr_req.eq(1),
                     wr_req_addr.eq(w),
                     wr_req_tag.eq(t),
                     w.eq(w + 1),
                     If(pv,
-                        wr_req_data.eq(Cat(p, dlo)),
-                        p.eq(dhi),
+                        wr_req_data.eq(Cat(p, cmd_dlo)),
+                        p.eq(cmd_dhi),
                         pv.eq(1),
                     ).Else(
-                        wr_req_data.eq(Cat(dlo, dhi)),
+                        wr_req_data.eq(Cat(cmd_dlo, cmd_dhi)),
                     ),
-                ).Elif(dlo_valid,
+                ).Elif(cmd_dlo_valid,
                     If(pv,
                         wr_req.eq(1),
                         wr_req_addr.eq(w),
-                        wr_req_data.eq(Cat(p, dlo)),
+                        wr_req_data.eq(Cat(p, cmd_dlo)),
                         wr_req_tag.eq(t),
                         w.eq(w + 1),
                         pv.eq(0),
                     ).Else(
-                        p.eq(dlo),
+                        p.eq(cmd_dlo),
                         pv.eq(1),
                     ),
-                ).Elif(dhi_valid,
+                ).Elif(cmd_dhi_valid,
                     If(pv,
                         wr_req.eq(1),
                         wr_req_addr.eq(w),
-                        wr_req_data.eq(Cat(p, dhi)),
+                        wr_req_data.eq(Cat(p, cmd_dhi)),
                         wr_req_tag.eq(t),
                         w.eq(w + 1),
                         pv.eq(0),
                     ).Else(
-                        p.eq(dhi),
+                        p.eq(cmd_dhi),
                         pv.eq(1),
                     ),
                 ),
@@ -353,13 +362,20 @@ class ReadBench(Module, AutoCSR):
                 release_req_valid.eq(0),
                 stop_req.eq(0),
             ),
+            cmd_we.eq(data_we),
+            cmd_flush.eq(flush),
+            cmd_tag.eq(data_tag),
+            cmd_dlo_valid.eq(dlo_valid),
+            cmd_dhi_valid.eq(dhi_valid),
+            cmd_dlo.eq(dlo),
+            cmd_dhi.eq(dhi),
             wr_req.eq(0),
-            If(data_we,
-                Case(data_tag, {
+            If(cmd_we,
+                Case(cmd_tag, {
                     t: write_dwords(t) for t in range(4)
                 }),
-            ).Elif(flush,
-                Case(data_tag, {
+            ).Elif(cmd_flush,
+                Case(cmd_tag, {
                     t: [
                         If(pending_valid[t],
                             wr_req.eq(1),
