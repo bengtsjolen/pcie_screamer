@@ -10,8 +10,10 @@ from migen.genlib.resetsync import AsyncResetSynchronizer
 
 from litex.soc.integration.soc_core import SoCMini
 from litex.soc.integration.builder import Builder
+from litex.soc.interconnect import wishbone
 
 from gateware.ecp5pcie.core import ECP5PCIeCore
+from gateware.ecp5pcie.phy import ECP5PCIePHY
 
 from platforms.pcie_versa import Platform, DEVICES
 
@@ -34,7 +36,8 @@ class _CRG(Module):
 
 class SoCECP5PCIe(SoCMini):
     def __init__(self, platform, gen=1, refclk_freq=None, fabric_clk=False, transaction_layer=False,
-                 ignore_perst=False, uart_baudrate=115200, analyzer_csv=None):
+                 litepcie=False, bar0_size=0x1000, ignore_perst=False, uart_baudrate=115200,
+                 analyzer_csv=None):
         sys_clk_freq = int(100e6)
         SoCMini.__init__(self, platform, sys_clk_freq,
             ident         = "pcie_screamer ECP5 PCIe bring-up",
@@ -51,14 +54,33 @@ class SoCECP5PCIe(SoCMini):
             platform.request("refclk_rst_n").eq(1),
         ]
 
-        self.submodules.pcie_core = core = ECP5PCIeCore(platform, platform.request("pcie_perst_n"),
-            gen               = gen,
-            refclk_freq       = refclk_freq,
-            fabric_clk        = fabric_clk,
-            transaction_layer = transaction_layer,
-            ignore_perst      = ignore_perst,
-        )
-        self.add_csr("pcie_core")
+        perst_n = platform.request("pcie_perst_n")
+        if litepcie:
+            # Full transaction layer: LitePCIe endpoint with a BAR0 wishbone-SRAM MMIO target.
+            from litepcie.core import LitePCIeEndpoint
+            from litepcie.frontend.wishbone import LitePCIeWishboneMaster
+            self.submodules.pcie_phy = phy = ECP5PCIePHY(platform, perst_n,
+                gen          = gen,
+                refclk_freq  = refclk_freq,
+                fabric_clk   = fabric_clk,
+                ignore_perst = ignore_perst,
+                bar0_size    = bar0_size,
+            )
+            self.add_csr("pcie_phy")
+            core = phy.core
+            self.submodules.pcie_endpoint = endpoint = LitePCIeEndpoint(phy,
+                max_pending_requests=2, endianness="big")
+            self.submodules.pcie_wb = wb = LitePCIeWishboneMaster(endpoint)
+            self.submodules.bar0_sram = wishbone.SRAM(bar0_size, bus=wb.bus)
+        else:
+            self.submodules.pcie_core = core = ECP5PCIeCore(platform, perst_n,
+                gen               = gen,
+                refclk_freq       = refclk_freq,
+                fabric_clk        = fabric_clk,
+                transaction_layer = transaction_layer,
+                ignore_perst      = ignore_perst,
+            )
+            self.add_csr("pcie_core")
 
         # LEDs: 0 sys heartbeat, 1 PERST# released, 2 rx_present, 3 rx_locked, 4 rx_aligned,
         # 5 L0, 6 DL_Active, 7 pcie_rx heartbeat (DCU clock running).
@@ -95,6 +117,8 @@ def main():
                         help="Diagnostic: DCU refclk from the 100 MHz board oscillator instead of EXTREF0")
     parser.add_argument("--transaction-layer", action="store_true",
                         help="Diagnostic: include ECP5-PCIe's own config-space responder")
+    parser.add_argument("--litepcie", action="store_true",
+                        help="Wire a LitePCIe endpoint with a BAR0 wishbone-SRAM MMIO target")
     parser.add_argument("--ignore-perst", action="store_true", help="Treat PERST# as always released")
     parser.add_argument("--uart-baudrate", type=int, default=115200)
     parser.add_argument("--with-analyzer", action="store_true", help="LiteScope on lane symbols")
@@ -113,6 +137,8 @@ def main():
 
     if args.gen == 2 and args.device != "LFE5UM5G":
         parser.error("--gen 2 needs --device LFE5UM5G")
+    if args.litepcie and args.transaction_layer:
+        parser.error("--litepcie replaces the transaction layer; drop --transaction-layer")
     if args.gen == 2 and args.fabric_clk:
         parser.error("--gen 2 needs a 200 MHz refclk on EXTREF0, not --fabric-clk")
 
@@ -128,6 +154,8 @@ def main():
         build_name += "_fabclk"
     if args.transaction_layer:
         build_name += "_tl"
+    if args.litepcie:
+        build_name += "_litepcie"
     output_dir = ROOT / "build" / build_name
 
     soc = SoCECP5PCIe(platform,
@@ -135,6 +163,7 @@ def main():
         refclk_freq       = refclk_freq,
         fabric_clk        = args.fabric_clk,
         transaction_layer = args.transaction_layer,
+        litepcie          = args.litepcie,
         ignore_perst      = args.ignore_perst,
         uart_baudrate     = args.uart_baudrate,
         analyzer_csv      = output_dir / "analyzer.csv" if args.with_analyzer else None,
