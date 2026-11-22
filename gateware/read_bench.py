@@ -97,6 +97,9 @@ class ReadBench(Module, AutoCSR):
         word = Signal(2)
         cpl_tag = Signal(8)
         cpl_len = Signal(11)
+        # Captured on the header beat. CPL_END is at least one cycle later,
+        # so the add/compare ends at these registers instead of the FSM state.
+        cpl_new_count = Signal(12)
         cpl_done = Signal()
         cpl_data = Signal()
         cpl_status = Signal(3)
@@ -141,7 +144,10 @@ class ReadBench(Module, AutoCSR):
         tag_count3 = Signal(11)
         tag_data_sel = Signal(12)
         tag_count_sel = Signal(11)
-        new_count = Signal(12)
+        hdr_data = Signal(12)
+        hdr_count = Signal(11)
+        hdr_sum = Signal(12)
+        hdr_done = Signal()
         wr_sel = Signal(9)
         pending_sel = Signal(32)
         pending_valid_sel = Signal()
@@ -211,7 +217,12 @@ class ReadBench(Module, AutoCSR):
                                    tag_data2, tag_data3])[cpl_tag[0:2]]),
             tag_count_sel.eq(Array([tag_count0, tag_count1,
                                     tag_count2, tag_count3])[cpl_tag[0:2]]),
-            new_count.eq(tag_data_sel + cpl_len),
+            hdr_data.eq(Array([tag_data0, tag_data1,
+                               tag_data2, tag_data3])[tag[0:2]]),
+            hdr_count.eq(Array([tag_count0, tag_count1,
+                                tag_count2, tag_count3])[tag[0:2]]),
+            hdr_sum.eq(hdr_data + cpl_len),
+            hdr_done.eq(hdr_sum >= hdr_count),
             tag_free.eq(~tag_busy),
             tag_available.eq(tag_free != 0),
             tag_sel.eq(0),
@@ -410,7 +421,7 @@ class ReadBench(Module, AutoCSR):
                 cnt_count.eq(tag_count_sel),
                 cnt_data.eq(tag_data_sel),
                 cnt_len.eq(cpl_len),
-                cnt_new.eq(new_count),
+                cnt_new.eq(cpl_new_count),
             ),
             If(wr_req & ~fifo_seen,
                 fifo_seen.eq(1),
@@ -640,6 +651,8 @@ class ReadBench(Module, AutoCSR):
                     NextState("ERROR"),
                 ).Else(
                     NextValue(cpl_tag, tag),
+                    NextValue(cpl_new_count, hdr_sum),
+                    NextValue(cpl_done, hdr_done),
                     If(cpl_data,
                         data_we.eq(1),
                         data_tag.eq(tag[0:2]),
@@ -698,12 +711,12 @@ class ReadBench(Module, AutoCSR):
             flush.eq(1),
             cpl_end.eq(1),
             data_tag.eq(cpl_tag[0:2]),
-            If(new_count < tag_count_sel,
+            If(~cpl_done,
                 Case(cpl_tag[0:2], {
-                    0: NextValue(tag_data0, new_count),
-                    1: NextValue(tag_data1, new_count),
-                    2: NextValue(tag_data2, new_count),
-                    3: NextValue(tag_data3, new_count),
+                    0: NextValue(tag_data0, cpl_new_count),
+                    1: NextValue(tag_data1, cpl_new_count),
+                    2: NextValue(tag_data2, cpl_new_count),
+                    3: NextValue(tag_data3, cpl_new_count),
                 }),
                 NextState("WAIT"),
             ).Else(
