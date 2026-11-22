@@ -28,7 +28,10 @@ def _wait_idle(bus, timeout=1.0):
         st = bus.regs.pcie_dma_status.read()
         if not (st & 0x1):          # busy
             return st
-    raise SystemExit("DMA engine stayed busy (no completion?); check link/BME")
+    # Hardware completion timeout should have fired; abort to flush the controller and retry.
+    bus.regs.pcie_dma_abort.write(1)
+    time.sleep(0.01)
+    return bus.regs.pcie_dma_status.read()
 
 
 def _prep(bus, addr, force):
@@ -71,7 +74,8 @@ def main():
         bme = (bus.regs.pcie_dma_status.read() >> 3) & 1
         if args.command == "status":
             st = bus.regs.pcie_dma_status.read()
-            print(f"busy={st & 1} done={(st >> 1) & 1} err={(st >> 2) & 1} bus_master={bme}")
+            print(f"busy={st & 1} done={(st >> 1) & 1} err={(st >> 2) & 1} "
+                  f"bus_master={bme} timeout={(st >> 4) & 1}")
             return
         if not bme and not args.force:
             print("warning: Bus Master Enable is clear; the request will be dropped. Use --force.",
@@ -82,13 +86,13 @@ def main():
             print(f"write 0x{value:08x} -> 0x{addr:016x}  (err={(st >> 2) & 1})")
         elif args.command == "read":
             data, st = dma_read(bus, addr, args.force)
-            print(f"0x{addr:016x}: 0x{data:08x}  (err={(st >> 2) & 1})")
+            print(f"0x{addr:016x}: 0x{data:08x}  (err={(st >> 2) & 1} timeout={(st >> 4) & 1})")
         elif args.command == "dump":
             count = int(args.value, 0) if args.value else 16
             for i in range(count):
                 a = addr + 4 * i
                 data, st = dma_read(bus, a, args.force)
-                flag = " ERR" if (st >> 2) & 1 else ""
+                flag = " TIMEOUT" if (st >> 4) & 1 else (" ERR/UR" if (st >> 2) & 1 else "")
                 print(f"0x{a:016x}: 0x{data:08x}{flag}")
     finally:
         bus.close()

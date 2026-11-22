@@ -77,8 +77,10 @@ class SoCECP5PCIe(SoCMini):
             self.submodules.pcie_wb = wb = LitePCIeWishboneMaster(endpoint)
             self.submodules.bar0_sram = wishbone.SRAM(bar0_size, bus=wb.bus)
             # Host-memory DMA (endpoint -> host), gated on Bus Master Enable. pcileech-shaped.
-            self.submodules.pcie_dma = HostDMAScratch(endpoint, enable=phy.bus_master)
+            self.submodules.pcie_dma = dma = HostDMAScratch(endpoint, enable=phy.bus_master)
             self.add_csr("pcie_dma")
+            # Let the DMA engine flush the crossbar's pending-request controller on timeout/abort.
+            self.comb += endpoint.crossbar.tlp_ctrl_rst.eq(dma.ctrl_rst)
         else:
             self.submodules.pcie_core = core = ECP5PCIeCore(platform, perst_n,
                 gen               = gen,

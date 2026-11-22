@@ -62,7 +62,8 @@ class DUT(Module):
         phy = PhyModel(router)
         self.submodules.endpoint = endpoint = LitePCIeEndpoint(phy,
             max_pending_requests=2, address_width=64, endianness="big")
-        self.submodules.dma = HostDMA(endpoint, enable=cfg.bus_master)
+        self.submodules.dma = dma = HostDMA(endpoint, enable=cfg.bus_master, cmp_timeout=128)
+        self.comb += endpoint.crossbar.tlp_ctrl_rst.eq(dma.ctrl_rst)
 
 
 def cfg_wr(reg, tag, data, be=0xf, bus=1):
@@ -117,15 +118,24 @@ def main():
                         adr = words[2]
                     else:
                         adr = (words[2] << 32) | words[3]
+                    if adr == 0xBADD_0000:      # blackhole: never answer -> engine must time out
+                        continue
                     tag = (words[1] >> 8) & 0xff
                     req_id = (yield dut.endpoint.phy.id)
-                    val = host_mem.get(adr, 0xA5A5A5A5)
-                    cpl = [
-                        0x4a000001,
-                        (0xac00 << 16) | 4,
-                        (req_id << 16) | (tag << 8) | (adr & 0x7f),
-                        bswap(val),
-                    ]
+                    if adr == 0xF000_0000:      # UR: data-less Cpl, length 0, byte count 4
+                        cpl = [
+                            0x0a000000,
+                            (0xac00 << 16) | (1 << 13) | 4,
+                            (req_id << 16) | (tag << 8) | (adr & 0x7f),
+                        ]
+                    else:
+                        val = host_mem.get(adr, 0xA5A5A5A5)
+                        cpl = [
+                            0x4a000001,
+                            (0xac00 << 16) | 4,
+                            (req_id << 16) | (tag << 8) | (adr & 0x7f),
+                            bswap(val),
+                        ]
                     yield from send(cpl)
             else:
                 yield
@@ -147,7 +157,7 @@ def main():
                 if not (yield dut.dma.busy) and done:
                     break
                 yield
-            return (yield dut.dma.rdata)
+            return ((yield dut.dma.rdata), (yield dut.dma.err), (yield dut.dma.timeout))
 
         # Wait for Bus Master Enable.
         for _ in range(800):
@@ -160,8 +170,26 @@ def main():
             yield from op(addr, we=1, wdata=0xdeadbeef if name == "dma32" else 0xcafef00d)
             for _ in range(20):
                 yield
-            rd = yield from op(addr, we=0)
+            rd, _, _ = yield from op(addr, we=0)
             result[name] = (addr, rd)
+
+        # UR completion: data-less Cpl. Must report the error and leave the
+        # controller usable, so the very next read succeeds without a timeout.
+        _, err, to = yield from op(0xF000_0000, we=0)
+        result["ur"] = (err, to)
+        for _ in range(20):
+            yield
+        rd, err2, to2 = yield from op(0x1234_5670, we=0)
+        result["ur_recover"] = (rd, err2, to2)
+
+        # Blackhole read: no completion -> engine must time out and self-recover.
+        _, err, to = yield from op(0xBADD_0000, we=0)
+        result["timeout"] = (err, to)
+        for _ in range(20):
+            yield
+        # After recovery the controller must still work: read back dma32.
+        rd, _, _ = yield from op(0x1234_5670, we=0)
+        result["recover"] = rd
 
     run_simulation(dut,
         {"pcie_rx": [host()], "sys": [control()]},
@@ -184,6 +212,27 @@ def main():
         print(f"{name}: wrote 0x{want:08x} to 0x{addr:x}; host saw "
               f"{'-' if stored is None else f'0x{stored:08x}'}; read back "
               f"{'-' if rd is None else f'0x{rd:08x}'} {'ok' if good else 'BAD'}")
+
+    err, to = result.get("ur", (None, None))
+    ur_ok = (err == 1 and to == 0)
+    ok &= ur_ok
+    print(f"UR completion: err={err} timeout={to} {'ok' if ur_ok else 'BAD'}")
+    rd, err2, to2 = result.get("ur_recover", (None, None, None))
+    ur_rec_ok = (rd == 0xdeadbeef and err2 == 0 and to2 == 0)
+    ok &= ur_rec_ok
+    print(f"read after UR: "
+          f"{'-' if rd is None else f'0x{rd:08x}'} err={err2} timeout={to2} "
+          f"{'ok' if ur_rec_ok else 'BAD'}")
+
+    err, to = result.get("timeout", (None, None))
+    to_ok = (err == 1 and to == 1)
+    ok &= to_ok
+    print(f"blackhole read: err={err} timeout={to} {'ok' if to_ok else 'BAD'}")
+    rec = result.get("recover")
+    rec_ok = (rec == 0xdeadbeef)
+    ok &= rec_ok
+    print(f"recovery read after timeout: "
+          f"{'-' if rec is None else f'0x{rec:08x}'} {'ok' if rec_ok else 'BAD'}")
     print("PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)
 
