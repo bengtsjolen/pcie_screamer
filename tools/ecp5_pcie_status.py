@@ -41,8 +41,24 @@ def ltssm_name(v): return LTSSM_NAMES.get(v, f"?{v}")
 def dll_name(v):   return DLL_NAMES.get(v, f"?{v}")
 
 
+# CSR name prefixes: the bare core (`pcie_core_*`), or the `--litepcie` build where the core
+# sits inside ECP5PCIePHY (`pcie_phy_phy_core_*`) and the router/config CSRs belong to the PHY.
+CSR_PREFIXES = ("pcie_core_", "pcie_phy_phy_core_", "pcie_phy_phy_")
+
+
+def csr(bus, reg):
+    for prefix in CSR_PREFIXES:
+        found = getattr(bus.regs, prefix + reg, None)
+        if found is not None:
+            return found
+    return None
+
+
 def read(bus, reg):
-    return getattr(bus.regs, f"pcie_core_{reg}").read()
+    found = csr(bus, reg)
+    if found is None:
+        raise SystemExit(f"CSR '{reg}' not found; does --csr-csv match the loaded bitstream?")
+    return found.read()
 
 
 def field(value, offset, size):
@@ -66,13 +82,13 @@ def show_status(bus):
     print(f"rx_tlps   : {read(bus, 'rx_tlps')}")
     print(f"clocks    : rx={read(bus, 'rx_freq_value')/1e6:.3f} MHz "
           f"tx={read(bus, 'tx_freq_value')/1e6:.3f} MHz")
-    if hasattr(bus.regs, "pcie_core_tl_cpl"):
+    if csr(bus, "tl_cpl") is not None:
         counts = " ".join(f"{n}={read(bus, 'tl_' + n)}" for n in ("cfg_rd", "cfg_wr", "ur", "dropped", "cpl"))
         cfg = read(bus, "cfg")
         print(f"router    : {counts}")
         print(f"config    : command=0x{field(cfg, 0, 16):04x} id={field(cfg, 24, 8):02x}:"
               f"{field(cfg, 19, 5):02x}.{field(cfg, 16, 3)} bar0=0x{read(bus, 'bar0'):08x}")
-    if hasattr(bus.regs, "pcie_core_retry_debug"):
+    if csr(bus, "retry_debug") is not None:
         print(f"retry     : {describe_retry(read(bus, 'retry_debug'))}")
 
 
@@ -139,7 +155,7 @@ def drain_capture(bus, gen, limit=None):
 
     while (limit is None or n < limit) and field(read(bus, "capture_level"), 0, 1):
         entry = read(bus, "capture_data")
-        bus.regs.pcie_core_capture_pop.write(1)
+        csr(bus, "capture_pop").write(1)
         n += 1
         if field(entry, 32, 4) == 0:
             flush()
@@ -166,7 +182,7 @@ def drain_trace(bus, gen, limit=None):
     n = 0
     while (limit is None or n < limit) and field(read(bus, "trace_level"), 0, 1):
         entry = read(bus, "trace_data")
-        bus.regs.pcie_core_trace_pop.write(1)
+        csr(bus, "trace_pop").write(1)
         t = field(entry, 0, 32)
         print(f"{t/clk*1e3:12.3f} ms  {ltssm_name(field(entry, 32, 8)):<32} {dll_name(field(entry, 40, 8))}")
         n += 1
