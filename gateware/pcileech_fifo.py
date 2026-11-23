@@ -319,7 +319,10 @@ class MuxSerializer(Module):
                 If(self.sink.valid,
                    NextValue(buf,   self.sink.data),
                    NextValue(count, 7),
-                   If(need_sync,
+                   # start_sync is a one-cycle pulse in the same cycle the
+                   # frame becomes visible. need_sync only updates after that,
+                   # so the pulse itself has to request the preamble.
+                   If(need_sync | self.start_sync,
                       NextValue(rsync, 4),
                       NextState("RESYNC"),
                       ).Else(
@@ -348,7 +351,8 @@ class MuxSerializer(Module):
 #   self.pcie_rst_subsys = Signal()   # → subsystem reset
 # ---------------------------------------------------------------------------
 class PCILeechFIFO(Module):
-    def __init__(self, mux_out_fifo_depth=2048, tlp_rx_fifo_depth=2048):
+    def __init__(self, mux_out_fifo_depth=2048, tlp_rx_fifo_depth=2048,
+                 inactivity_one_shot=False, inactivity_ticks=0):
         # USB side — 32-bit word streams
         self.usb_rx = stream.Endpoint([("data", 32)])   # words arriving from host
         self.usb_tx = stream.Endpoint([("data", 32)])   # words going to host
@@ -854,7 +858,7 @@ class PCILeechFIFO(Module):
                 rw[ 21]    .eq(0),         # DRP WR EN
                 rw[ 31]    .eq(0),         # global system reset
                 rw[ 32: 64].eq(240 >> 3),  # bytecount of rw[]
-                rw[ 64: 96].eq(0),         # inactivity timer ticks
+                rw[ 64: 96].eq(inactivity_ticks),
                 rw[ 96:128].eq(0),         # send count
                 rw[128:144].eq(0x10EE),    # CFG_SUBSYS_VEND_ID
                 rw[144:160].eq(0x0007),    # CFG_SUBSYS_ID
@@ -902,6 +906,10 @@ class PCILeechFIFO(Module):
                     )
             write_cases[word_idx] = stmts
 
+        # Created here so the register write block can clear it. The timer
+        # equation that drives it is below, once tickcount64 exists.
+        inactivity_fire = Signal()
+
         self.sync += [
             If(ResetSignal(),
                 *rw_reset_stmts(),
@@ -909,6 +917,11 @@ class PCILeechFIFO(Module):
                 Case(in_addr_byte[1:8],   # word index = byte_offset >> 1
                     {k: v for k, v in write_cases.items()}
                 )
+            ).Elif(inactivity_fire if inactivity_one_shot else 0,
+                # RawUDP FT_ReadPipe stops at the first keepalive frame.
+                # One shot per enable matches the host, which arms rw[16]
+                # again at the start of every read.
+                rw[16].eq(0),
             )
         ]
 
@@ -939,7 +952,6 @@ class PCILeechFIFO(Module):
         # ===================================================================
         tickcount64        = Signal(64)
         inactivity_base    = Signal(64)
-        inactivity_fire    = Signal()
         timer_enable       = Signal()
         timer_ticks        = Signal(32)
 
@@ -1327,8 +1339,11 @@ class PCILeechFIFO(Module):
         # -------------------------------------------------------------------
 
         # p0-p3: four parallel 32-bit TLP streams from the 128-bit RX FIFO.
-        # Each 128-bit word contributes up to four DWORDs; keep bits gate
-        # which ports write, and the last flag goes on the final DWORD.
+        # The status nibble is {first, last, tag} with tag 00, matching
+        # pcileech_mux.sv {rx_first, rx_last, 2'b00}. LeechCore 4.13+ will
+        # not start a TLP unless the first dword carries FIRST. That flag
+        # belongs only on dword 0, as in pcileech_tlps128_dst_fifo.
+        tlp_first = tlp_rx_fifo.source.first
         tlp_last = [Signal() for _ in range(4)]
         for i in range(4):
             self.comb += tlp_last[i].eq(
@@ -1338,7 +1353,7 @@ class PCILeechFIFO(Module):
         for i in range(4):
             self.comb += [
                 mux.p_din[i].eq(tlp_rx_fifo.source.dat[32*i:32*(i + 1)]),
-                mux.p_ctx[i].eq(Cat(Constant(0b00, 2), tlp_last[i], Constant(0, 1))),
+                mux.p_ctx[i].eq(Cat(C(0b00, 2), tlp_last[i], tlp_first if i == 0 else 0)),
                 mux.p_wr [i].eq(tlp_rx_fifo.source.valid & tlp_rx_fifo.source.keep[i] & mux.p_req[i]),
             ]
         self.comb += tlp_rx_fifo.source.ready.eq(mux.p_req[0])

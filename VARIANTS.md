@@ -571,6 +571,72 @@ The shield work includes the FT601 FIFO pinout and clock, USB 3.0
 connector and power, signal integrity, and an ECP5 port of the FT601
 controller. It should not block the SoC bring-up.
 
+### PCIeLeech over UDP
+
+`soc_ecp5_udp.py` is the PCIeLeech FIFO on the Versa gigabit jack, instead
+of an FT601 shield. RGMII port 0, static address `192.168.1.50`, UDP port
+`28474`. The payload is the FT601 byte pipe, which LeechCore RawUDP
+sends and receives. The board answers ARP and ICMP. `tools/pcileech_udp.py`
+sends one loopback word. `pcileech -device RAWUDP://ip=192.168.1.50` is the
+host. The core is
+not held in reset by `rw[200]`; it enumerates from slot PERST# like the
+other Versa images. Inbound BAR reads are completed with Unsupported
+Request so a probe does not hang; completions of the FIFO's own reads are
+forwarded.
+
+`ping 192.168.1.50` works on the wire (0% loss). Getting there required a
+store-and-forward `PacketFIFO` in the `eth_tx` domain: the 50 MHz MAC stack
+cannot keep the 125 MHz gigabit TX datapath fed, so a plain TX FIFO underruns
+and truncates every frame, giving it a bad FCS that the switch drops. The full
+investigation, the timing dead-end of running the stack at line rate, and the
+fix are in [ETHERNET.md](ETHERNET.md).
+
+A stock `pcileech` 4.20 binary reads host memory through this image. On
+2026-11-23, `dump` of `0x3f000` for one page returned the VESA option ROM
+(`56 45 53 41` at the start, `NVIDIA` at offset `0x100`), with 1 page read
+and 0 failed. The command is `dump`, and `-device` comes after it. `info`
+prints help and does not open the device.
+
+```sh
+pcileech dump -device RAWUDP://ip=192.168.1.50 -min 0x3f000 -max 0x40000 -out dump.raw
+```
+
+LeechCore 4.13 and later will not start a TLP unless the first dword's
+status nibble has the FIRST bit set. The nibble is `{first, last, tag}`
+with tag `00`, and FIRST is only on dword 0, as in
+`pcileech_tlps128_dst_fifo`. Without that bit the completions are on the
+wire and the dump file is a page of zeros. `FT_ReadPipe` also treats the
+first inactivity keepalive as the end of the read, so the UDP image arms
+the timer once (`inactivity_one_shot`) and clears it when the keepalive
+fires. The host arms it again at the start of the next read.
+
+This image does not write the command register. After an SRAM load the
+link drops. On Rechner2 the endpoint is `0000:ad:00.0` and the root port
+is `0000:ac:00.0`. Remove the old device, rescan, then set bus master.
+The captured bus number is what the binary prints as the device PCIe id
+(`ad00`). Leave `litepcie` unloaded: it binds the same `10ee:0667` and
+the config space is not the example's.
+
+```sh
+echo 1 | sudo tee /sys/bus/pci/devices/0000:ad:00.0/remove
+echo 1 | sudo tee /sys/bus/pci/devices/0000:ac:00.0/rescan
+sudo setpci -s ad:00.0 COMMAND=0x06
+```
+
+If `lspci` stalls and the endpoint shows revision `ff`, the root port is
+waiting out config completions. A secondary bus reset on `ac:00.0`
+retrains the link. SRAM survives that reset.
+
+```sh
+sudo setpci -s ac:00.0 BRIDGE_CONTROL=40:40
+sleep 1
+sudo setpci -s ac:00.0 BRIDGE_CONTROL=00:40
+```
+
+```sh
+./venv/bin/python soc_ecp5_udp.py --device LFE5UM --build --seed 24
+```
+
 ### ECP5 risk list
 
 - The non-5G Versa link is Gen1 x1. The measured 1 GiB search rate is

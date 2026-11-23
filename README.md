@@ -50,5 +50,15 @@ $ ./pcie_screamer.py --load
 The Gateware/Software in this repository is just a proof of concept that has been done to evaluate and check the feasability of a low cost PCIe
 board/tool for security research.PCIe Screamer is well supported by [PCIe Leech](https://github.com/ufrisk/pcileech) and it is recommended to use it.
 
+## ECP5 variants
+This fork also ports the design to the Lattice ECP5 Versa; the variants are
+catalogued in [VARIANTS.md](VARIANTS.md). One of them, `soc_ecp5_udp.py`,
+carries the PCIeLeech FIFO over UDP on the Versa gigabit jack instead of an
+FT601 shield. Its Ethernet bring-up — why a plain TX FIFO underruns and
+truncates frames at gigabit, and the store-and-forward `PacketFIFO` fix that
+makes `ping 192.168.1.50` work — is written up in [ETHERNET.md](ETHERNET.md).
+Stock `pcileech -device RAWUDP://ip=192.168.1.50` then reads host memory;
+the option-ROM dump and the host rescan steps are in [VARIANTS.md](VARIANTS.md).
+
 ## Get one
 The PCIe Screamer is available at: https://shop.lambdaconcept.com/
