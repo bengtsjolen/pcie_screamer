@@ -594,8 +594,10 @@ fix are in [ETHERNET.md](ETHERNET.md).
 A stock `pcileech` 4.20 binary reads host memory through this image. On
 2026-11-23, `dump` of `0x3f000` for one page returned the VESA option ROM
 (`56 45 53 41` at the start, `NVIDIA` at offset `0x100`), with 1 page read
-and 0 failed. The command is `dump`, and `-device` comes after it. `info`
-prints help and does not open the device.
+and 0 failed. A later dump of `0x1003f000` for 256 MiB + 4 KiB printed
+**23 MB/s**, 65537/65537 pages, none failed. That rate is in
+[PERFORMANCE.md](PERFORMANCE.md). The command is `dump`, and `-device`
+comes after it. `info` prints help and does not open the device.
 
 ```sh
 pcileech dump -device RAWUDP://ip=192.168.1.50 -min 0x3f000 -max 0x40000 -out dump.raw

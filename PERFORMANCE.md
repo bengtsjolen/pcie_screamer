@@ -1,7 +1,7 @@
 # PCIe read-throughput measurements
 
 Date: 2026-10-26 (Squirrel, updated 2026-10-27). ECP5 Versa added 2026-11-22.
-LitePCIe example loopback added 2026-11-23.
+LitePCIe example loopback added 2026-11-23. RawUDP dump added 2026-11-23.
 
 This document collects memory-read throughput for two platforms. The ECP5
 section is the on-chip search engine (`ReadBench`, four outstanding 4 KiB
@@ -28,6 +28,13 @@ reads, UART console). The Squirrel section is the FT601/PCILeech path.
   errors. That is not this ReadBench number. The example posts one TLP at
   a time and splits each 8 KiB buffer into 512-byte requests. Build steps
   and the host commands are in [LITEPCIE_EXAMPLES.md](LITEPCIE_EXAMPLES.md).
+* Stock `pcileech` 4.20 over RawUDP (`soc_ecp5_udp.py`) dumped 256 MiB +
+  4 KiB at the speed the program printed, **23 MB/s**, with 65537/65537
+  pages read and none failed. That is above a 100 Mbit link and in the
+  same range as an FT2232H-56Q FIFO on an Acorn CLE-215+. The on-chip
+  bench above already does 206 MB/s on this slot, and gigabit raw is
+  125 MB/s, so 23 MB/s is the FT601-over-UDP read loop. Host steps are in
+  [VARIANTS.md](VARIANTS.md).
 
 ### Test setup
 
@@ -118,6 +125,35 @@ That image was not timed.
 * Link replay/corruption was not visible in these runs: the 4 KiB VESA
   read completed with the expected dword count, the signature matched, and
   the 1 GiB runs returned `bench done` / `no match` with no error code.
+
+### RawUDP, stock pcileech
+
+`soc_ecp5_udp.py` on the same Versa and the same Rechner2 slot. The
+Ethernet host ran `pcileech` 4.20 and the FPGA bus-mastered Rechner2.
+Command and bus-master setup are in [VARIANTS.md](VARIANTS.md). No
+separate wall clock was taken; the speed below is what `pcileech` printed.
+`1 MiB = 1024*1024`. The span is `0x20040000 - 0x1003f000 = 0x10001000`
+(256 MiB + 4 KiB), which is 65537 pages of 4 KiB. `pcileech` showed that
+as progress `256 / 256`.
+
+```text
+pcileech dump -device RAWUDP://ip=192.168.1.50 -min 0x1003f000 -max 0x20040000 -out dump5.test
+```
+
+| Host SW | Range | pcileech speed | Pages read | Pages failed |
+|---------|-------|----------------|------------|--------------|
+| 4.20.0.67 | `0x1003f000` + 256 MiB + 4 KiB | 23 MB/s | 65537 / 65537 | 0 |
+
+The same image's one-page read at `0x3f000` returned the VESA header
+`56 45 53 41` and the `NVIDIA` string at offset `0x100`. The 256 MiB run
+was not byte-checked.
+
+A 100 Mbit/s pipe is 12.5 MB/s, so 23 MB/s is past that. Gigabit raw is
+125 MB/s, and the on-chip `bench` on this Gen1 x1 link is 206 MB/s. The
+RawUDP number sits with the operator's FT2232H-56Q result on an Acorn
+CLE-215+, which was not re-measured for this note. The bytes travel as
+the FT601 pipe inside UDP datagrams, and each `FT_ReadPipe` ends at the
+first inactivity keepalive, so the rate is that read loop.
 
 ## PCIe Squirrel read-throughput measurements
 
