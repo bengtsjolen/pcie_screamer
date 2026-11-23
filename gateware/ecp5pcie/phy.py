@@ -15,12 +15,13 @@ from .sys_router import TLPSysRouter
 class ECP5PCIePHY(Module, AutoCSR):
     """LitePCIe PHY front-end for the ECP5-PCIe soft core.
 
-    Presents the interface `LitePCIeEndpoint` expects - `sink`, `source`, `data_width`,
-    `bar0_size`/`bar0_mask`, `id`, `max_request_size`, `max_payload_size` - and the Squirrel
-    SoC contract on the same ports: `_link_status`, `_bus_master_enable`, `cfg_mgmt_*` and
-    `cd_pcie`. The DCU/PHY/LTSSM/DLL run in the core's `pcie_rx` domain. `TLPStreamAdapter`
-    crosses the 32-bit TLP ports into 64-bit `sys` beats; `TLPSysRouter` answers config space
-    from `ConfigSpace` and forwards memory requests and completions.
+    Presents the interface `LitePCIeEndpoint` and `SoC.add_pcie` expect: `sink`, `source`,
+    `data_width`, `endianness`, `msi`, `bar0_size`/`bar0_mask`, `id`, `max_request_size`,
+    `max_payload_size`, and the Squirrel SoC contract on the same ports: `_link_status`,
+    `_bus_master_enable`, `cfg_mgmt_*` and `cd_pcie`. The DCU/PHY/LTSSM/DLL run in the core's
+    `pcie_rx` domain. `TLPStreamAdapter` crosses the 32-bit TLP ports into 64-bit `sys` beats;
+    `TLPSysRouter` answers config space from `ConfigSpace` and forwards memory requests and
+    completions. `msi` is consumed in `sys` (same clock as `cd_pcie`), so it needs no crossing.
 
     `source` carries TLPs toward the SoC (completions in, depacketizer for LitePCIe), `sink`
     carries TLPs from the SoC (requests out, packetizer for LitePCIe). Both use the S7 dword
@@ -28,6 +29,7 @@ class ECP5PCIePHY(Module, AutoCSR):
     on the wire. `cd_pcie` tracks `sys`, because that is the clock the TLP streams use.
     """
     data_width = 64
+    endianness = "big"
 
     def __init__(self, platform, perst_n, gen=1, refclk_freq=None, fabric_clk=False,
                  bar0_size=4096, config=None, **core_kwargs):
@@ -68,6 +70,7 @@ class ECP5PCIePHY(Module, AutoCSR):
         # LitePCIe endpoint interface and identity (captured before the reset wrapper).
         self.sink   = router.phy_sink     # TLPs from the packetizer -> core
         self.source = router.phy_source   # TLPs to the depacketizer <- core
+        self.msi    = router.msi          # LitePCIeMSI -> one MWr32
         self.comb += [
             self.id.eq(router.id),
             self.max_payload_size.eq(128 << config_space.max_payload_size),
@@ -107,8 +110,9 @@ class ECP5PCIePHY(Module, AutoCSR):
         # Event pulses and CSR fields (read before wrapping so the inner signals stay reachable).
         events = {n: getattr(router, n) for n in ["cfg_rd", "cfg_wr", "ur", "cpl", "dropped"]}
         router_id   = router.id
-        cfg_command = config_space.command
-        cfg_bar0    = config_space.bar0
+        cfg_command    = config_space.command
+        cfg_bar0       = config_space.bar0
+        cfg_msi_enable = config_space.msi_enable
 
         dll_up_sys = Signal()
         ltssm_sys  = Signal(8)
@@ -147,7 +151,7 @@ class ECP5PCIePHY(Module, AutoCSR):
             CSRField("ltssm",  size=6, description="ECP5-PCIe LTSSM state index"),
         ])
         self._bus_master_enable = CSRStatus(description="1 when Command[BME] is set")
-        self._msi_enable        = CSRStatus(description="MSI enable (stuck at 0)")
+        self._msi_enable        = CSRStatus(description="1 when the MSI capability enable bit is set")
         self._msix_enable       = CSRStatus(description="MSI-X enable (stuck at 0)")
         self._max_request_size  = CSRStatus(16, description="Max read request size (bytes)")
         self._max_payload_size  = CSRStatus(16, description="Max payload size (bytes)")
@@ -160,6 +164,7 @@ class ECP5PCIePHY(Module, AutoCSR):
             self._link_status.fields.width.eq(0),
             self._link_status.fields.ltssm.eq(ltssm_sys),
             self._bus_master_enable.status.eq(self.bus_master),
+            self._msi_enable.status.eq(cfg_msi_enable),
             self._max_request_size.status.eq(self.max_request_size),
             self._max_payload_size.status.eq(self.max_payload_size),
         ]

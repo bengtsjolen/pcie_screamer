@@ -1,206 +1,163 @@
-# Running a LitePCIe example on the ECP5
+# LitePCIe example on the ECP5 Versa
 
 Date: 2026-11-23
 
-This is what is still missing before a stock LitePCIe example device can
-run on the ECP5 Versa. [DEPENDENCIES.md](DEPENDENCIES.md) maps where the
-PHY sits. [VARIANTS.md](VARIANTS.md) and [PERFORMANCE.md](PERFORMANCE.md)
-record the images that have actually linked.
+`soc_ecp5_example.py` is a stock LitePCIe device on the non-5G Versa
+(LFE5UM-45F): one BAR0 CSR window, one DMA reader, one DMA writer, and
+one 32-bit MSI vector. It calls `SoC.add_pcie`. It is not a retarget of
+`litepcie/gen.py`. The 196.7 MiB/s figure in
+[PERFORMANCE.md](PERFORMANCE.md) is `ReadBench` on `soc_ecp5_search.py`,
+a different engine.
 
-## What an example is
+## What runs
 
-The files in `litex/litepcie/examples/` and the PCIe targets in
-`litex/litex-boards` are not bitstreams that can be retargeted. Each one
-builds a vendor PHY (`S7PCIEPHY`, `USPCIEPHY`, `USPPCIEPHY`, `GW5APCIEPHY`,
-`C5PCIEPHY`, or `LFCPNXPCIEPHY`) and then calls `SoC.add_pcie` in
-`litex/soc/integration/soc.py`. That call is the device:
+Measured on Rechner2 on 2026-11-23. Root port `0000:ac:00.0`, endpoint
+`0000:ad:00.0`. The bitstream is seed 24, loaded into SRAM.
 
-- `LitePCIeEndpoint` on `phy.sink` / `phy.source`, with `endianness` taken
-  from `phy.endianness`.
-- A BAR0 wishbone master (`LitePCIeWishboneMaster`) onto the SoC bus, so
-  the host can read and write CSRs.
-- `LitePCIeDMA` channels, reader and writer, with a descriptor table and
-  optional loopback.
-- MSI. `add_pcie` asserts `with_msi` whenever `ndmas > 0`, and it connects
-  `msi.source` to `phy.msi`.
+* The endpoint enumerates as `10ee:0667` revision 0. BAR0 is 64 KiB.
+  Link status is 2.5 GT/s, x1.
+* The MSI capability is at `0x48`: one vector, 32-bit, not maskable.
+  After the driver binds, `lspci` shows `MSI: Enable+`.
+* BAR0 CSRs work. `litepcie_util info` prints the identifier
+  (`pcie_screamer ECP5 LitePCIe example` plus the build time).
+  `litepcie_util scratch_test` writes and reads `0x12345678` and
+  `0xdeadbeef`.
+* On-chip DMA loopback works. `sudo ./litepcie_util -t 2 dma_test`
+  keeps both counts moving, holds the difference at 128, and reports
+  0 data errors. The speed column stays at **0.38 Gbps**. That is the
+  reader, about 47.5 MB/s of the 8 KiB buffers. The writer sends those
+  same buffers back to the host, so the link carries both directions.
+  128 is half of the 256-buffer ring; the driver keeps the reader that
+  far ahead of the writer.
 
-`litepcie/gen.py` refuses any other PHY. Its comment lists 7-series,
-UltraScale, Cyclone V, GW5AT, and CertusPro-NX. An ECP5 example is a new
-Versa target that calls `add_pcie` with `ECP5PCIePHY`. It is not
-`examples/acorn.yml` with the device name changed. The Acorn YAML asks
-for a 128-bit x4 PHY, 8 outstanding requests, and 16 MSI vectors.
+Post-route, the SerDes clocks meet their constraints. `clk100` does not:
+this image's fmax is 74.96 MHz against the 100 MHz system clock. The
+loopback above passed on that image. Seeds 1 and 12 do not place the
+DCU for this netlist. Seed 24 does.
 
-## What already lines up
+The load is SRAM. A PCIe rescan keeps the image, because PERST# is fabric
+pin A6 and is not PROGRAMN. A Versa power cycle drops it. SPI flash has
+not been programmed.
 
-`ECP5PCIePHY` presents the stream ports `LitePCIeEndpoint` uses:
-`sink` and `source` in `phy_layout(64)`, `data_width = 64`, `bar0_size`,
-`bar0_mask`, `id`, `max_request_size`, `max_payload_size`, and `cd_pcie`
-following `sys`. Dword order matches `S7PCIEPHY`, whose `endianness` is
-`"big"`. `soc_ecp5.py --litepcie` passes that endianness by hand.
+## What this image does not do
 
-`TLPSysRouter` (`gateware/ecp5pcie/sys_router.py`) already sorts the TLP
-types a normal example uses:
+* Close timing at 100 MHz.
+* Gate transmits on flow-control credits. The adapter also waits until
+  the DLL retry buffer is empty, so one TLP is unacknowledged at a time.
+  Four read tags may still be outstanding, because a header-only memory
+  read is acknowledged before its completion returns.
+  `max_pending_requests=4` is that tag limit.
+* Exercise an address above 4 GiB. The DMA is built with
+  `address_width=64` and emits a 32-bit request when the host address
+  fits in 32 bits. `MRd64` / `MWr64` were not run. An inbound `MRd64`
+  gets Unsupported Request. An inbound `MWr64` is dropped.
+* External loopback (`litepcie_util -e`). That flag turns the on-chip
+  loopback off. It was not re-run after the MSI fix.
+* Gen2, the LFE5UM5G part, MSI-X, INTx, more than one lane, a 64-bit
+  BAR, PTM, or a root port.
 
-| Fmt/Type | Treatment |
-|---|---|
-| `MRd32` `0x00`, `MWr32` `0x40`, `Cpl` `0x0a`, `CplD` `0x4a` | Forwarded to the LitePCIe endpoint |
-| `CfgRd0`, `CfgWr0` | Answered from `ConfigSpace` |
-| `MRd64`, IO read/write, locked reads, type-1 config | Unsupported Request completion |
-| `MWr64`, messages, anything else | Dropped |
+A one-dword Memory Write must use Last DW Byte Enable 0 and First DW
+Byte Enable `0xf`. The MSI header does that (`0x0f`). `0xff` is a
+malformed TLP: the DMA engines still advance, and the host never sees
+the interrupt, so `dma_test` freezes with `TX_BUFFERS` at 128.
 
-`soc_ecp5.py --litepcie` is the closest image that elaborates today. It
-builds the endpoint with `address_width=64`, a private BAR0 SRAM, and
-`HostDMAScratch` (one dword to or from a host physical address, gated on
-Bus Master Enable). It does not call `add_pcie`, has no `LitePCIeDMA`
-table, and has no MSI. The BAR0 write-then-read of that image passed in
-simulation. The Versa images that have been flashed are the search path,
-which never instantiates `LitePCIeEndpoint`. Those measured
-endpoint-originated 32-bit reads only.
+## Build the bitstream
 
-## Before `add_pcie` will elaborate
+From the repo root, with the Yosys/nextpnr/ecppack binaries on `PATH`
+or under `tools/bin`, and the LiteX checkout importable (this tree uses
+`./venv`):
 
-Two attributes on the PHY.
+```sh
+git -C litex/litepcie apply ../../patches/litepcie-ecp5-0667.patch
+./venv/bin/python soc_ecp5_example.py --device LFE5UM --build --seed 24
+```
 
-`phy.endianness` has to be `"big"`, as a class attribute the way
-`S7PCIEPHY` defines it. `add_pcie` reads `phy.endianness` and does not
-take it as an argument.
+The patch adds `10ee:0667` to the LitePCIe PCI id table. The soc script
+copies `litex/litepcie/litepcie/software` to
+`build/soc_ecp5_example_lfe5um_gen1_ref156/litepcie_software` and writes
+`csr.h`, `soc.h`, and `mem.h` there. Apply the patch before that copy.
+`litex/litepcie` commit `33defbe` is also local: a completion with
+`status != 0` ends the request, so the DMA reader frees the tag instead
+of stalling.
 
-`phy.msi` has to be a `stream.Endpoint(msi_layout())`. That layout is a
-single `dat` field of 8 bits. On the 7-series PHY this stream is wired
-to the hard IP: `valid` to `cfg_interrupt`, `ready` from
-`cfg_interrupt_rdy`, `dat` to `cfg_interrupt_di`. The hard IP owns the
-MSI capability and turns that strobe into a one-dword memory write using
-the address and data the host programmed. `_msi_enable` and
-`_msix_enable` on that PHY are live status from the same block. On
-`ECP5PCIePHY` both CSRs are tied to 0.
+`--seed 24` is required for this netlist. The build passes
+`--timing-allow-fail`, so the bitstream is still written when `clk100`
+misses timing.
 
-## MSI
+## Load
 
-This is the piece that keeps the example driver from running, separate
-from the memory TLP types.
+JTAG is FT2232 channel A. This programs SRAM and does not write SPI
+flash:
 
-`ConfigSpace` (`gateware/ecp5pcie/config_space.py`) has a PCI power
-capability at `0x40` and a PCIe capability at `0x60`. It has no MSI
-capability and no MSI-X capability, so the host has nowhere to set the
-MSI enable bit or to write the message address and data.
+```sh
+openFPGALoader --cable ft2232 --bitstream \
+  build/soc_ecp5_example_lfe5um_gen1_ref156/gateware/soc_ecp5_example_lfe5um_gen1_ref156.bit
+```
 
-Classic MSI, which is what `add_pcie` connects to `phy.msi`, needs:
+`soc_ecp5_example.py --load` calls the same programmer. UART is FT2232
+channel B, 115200 baud
+(`/dev/serial/by-id/usb-Lattice_Lattice_ECP5_Versa_Board-if01-port0`
+on the machine that has the USB cable).
 
-- An MSI capability in config space. One vector is enough for a first
-  target. The 7-series example IP is configured as 64-bit incapable and
-  one vector, with a comment that multi-vector is unfinished there too.
-- `_msi_enable` reflecting that capability's enable bit, so software and
-  the DMA block can see that the host turned MSI on.
-- A transmitter that, on `phy.msi.valid`, emits one posted `MWr32` of
-  one dword to the programmed message address, with the programmed
-  message data, and then sets `phy.msi.ready`. The transmit path of
-  `TLPSysRouter` already merges `phy_sink` without looking at the format,
-  so this write can enter through the same port as any other LitePCIe
-  request. It has to wait until Bus Master Enable is set.
+## Host driver and tests
 
-MSI-X is the other `msi_type` `add_pcie` accepts. `LitePCIeMSIX` does not
-use `phy.msi`. It sends the same one-dword memory write through a
-crossbar master port, which this router already forwards. It still needs
-an MSI-X capability whose table and PBA live in a BAR the host can write.
-That is more config space than a first example needs. One MSI vector
-unblocks `ndmas=1`.
+Build the module on the machine that will load it. A `.ko` built against
+another kernel will not insert. The software tree can be the one the
+bitstream build just wrote; the module itself is compiled on the host.
 
-INTx is unused by these examples. The 7-series PHY sets legacy interrupt
-generation off. Message TLPs that arrive from the host are dropped by
-the router. Nothing has to be added for them.
+Bus numbers below are Rechner2. Use the endpoint `lspci` shows.
 
-## Memory transfers the example actually issues
+```sh
+echo 1 | sudo tee /sys/bus/pci/devices/0000:ad:00.0/remove
+echo 1 | sudo tee /sys/bus/pci/devices/0000:ac:00.0/rescan
+sudo setpci -s ad:00.0 COMMAND=0x06
+sudo lspci -s ad:00.0 -vvv | grep -E 'Control:|Region 0|MSI:|LnkSta:'
+```
 
-Host access to BAR0 is `MRd32` and `MWr32`, because the BAR we advertise
-is 32-bit. Both formats are forwarded. A host write of BAR0 has been
-simulated and has not been done on the Versa. A host read of BAR0 through
-`LitePCIeWishboneMaster` has not been done on the Versa either. Config
-reads and writes have, which is how the board enumerates.
+`Control` should show `Mem+` and `BusMaster+`. `Region 0` is a 64 KiB
+memory BAR. Before the driver binds, MSI is `Enable-`. Link status
+should be `2.5GT/s` and `x1`.
 
-`LitePCIeDMA` with `address_width=64` emits `MRd32` or `MWr32` when the
-host address fits in 32 bits, and `MRd64` or `MWr64` otherwise. Those
-requests leave through `phy.sink`, which the router does not filter, so
-a DMA descriptor aimed above 4 GiB can go out on the wire. The completion
-comes back as `Cpl` or `CplD` and is forwarded. Inbound `MRd64` is
-answered with Unsupported Request, and inbound `MWr64` is dropped. That
-matters only if a future BAR is 64-bit. The example BAR is not.
+```sh
+cd build/soc_ecp5_example_lfe5um_gen1_ref156/litepcie_software/kernel
+make
+sudo rmmod litepcie 2>/dev/null || true
+sudo insmod litepcie.ko
+cd ../user
+make
+sudo ./litepcie_util info
+sudo ./litepcie_util scratch_test
+sudo ./litepcie_util -t 2 dma_test
+```
 
-The DMA reader depends on a completion with a non-zero status freeing
-its tag. `litex/litepcie` commit `33defbe` does that in
-`litepcie/tlp/depacketizer.py` by treating `status != 0` as the end of
-the completion. That commit is local to this checkout. An example built
-against upstream LitePCIe stalls the reader on the first Unsupported
-Request. `HostDMAScratch` has its own timeout for the same case and
-pulses `crossbar.tlp_ctrl_rst`. `LitePCIeDMA` does not.
+`insmod` probes the board. `dmesg` should show the identifier string,
+`1 MSI IRQs allocated.`, and `/dev/litepcie0`. `kernel/init.sh` does
+the same insert and then `chmod 666` on `/dev/litepcie0`, but only when
+the module was not already loaded. After a later rescan the node often
+comes back root-only, which is why the util is run with `sudo`.
+`sudo chmod 666 /dev/litepcie0` makes it usable without `sudo`.
 
-IO, locked transactions, and type-1 config are out of the examples.
-Leaving them as Unsupported Request is the right behavior for this
-endpoint.
+`info` reads the identifier ROM through BAR0. `scratch_test` writes the
+scratch CSR. `dma_test` is the on-chip loopback. Both buffer columns
+should keep climbing, the difference should stay at 128, and errors
+should stay at 0.
 
-## Sizes to turn down
+## Device
 
-`add_pcie` defaults to `max_pending_requests=8` and the Acorn YAML asks
-for the same. The ECP5 DLL retry buffer holds 4 TLPs
-(`TLPBuffer` in the transmit path of `dll_tlp.py`, `max_tlps` from a
-2-bit replay count). The receive buffer also holds 4 and drops a TLP
-that does not fit. A Versa example should pass `max_pending_requests=4`
-until that buffer is larger. The search image was measured with 4 reads
-in flight, on `ReadBench` rather than on `LitePCIeDMA`.
+`add_pcie` in `litex/soc/integration/soc.py` builds `LitePCIeEndpoint`
+(`endianness` from `phy.endianness`, which is `"big"`), a BAR0 wishbone
+master, `LitePCIeDMA`, and `LitePCIeMSI` wired to `phy.msi`.
+`litepcie/gen.py` still refuses an ECP5 PHY. `soc_ecp5.py --litepcie`
+is a separate image: endpoint plus `HostDMAScratch`, no DMA table, no
+MSI.
 
-The DLL advertises 2 non-posted header credits and 2 posted header
-credits at init (`dll.py`, `NPH` and `PH`), plus credits released as
-TLPs are retired. Enumeration works with that. A host that pipelines
-many BAR0 reads will stall until a credit comes back. The example's
-wishbone master issues one request at a time, so this does not block it.
+Config space is a Type 0 header. The capability chain is PCI PM at
+`0x40`, MSI at `0x48`, PCIe capability at `0x60`. The MSI transmitter
+in `TLPSysRouter` sends one posted `MWr32` when `phy.msi.valid` is set
+and Bus Master Enable is set, then pulses `ready`. Message address and
+data come from the capability. The requester id is the completer id
+captured from the last `CfgWr0`.
 
-Data width stays 64. The endpoint and the DMA are parameterized by
-`phy.data_width`. The 128-bit width in the example YAML is the Xilinx
-user-clock datapath, not a requirement of the DMA.
-
-`ConfigSpace` advertises a maximum payload of 256 bytes and resets
-Device Control with a maximum read request of 512. `max_payload_size`
-and `max_request_size` on the PHY follow Device Control, and LitePCIe
-splits DMA on those values. One such TLP fits in the 512-byte buffer
-slot. The example does not need a larger payload.
-
-BAR0 in `soc_ecp5.py` defaults to 4 KiB. An example that maps the CSR
-bus plus a DMA descriptor window through that BAR needs a larger BAR, or
-a second BAR. Config space currently implements only BAR0.
-
-## A minimal Versa example
-
-One new target, not a change to `gen.py`. It would:
-
-1. Build `ECP5PCIePHY` for Gen1, 156.25 MHz reference, the same arguments
-   as `soc_ecp5_search.py`.
-2. Set `endianness = "big"` and provide `phy.msi`.
-3. Add a one-vector MSI capability and the memory-write transmitter
-   described above.
-4. Call `self.add_pcie(phy=self.pcie_phy, ndmas=1, address_width=64,
-   max_pending_requests=4)` so the host gets the CSR window, one DMA
-   reader, one DMA writer, and one MSI.
-5. Keep the local depacketizer fix.
-
-The first hardware checks, after enumeration, are a host write and read
-of a CSR through BAR0, a DMA write of one buffer below 4 GiB, a DMA read
-of one buffer, and one MSI delivered for each. A DMA aimed above 4 GiB
-is the `MWr64` / `MRd64` check. The 1 GiB bandwidth number in
-[PERFORMANCE.md](PERFORMANCE.md) does not transfer: that path is
-`ReadBench` with four outstanding 4 KiB reads, and `LitePCIeDMA` splits
-on the negotiated maximum read request and posts an interrupt per
-descriptor.
-
-## Left out of that example
-
-Gen2 and the `LFE5UM5G` part. The speed-change state in the LTSSM does
-not leave `Recovery.Speed`, and this Versa is the non-5G silicon.
-[DEPENDENCIES.md](DEPENDENCIES.md) covers that.
-
-PTM. `add_pcie` can pass `with_ptm=True`. The default examples do not.
-There is no PTM capability here.
-
-A root port. The core is an endpoint, and `TLPSysRouter` answers type-0
-config only.
-
-More than one lane, a 64-bit BAR, MSI-X, and INTx. None of these are
-required to run the one-DMA example above.
+`TLPSysRouter` forwards inbound `MRd32`, `MWr32`, `Cpl`, and `CplD`.
+`CfgRd0` and `CfgWr0` are answered locally. Other unsupported
+non-posted requests get Unsupported Request.

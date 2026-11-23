@@ -1,6 +1,7 @@
 # PCIe read-throughput measurements
 
 Date: 2026-10-26 (Squirrel, updated 2026-10-27). ECP5 Versa added 2026-11-22.
+LitePCIe example loopback added 2026-11-23.
 
 This document collects memory-read throughput for two platforms. The ECP5
 section is the on-chip search engine (`ReadBench`, four outstanding 4 KiB
@@ -21,6 +22,12 @@ reads, UART console). The Squirrel section is the FT601/PCILeech path.
   the raw benchmark. The link is the limit at that stride.
 * The VESA option ROM at `0x3f000` completed as a 64-byte read and as a
   4 KiB read, and a scan of that 4 KiB matched at `0x3f000`.
+* The LitePCIe example (`soc_ecp5_example.py`, one DMA channel, on-chip
+  loopback) measured **0.38 Gbps** of reader payload on 2026-11-23, about
+  47.5 MB/s, with the writer sending the same buffers back and zero data
+  errors. That is not this ReadBench number. The example posts one TLP at
+  a time and splits each 8 KiB buffer into 512-byte requests. Build steps
+  and the host commands are in [LITEPCIE_EXAMPLES.md](LITEPCIE_EXAMPLES.md).
 
 ### Test setup
 

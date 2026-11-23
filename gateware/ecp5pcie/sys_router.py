@@ -6,7 +6,7 @@ from migen import *
 from litex.soc.interconnect import stream
 from litex.soc.interconnect.packet import Dispatcher, Arbiter
 
-from litepcie.common import phy_layout
+from litepcie.common import msi_layout, phy_layout
 
 
 def bswap32(x):
@@ -27,8 +27,11 @@ class TLPSysRouter(Module):
     RX (`sink`, from the adapter): CfgRd0/CfgWr0 are answered here from `config_space`;
     MRd32/MWr32/Cpl/CplD go to `phy_source` (the LitePCIe depacketizer); other non-posted
     requests get an Unsupported Request completion; everything else is dropped. TX (`source`,
-    to the adapter) merges the config completions, UR completions and `phy_sink` (the LitePCIe
-    packetizer) at packet boundaries.
+    to the adapter) merges the config completions, UR completions, `phy_sink` (the LitePCIe
+    packetizer) and one MSI memory write at packet boundaries. `msi` is `msi_layout()`:
+    while `valid` is set and Bus Master Enable is set, one posted MWr32 of the capability's
+    message address and data is emitted and then `ready` pulses. `ready` stays low until
+    Bus Master Enable, so an interrupt that arrives first is not dropped.
 
     Each lane carries a dword with wire byte 0 in bits [31:24] (the adapter's convention), so
     headers are built directly and read data is `bswap32`'d.
@@ -38,6 +41,7 @@ class TLPSysRouter(Module):
         self.source     = stream.Endpoint(phy_layout(data_width))  # TX to adapter
         self.phy_source = stream.Endpoint(phy_layout(data_width))  # to LitePCIe depacketizer
         self.phy_sink   = stream.Endpoint(phy_layout(data_width))  # from LitePCIe packetizer
+        self.msi        = stream.Endpoint(msi_layout())            # from LitePCIeMSI
 
         self.cfg_rd  = Signal()
         self.cfg_wr  = Signal()
@@ -201,5 +205,38 @@ class TLPSysRouter(Module):
             ),
         )
 
+        # MSI: one posted MWr32. Single-vector, so the data dword is the capability's message
+        # data with no vector bits mixed in. The lane dword is wire-ordered (byte 0 in [31:24]).
+        msi_tlp = stream.Endpoint(phy_layout(data_width))
+        # Length is 1 dword, so Last DW BE must be 0 and First DW BE must be 0xf.
+        # 0xff is a malformed TLP; the root port drops it and the host never sees the IRQ.
+        msi_hdr0 = Cat(C(1, 10), C(0, 14), C(0x40, 8))          # length 1, MWr32
+        msi_hdr1 = Cat(C(0x0f, 8), C(0, 8), self.id)            # first BE, last BE = 0, tag 0, requester
+        msi_data = bswap32(Cat(config_space.msi_data, C(0, 16)))
+        msi_fsm = FSM(reset_state="IDLE")
+        self.submodules.msi_fsm = msi_fsm
+        msi_fsm.act("IDLE",
+            If(self.msi.valid & config_space.bus_master,
+                NextState("SEND0"),
+            ),
+        )
+        msi_fsm.act("SEND0",
+            msi_tlp.valid.eq(1),
+            msi_tlp.first.eq(1),
+            msi_tlp.dat.eq(Cat(msi_hdr0, msi_hdr1)),
+            msi_tlp.be.eq(0xff),
+            If(msi_tlp.ready, NextState("SEND1")),
+        )
+        msi_fsm.act("SEND1",
+            msi_tlp.valid.eq(1),
+            msi_tlp.last.eq(1),
+            msi_tlp.dat.eq(Cat(config_space.msi_address, msi_data)),
+            msi_tlp.be.eq(0xff),
+            If(msi_tlp.ready,
+                self.msi.ready.eq(1),
+                NextState("IDLE"),
+            ),
+        )
+
         # TX merge ---------------------------------------------------------------------------------
-        self.submodules.arbiter = Arbiter([cfg_cpl, ur_cpl, tx_buf.source], self.source)
+        self.submodules.arbiter = Arbiter([cfg_cpl, ur_cpl, tx_buf.source, msi_tlp], self.source)

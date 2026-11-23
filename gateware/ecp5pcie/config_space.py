@@ -2,9 +2,11 @@ from migen import *
 
 
 # PCIe config space for a single-function x1 endpoint: Type 0 header, PCI PM cap at 0x40,
-# PCIe cap v2 at 0x60, nothing in extended config. Register file in the core's pcie_rx domain.
+# 32-bit one-vector MSI cap at 0x48, PCIe cap v2 at 0x60, nothing in extended config.
+# Register file in the core's pcie_rx domain.
 
 PM_CAP   = 0x40
+MSI_CAP  = 0x48
 PCIE_CAP = 0x60
 
 
@@ -43,6 +45,10 @@ class ConfigSpace(Module):
         self.mem_enable = Signal()
         self.max_payload_size = Signal(3)   # Device Control encoding: 128 << n bytes
         self.max_read_request = Signal(3)
+        # Classic MSI, 32-bit address, one vector. Enable is Message Control bit 0.
+        self.msi_enable  = Signal()
+        self.msi_address = Signal(32)
+        self.msi_data    = Signal(16)
 
         subsystem_vendor_id = vendor_id if subsystem_vendor_id is None else subsystem_vendor_id
         subsystem_id        = device_id if subsystem_id is None else subsystem_id
@@ -63,8 +69,13 @@ class ConfigSpace(Module):
             0x34 >> 2: (PM_CAP,                                              0),
             0x3c >> 2: (0,                                                   0x0000_00ff),
             # PCI Power Management: version 3, D0 only; PMCSR PowerState RW, No_Soft_Reset.
-            (PM_CAP + 0x0) >> 2: ((0x0003 << 16) | (PCIE_CAP << 8) | 0x01,   0),
+            # Next pointer is the MSI capability.
+            (PM_CAP + 0x0) >> 2: ((0x0003 << 16) | (MSI_CAP << 8) | 0x01,    0),
             (PM_CAP + 0x4) >> 2: ((1 << 3),                                  0x0000_0003),
+            # MSI: 32-bit address, one vector, no per-vector mask. Message Control enable is RW.
+            (MSI_CAP + 0x0) >> 2: ((PCIE_CAP << 8) | 0x05,                   0x0001_0000),
+            (MSI_CAP + 0x4) >> 2: (0,                                        0xffff_fffc),
+            (MSI_CAP + 0x8) >> 2: (0,                                        0x0000_ffff),
             # PCI Express v2, endpoint.
             (PCIE_CAP + 0x00) >> 2: ((0x0002 << 16) | 0x10,                  0),
             (PCIE_CAP + 0x04) >> 2: (dev_cap,                                0),
@@ -106,4 +117,7 @@ class ConfigSpace(Module):
             self.bus_master.eq(self.command[2]),
             self.max_payload_size.eq(self.dev_ctl[5:8]),
             self.max_read_request.eq(self.dev_ctl[12:15]),
+            self.msi_enable.eq(storage[MSI_CAP >> 2][16]),
+            self.msi_address.eq(storage[(MSI_CAP + 4) >> 2]),
+            self.msi_data.eq(storage[(MSI_CAP + 8) >> 2][:16]),
         ]
