@@ -30,10 +30,12 @@ reads, UART console). The Squirrel section is the FT601/PCILeech path.
   and the host commands are in [LITEPCIE_EXAMPLES.md](LITEPCIE_EXAMPLES.md).
 * Stock `pcileech` 4.20 over RawUDP (`soc_ecp5_udp.py`) dumped 256 MiB +
   4 KiB at the speed the program printed, **23 MB/s**, with 65537/65537
-  pages read and none failed. That is above a 100 Mbit link and in the
-  same range as an FT2232H-56Q FIFO on an Acorn CLE-215+. The on-chip
-  bench above already does 206 MB/s on this slot, and gigabit raw is
-  125 MB/s, so 23 MB/s is the FT601-over-UDP read loop. Host steps are in
+  pages read and none failed. Effective payload is about 10 MB/s on a
+  100 Mbit link and about 100 MB/s on gigabit. The MAC/IP/UDP stack runs
+  at 50 MHz while the gigabit byte clock is 125 MHz, so until that stack
+  meets timing at a higher clock the expected ceiling is
+  `50/125 × 100 MB/s = 40 MB/s`. 23 MB/s is under that, and in the same
+  range as an FT2232H-56Q FIFO on an Acorn CLE-215+. Host steps are in
   [VARIANTS.md](VARIANTS.md).
 
 ### Test setup
@@ -148,12 +150,27 @@ The same image's one-page read at `0x3f000` returned the VESA header
 `56 45 53 41` and the `NVIDIA` string at offset `0x100`. The 256 MiB run
 was not byte-checked.
 
-A 100 Mbit/s pipe is 12.5 MB/s, so 23 MB/s is past that. Gigabit raw is
-125 MB/s, and the on-chip `bench` on this Gen1 x1 link is 206 MB/s. The
-RawUDP number sits with the operator's FT2232H-56Q result on an Acorn
-CLE-215+, which was not re-measured for this note. The bytes travel as
-the FT601 pipe inside UDP datagrams, and each `FT_ReadPipe` ends at the
-first inactivity keepalive, so the rate is that read loop.
+Effective payload on these links, after framing, is about 10 MB/s at
+100 Mbit and about 100 MB/s at 1000 Mbit. The raw line rates are 12.5 MB/s
+and 125 MB/s. The MAC/IP/UDP stack that fills the store-and-forward TX
+FIFO runs at 50 MHz (`cd_eth`); the PHY consumes one byte per cycle of
+the 125 MHz gigabit clock. Scaling the gigabit payload ceiling by that
+clock ratio gives the rate to expect before the stack can be clocked
+higher and still meet timing:
+
+| Stage | Calculation | Ceiling |
+|-------|-------------|---------|
+| 100 Mbit effective payload | ~80% of 12.5 MB/s | 10 MB/s |
+| 1000 Mbit effective payload | ~80% of 125 MB/s | 100 MB/s |
+| Stack at 50 MHz, PHY byte clock 125 MHz | 50/125 × 100 MB/s | **40 MB/s** |
+| Measured RawUDP `dump` | `pcileech` 4.20, 65537 pages, 0 failed | **23 MB/s** |
+
+23 MB/s is past the 10 MB/s 100 Mbit figure and short of the 40 MB/s stack
+ceiling. It matches the operator's FT2232H-56Q result on an Acorn
+CLE-215+, which was not re-measured for this note. The on-chip `bench`
+on this same Gen1 x1 slot is 206 MB/s, so the PCIe link is above the
+Ethernet ceiling. Each `FT_ReadPipe` still ends at the first inactivity
+keepalive, which is one reason the run sits under 40 MB/s.
 
 ## PCIe Squirrel read-throughput measurements
 
