@@ -1,0 +1,73 @@
+diff --git a/liteeth/phy/ecp5rgmii.py b/liteeth/phy/ecp5rgmii.py
+index 27192a1..bc19c15 100644
+--- a/liteeth/phy/ecp5rgmii.py
++++ b/liteeth/phy/ecp5rgmii.py
+@@ -148,8 +148,14 @@ class LiteEthPHYRGMIIRX(LiteXModule):
+ # LiteEth PHY RGMII CRG ----------------------------------------------------------------------------
+ 
+ class LiteEthPHYRGMIICRG(LiteXModule):
+-    def __init__(self, clock_pads, pads, with_hw_init_reset, tx_delay=2e-9, tx_clk=None):
++    def __init__(self, clock_pads, pads, with_hw_init_reset, tx_delay=2e-9, tx_clk=None,
++                 dynamic_tx_delay=False):
+         self._reset = CSRStorage()
++        # DELAYF controls for the TX clock. Unused unless dynamic_tx_delay is set.
++        self.tx_delay_move      = Signal()
++        self.tx_delay_direction = Signal()
++        self.tx_delay_load_n    = Signal(reset=1)
++        self.tx_delay_cflag     = Signal()
+ 
+         # # #
+ 
+@@ -168,20 +174,31 @@ class LiteEthPHYRGMIICRG(LiteXModule):
+         assert tx_delay_taps < 128
+ 
+         eth_tx_clk_o = Signal()
+-        self.specials += [
+-            DDROutput(
+-                clk = ClockSignal("eth_tx"),
+-                i1  = 1,
+-                i2  = 0,
+-                o   = eth_tx_clk_o,
+-            ),
+-            Instance("DELAYG",
++        self.specials += DDROutput(
++            clk = ClockSignal("eth_tx"),
++            i1  = 1,
++            i2  = 0,
++            o   = eth_tx_clk_o,
++        )
++        if dynamic_tx_delay:
++            # 128 taps of ~25 ps, stepped at run time. Starts at 0.
++            self.specials += Instance("DELAYF",
++                p_DEL_MODE   = "USER_DEFINED",
++                p_DEL_VALUE  = 0,
++                i_A          = eth_tx_clk_o,
++                i_LOADN      = self.tx_delay_load_n,
++                i_MOVE       = self.tx_delay_move,
++                i_DIRECTION  = self.tx_delay_direction,
++                o_Z          = clock_pads.tx,
++                o_CFLAG      = self.tx_delay_cflag,
++            )
++        else:
++            self.specials += Instance("DELAYG",
+                 p_DEL_MODE  = "SCLK_ALIGNED",
+                 p_DEL_VALUE = tx_delay_taps,
+                 i_A         = eth_tx_clk_o,
+                 o_Z         = clock_pads.tx,
+             )
+-        ]
+ 
+         # Reset
+         self.reset = reset = Signal()
+@@ -207,8 +224,10 @@ class LiteEthPHYRGMII(LiteXModule):
+         rx_delay           = 2e-9,
+         with_inband_status = True,
+         tx_clk             = None,
++        dynamic_tx_delay   = False,
+         ):
+-        self.crg = LiteEthPHYRGMIICRG(clock_pads, pads, with_hw_init_reset, tx_delay, tx_clk)
++        self.crg = LiteEthPHYRGMIICRG(
++            clock_pads, pads, with_hw_init_reset, tx_delay, tx_clk, dynamic_tx_delay)
+         self.tx  = ClockDomainsRenamer("eth_tx")(LiteEthPHYRGMIITX(pads))
+         self.rx  = ClockDomainsRenamer("eth_rx")(LiteEthPHYRGMIIRX(pads, rx_delay, with_inband_status))
+         self.sink, self.source = self.tx.sink, self.rx.source

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""ECP5 Versa V4: VexRiscv plus ChunkDMA (one MRd per chunk) on ECP5PCIePHY.
+"""ECP5 Versa one-dword reads: VexRiscv plus TLPDMA on ECP5PCIePHY.
 
-On-chip buffers only; the Versa DDR3 is unused. The full search console,
-including ReadBench, is soc_ecp5_search.py.
+Same console and DMA core as soc_squirrel.py. The PHY is the soft ECP5 endpoint,
+and cd_pcie tracks sys, so the Squirrel Bus-Master pulse runs unchanged.
 """
 
 import argparse
@@ -17,7 +17,7 @@ from litex.soc.integration.builder import Builder as LiteXBuilder
 from litex.soc.interconnect.csr import CSRStatus
 
 from gateware.ecp5pcie.phy import ECP5PCIePHY
-from gateware.chunk_dma import ChunkDMA
+from gateware.tlp_dma import TLPDMA
 
 from platforms.pcie_versa import Platform, DEVICES
 
@@ -48,10 +48,11 @@ class _CRG(Module):
         self.specials += AsyncResetSynchronizer(self.cd_sys, ~rst_n)
 
 
-class SoCECP5V4(SoCCore):
+class SoCECP5TLPDMA(SoCCore):
     def __init__(self, platform, gen=1, refclk_freq=None, fabric_clk=False,
                  bar0_size=0x1000, ignore_perst=False):
         sys_clk_freq = int(100e6)
+        # bus_timeout=None keeps the 20-bit wishbone timeout comparator off the CPU ack path.
         SoCCore.__init__(self, platform, sys_clk_freq,
             cpu_type            = "vexriscv",
             cpu_variant         = "minimal",
@@ -63,7 +64,7 @@ class SoCECP5V4(SoCCore):
             with_timer          = False,
             with_ctrl           = False,
             bus_timeout         = None,
-            ident               = "pcie_screamer ECP5 V4",
+            ident               = "pcie_screamer ECP5 TLPDMA",
             ident_version       = True,
         )
 
@@ -87,6 +88,7 @@ class SoCECP5V4(SoCCore):
         self.comb += self.pcie_id.status.eq(pcie_phy.id)
         self.add_csr("pcie_id")
 
+        # Same one-shot Command write as soc_squirrel.py: MSE | BME once the link is up.
         bme_done  = Signal()
         bme_timer = Signal(20)
         bme_pulse = Signal()
@@ -110,17 +112,17 @@ class SoCECP5V4(SoCCore):
             pcie_phy.cfg_mgmt_wr_en.eq(bme_pulse),
         ]
 
-        self.submodules.chunk_dma = chunk_dma = ChunkDMA()
-        self.add_csr("chunk_dma")
+        self.submodules.tlp_dma = tlp_dma = TLPDMA()
+        self.add_csr("tlp_dma")
         self.comb += [
-            pcie_phy.source.connect(chunk_dma.tlp_rx),
-            chunk_dma.tlp_tx.connect(pcie_phy.sink),
-            chunk_dma.link_ready.eq(
+            pcie_phy.source.connect(tlp_dma.tlp_rx),
+            tlp_dma.tlp_tx.connect(pcie_phy.sink),
+            tlp_dma.link_ready.eq(
                 pcie_phy._link_status.fields.status
                 & pcie_phy._bus_master_enable.status
                 & (pcie_phy.id != 0)
             ),
-            chunk_dma.requester_id.eq(pcie_phy.id),
+            tlp_dma.requester_id.eq(pcie_phy.id),
         ]
 
         core = pcie_phy.core
@@ -133,6 +135,8 @@ class SoCECP5V4(SoCCore):
         self.comb += platform.request_all("user_led").eq(~leds if LED_ACTIVE_LOW else leds)
 
     def add_csr_bridge(self, name="csr", origin=None, register=False):
+        # No SDRAM, so LiteX would leave this bridge combinatorial. The CSR read mux
+        # (CPU grant through the TLPDMA bank) does not close 100 MHz that way.
         super().add_csr_bridge(name=name, origin=origin, register=True)
 
     def check_bios_requirements(self):
@@ -149,7 +153,7 @@ def main():
     parser.add_argument("--fabric-clk", action="store_true")
     parser.add_argument("--ignore-perst", action="store_true")
     parser.add_argument("--seed", type=int, default=10,
-                        help="nextpnr seed (10 closed clk100 at 101.09 MHz)")
+                        help="nextpnr seed (10 closed clk100 at 101.84 MHz)")
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--load", action="store_true")
     parser.add_argument("--flash", action="store_true")
@@ -169,12 +173,12 @@ def main():
         os.environ["PATH"] = f"{tools_bin}{os.pathsep}{os.environ['PATH']}"
 
     platform = Platform(device=args.device)
-    build_name = f"soc_ecp5_v4_{args.device.lower()}_gen{args.gen}"
+    build_name = f"soc_ecp5_tlpdma_{args.device.lower()}_gen{args.gen}"
     if not args.fabric_clk:
         build_name += f"_ref{int(refclk_freq / 1e6)}"
     output_dir = ROOT / "build" / build_name
 
-    soc = SoCECP5V4(platform,
+    soc = SoCECP5TLPDMA(platform,
         gen          = args.gen,
         refclk_freq  = refclk_freq,
         fabric_clk   = args.fabric_clk,
@@ -183,7 +187,7 @@ def main():
     builder = Builder(soc, output_dir=str(output_dir), csr_csv=str(output_dir / "csr.csv"))
     builder.software_packages = []
     builder.software_libraries = []
-    builder.add_software_package("bios", str(ROOT / "software" / "soc_chunk_console"))
+    builder.add_software_package("bios", str(ROOT / "software" / "soc_console"))
     builder.build(run=args.build, build_name=build_name, seed=args.seed)
 
     bitstream = os.path.join(builder.gateware_dir, build_name + ".bit")

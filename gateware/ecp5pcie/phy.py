@@ -51,6 +51,9 @@ class ECP5PCIePHY(Module, AutoCSR):
         # Config space and router in `sys`. Reset routing/config state when the link drops.
         config_space = ClockDomainsRenamer({"pcie_rx": "sys"})(ConfigSpace(**config))
         router       = TLPSysRouter(config_space)
+        self.vendor_id = config_space.vendor_id
+        self.device_id = config_space.device_id
+        self.revision  = config_space.revision
 
         # Adapter: core 32-bit `pcie_rx` TLP ports <-> 64-bit `sys` streams.
         self.submodules.adapter = adapter = TLPStreamAdapter(

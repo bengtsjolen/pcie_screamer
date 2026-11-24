@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Read the ECP5 PCIe bring-up CSRs (soc_ecp5.py) over UARTBone.
+"""Read ECP5 PCIe bring-up CSRs over UARTBone.
+
+The UARTBone image this was written against has been removed.
+`soc_ecp5_litepcie.py` is the LitePCIe image, and its host path is the
+kernel driver rather than this console.
 
 Start the bridge first, e.g.:
     venv/bin/litex_server --uart --uart-port /dev/ttyUSB1 --uart-baudrate 115200

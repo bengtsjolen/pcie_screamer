@@ -1,6 +1,6 @@
 # Dependencies and project structure
 
-Date: 2026-11-22
+Date: 2026-11-22, updated 2026-11-24.
 
 This is a map of the tree that produces the working ECP5 Gen1 endpoint,
 and of what would move if that endpoint were proposed to LitePCIe.
@@ -38,7 +38,7 @@ The board file belongs with litex-boards.
 
 `soc_ecp5_search.py` is the image that was measured. It does not use
 `LitePCIeEndpoint`. It connects `ChunkDMA` and `ReadBench` straight to
-the PHY streams. `soc_ecp5.py --litepcie` is the path that does use the
+the PHY streams. `soc_ecp5_litepcie.py` is the path that does use the
 LitePCIe endpoint and a BAR0 wishbone window.
 
 ```text
@@ -69,30 +69,46 @@ The soft core's recovered clocks stay inside the generated Verilog.
 
 ## Where each tree lives
 
-| Tree | How this repo holds it | Remote | State on 2026-11-22 |
+| Tree | How this repo holds it | Remote | State on 2026-11-24 |
 |---|---|---|---|
-| This repo | git | `ecp5-opus` | SoCs, DMA engines, Migen PHY, generated core Verilog |
-| `litex/litex`, `litex/litex-boards`, and the other `litex/*` clones | not tracked here | enjoy-digital / litex-hub | `requirements.txt` editable-installs them. `litex` and `litex-boards` match `origin/master` |
-| `litex/litepcie` | not tracked here | `enjoy-digital/litepcie` `master` | clean tree, **2 local commits** not on `origin/master` |
-| `third_party/ECP5-PCIe` | git submodule | `bengtsjolen/ECP5-PCIe`, branch `pcie-screamer` | parent pins `d7d5fb5`. The fork's `origin` is `6d92448`. The six commits after that are only in this checkout |
+| This repo | git | `bengtsjolen/pcie_screamer`, branch `ecp5` | SoCs, DMA engines, Migen PHY, generated core Verilog |
+| `litex/litex`, `litex/litex-boards`, `litex/liteeth`, and the other `litex/*` clones | not tracked here | enjoy-digital / litex-hub | `requirements.txt` editable-installs them. `litex`, `litex-boards`, and `liteeth` track `origin/master` |
+| `litex/litepcie` | not tracked here | `enjoy-digital/litepcie` `master` | **2 local commits** ahead of `origin/master`, plus an uncommitted device-id edit saved as a patch |
+| `third_party/ECP5-PCIe` | git submodule | `bengtsjolen/ECP5-PCIe`, branch `pcie-screamer` | parent pins `d7d5fb5`, and that commit is on `origin/pcie-screamer` |
 
 `litex/` is a `litex_setup.py` checkout sitting in the working tree.
-Nothing under it is committed by this repo. A second machine needs those
-clones, including the two LitePCIe commits, or the editable install
-builds upstream LitePCIe.
+Nothing under it is committed by this repo. A second machine clones
+those trees itself. `ECP5PCIeCore` uses the checked-in Verilog when the
+file is already there, so a bitstream build does not initialize the
+submodule.
 
-The submodule pin `d7d5fb5` cannot be fetched from the fork until those
-six commits are pushed. A normal bitstream build does not need the
-submodule: `ECP5PCIeCore` uses the checked-in Verilog when the file is
-already there.
+### What a second machine checks out
+
+- This repo, branch `ecp5`.
+- LiteX into `litex/`, then `python3 -m venv venv` and
+  `venv/bin/pip install -r requirements.txt`. `litex_setup.py` is not in
+  this repo; the usual source is the upstream LiteX `litex_setup.py`.
+- `litex/litepcie` at upstream `master`, then the two commits below.
+  The driver binds `10ee:0667` with `new_id` after `insmod`. The
+  bitstream build prints that command. See
+  [LITEPCIE_EXAMPLES.md](LITEPCIE_EXAMPLES.md).
+- `litex/liteeth` at upstream `master`, then
+  [patches/liteeth-ecp5-dynamic-tx-delay.patch](patches/liteeth-ecp5-dynamic-tx-delay.patch).
+  `soc_ecp5_udp.py` passes `dynamic_tx_delay=True`. Upstream LiteEth has
+  no such argument.
+- Yosys, nextpnr-ecp5, ecppack, a RISC-V gcc for the consoles, and
+  openFPGALoader. The Squirrel images need Vivado.
+- `git submodule update --init` only when regenerating the core Verilog
+  with `tools/gen_ecp5_pcie_core.py`. That step also needs Amaranth 0.4
+  from `requirements.txt`.
 
 ## Layer by layer
 
 ### ECP5-PCIe (Amaranth)
 
 Fork point is upstream `c511d2e`. On the fork, `6d92448` adds the
-`ECP5PCIeCore` black box used by the generator. After that, only in this
-checkout:
+`ECP5PCIeCore` black box used by the generator. The commits after that
+are on `origin/pcie-screamer`:
 
 - `633b0f5` Recovery, lost Ack, 156.25 MHz Gen1 refclk
 - `d82251b` DLL TX/RX data paths
@@ -130,25 +146,24 @@ Neither commit is the ECP5 core.
 
 | Commit | What it changes | Who needs it |
 |---|---|---|
-| `33defbe` | `tlp/depacketizer.py`: an error completion ends the request | `soc_ecp5.py --litepcie`, any `LitePCIeEndpoint` on this PHY |
+| `33defbe` | `tlp/depacketizer.py`: an error completion ends the request | `soc_ecp5_litepcie.py`, any `LitePCIeEndpoint` on this PHY |
 | `7245ec3` | `phy/s7pciephy.py`: `cfg_mgmt` and AXIS taps | Squirrel SoCs. The ECP5 PHY implements `cfg_mgmt` itself |
 
-The search image does not instantiate `LitePCIeEndpoint`, so it does not
-exercise the depacketizer. The two commits are still local: they are
-not in this repo's git history. They can be proposed to
-`enjoy-digital/litepcie` on their own, ahead of any ECP5 PHY.
-
-`litex/litex` has no local commits.
+The search, V2, V4, and RawUDP images do not instantiate
+`LitePCIeEndpoint`. They build against stock LitePCIe, apart from the
+LiteEth patch on the RawUDP image. The two commits are still local:
+they are not in this repo's git history. `litex/litex` and
+`litex/litex-boards` have no local commits.
 
 ### This repo, apart from the PHY
 
 | Piece | Lives in | Pair |
 |---|---|---|
 | Squirrel PCILeech gateware | `gateware/tlp.py`, `tlp128.py`, `pcileech_fifo.py`, `pcileech_squirrel.py` | Artix-7, FT601 |
-| One-dword DMA | `gateware/tlp_dma.py`, `soc_squirrel.py`, `soc_ecp5_v2.py` | V2 |
-| One outstanding 4 KiB read | `gateware/chunk_dma.py`, `soc_ecp5_v4.py` | V4 |
+| One-dword DMA | `gateware/tlp_dma.py`, `soc_squirrel.py`, `soc_ecp5_tlpdma.py` | V2 |
+| One outstanding 4 KiB read | `gateware/chunk_dma.py`, `cscan` on `soc_ecp5_search.py` | V4 |
 | Four outstanding reads | `gateware/read_bench.py`, `soc_squirrel_search.py`, `soc_ecp5_search.py` | V5 |
-| Consoles | `software/soc_console`, `soc_chunk_console`, `soc_search_console` | UART |
+| Consoles | `software/soc_console`, `soc_search_console` | UART |
 | Versa platform | `platforms/pcie_versa.py` | wraps litex-boards `lattice_versa_ecp5`, device chosen explicitly (`LFE5UM` or `LFE5UM5G`) |
 
 ## What a LitePCIe ECP5 PHY would contain
@@ -160,7 +175,7 @@ In `litepcie/phy/`, next to `s7pciephy.py`:
 - the generated Verilog for the configurations that are actually tested
   (today: Gen1, 156.25 MHz refclk, transaction layer left outside the core)
 
-A LiteX target would then do what `soc_ecp5.py --litepcie` does now:
+A LiteX target would then do what `soc_ecp5_litepcie.py` does now:
 construct the PHY, pass it to `LitePCIeEndpoint`, and add a wishbone
 master. The Versa target itself would be a litex-boards platform plus a
 small target script, not part of the PHY.
@@ -177,13 +192,13 @@ PHY, since they are how software brings the link up, or this repo can
 keep a thin subclass if upstream wants the PHY limited to the endpoint
 ports.
 
-## Drift to fix before that move
+## Drift still open
 
-- Push `633b0f5`..`d7d5fb5` to `bengtsjolen/ECP5-PCIe`, or the submodule
-  pin in this repo does not exist on the remote.
+`633b0f5`..`d7d5fb5` are on `origin/pcie-screamer`, and this repo pins
+`d7d5fb5`.
+
 - Regenerate `ecp5_pcie_core_gen1_ref156.v` from a clean `d7d5fb5` (or
   from whatever revision is chosen) so the header matches the source.
   The current header is `03ee03c-dirty`.
-- The two LitePCIe commits need a home: a branch of
-  `enjoy-digital/litepcie`, or a note that the ECP5 endpoint path
-  requires them. They are invisible to anyone who only clones this repo.
+- The two LitePCIe commits and the LiteEth TX-delay edit are patches on
+  local checkouts. A clone of this repo does not apply them.

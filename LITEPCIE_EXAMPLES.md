@@ -1,8 +1,8 @@
-# LitePCIe example on the ECP5 Versa
+# LitePCIe on the ECP5 Versa
 
 Date: 2026-11-23
 
-`soc_ecp5_example.py` is a stock LitePCIe device on the non-5G Versa
+`soc_ecp5_litepcie.py` is a stock LitePCIe device on the non-5G Versa
 (LFE5UM-45F): one BAR0 CSR window, one DMA reader, one DMA writer, and
 one 32-bit MSI vector. It calls `SoC.add_pcie`. It is not a retarget of
 `litepcie/gen.py`. The 196.7 MiB/s figure in
@@ -15,11 +15,21 @@ Measured on Rechner2 on 2026-11-23. Root port `0000:ac:00.0`, endpoint
 `0000:ad:00.0`. The bitstream is seed 24, loaded into SRAM.
 
 * The endpoint enumerates as `10ee:0667` revision 0. BAR0 is 64 KiB.
-  Link status is 2.5 GT/s, x1.
+  Link status is 2.5 GT/s, x1. Vendor `10ee` is the Xilinx id, the same
+  one the Squirrel uses for device `0666`. Device `0667` is a second id
+  so both cards can be in one host. A rescan only brings back an id the
+  host has already seen, so this id stays. It is not a Lattice id.
+  The LitePCIe driver does not list it. After `insmod`, the build's
+  printed line binds the id the bitstream actually contains:
+
+  ```sh
+  echo 10ee 0667 | sudo tee /sys/bus/pci/drivers/litepcie/new_id
+  ```
 * The MSI capability is at `0x48`: one vector, 32-bit, not maskable.
   After the driver binds, `lspci` shows `MSI: Enable+`.
 * BAR0 CSRs work. `litepcie_util info` prints the identifier
-  (`pcie_screamer ECP5 LitePCIe example` plus the build time).
+  (`pcie_screamer ECP5 LitePCIe` plus the build time; the 2026-11-23
+  image printed `pcie_screamer ECP5 LitePCIe example`).
   `litepcie_util scratch_test` writes and reads `0x12345678` and
   `0xdeadbeef`.
 * On-chip DMA loopback works. `sudo ./litepcie_util -t 2 dma_test`
@@ -68,14 +78,14 @@ or under `tools/bin`, and the LiteX checkout importable (this tree uses
 `./venv`):
 
 ```sh
-git -C litex/litepcie apply ../../patches/litepcie-ecp5-0667.patch
-./venv/bin/python soc_ecp5_example.py --device LFE5UM --build --seed 24
+./venv/bin/python soc_ecp5_litepcie.py --device LFE5UM --build --seed 24
 ```
 
-The patch adds `10ee:0667` to the LitePCIe PCI id table. The soc script
+The build prints the PCIe id from the config space it elaborated, and
+the `new_id` line for that id. The soc script
 copies `litex/litepcie/litepcie/software` to
-`build/soc_ecp5_example_lfe5um_gen1_ref156/litepcie_software` and writes
-`csr.h`, `soc.h`, and `mem.h` there. Apply the patch before that copy.
+`build/soc_ecp5_litepcie_lfe5um_gen1_ref156/litepcie_software` and writes
+`csr.h`, `soc.h`, and `mem.h` there.
 `litex/litepcie` commit `33defbe` is also local: a completion with
 `status != 0` ends the request, so the DMA reader frees the tag instead
 of stalling.
@@ -91,10 +101,10 @@ flash:
 
 ```sh
 openFPGALoader --cable ft2232 --bitstream \
-  build/soc_ecp5_example_lfe5um_gen1_ref156/gateware/soc_ecp5_example_lfe5um_gen1_ref156.bit
+  build/soc_ecp5_litepcie_lfe5um_gen1_ref156/gateware/soc_ecp5_litepcie_lfe5um_gen1_ref156.bit
 ```
 
-`soc_ecp5_example.py --load` calls the same programmer. UART is FT2232
+`soc_ecp5_litepcie.py --load` calls the same programmer. UART is FT2232
 channel B, 115200 baud
 (`/dev/serial/by-id/usb-Lattice_Lattice_ECP5_Versa_Board-if01-port0`
 on the machine that has the USB cable).
@@ -119,10 +129,11 @@ memory BAR. Before the driver binds, MSI is `Enable-`. Link status
 should be `2.5GT/s` and `x1`.
 
 ```sh
-cd build/soc_ecp5_example_lfe5um_gen1_ref156/litepcie_software/kernel
+cd build/soc_ecp5_litepcie_lfe5um_gen1_ref156/litepcie_software/kernel
 make
 sudo rmmod litepcie 2>/dev/null || true
 sudo insmod litepcie.ko
+echo 10ee 0667 | sudo tee /sys/bus/pci/drivers/litepcie/new_id
 cd ../user
 make
 sudo ./litepcie_util info
@@ -130,7 +141,10 @@ sudo ./litepcie_util scratch_test
 sudo ./litepcie_util -t 2 dma_test
 ```
 
-`insmod` probes the board. `dmesg` should show the identifier string,
+`insmod` loads the driver. `new_id` exists only after that, and writing
+it probes a device already enumerated with this id. Use the vendor and
+device the build printed if they differ from `10ee 0667`. `dmesg`
+should show the identifier string,
 `1 MSI IRQs allocated.`, and `/dev/litepcie0`. `kernel/init.sh` does
 the same insert and then `chmod 666` on `/dev/litepcie0`, but only when
 the module was not already loaded. After a later rescan the node often
@@ -147,9 +161,8 @@ should stay at 0.
 `add_pcie` in `litex/soc/integration/soc.py` builds `LitePCIeEndpoint`
 (`endianness` from `phy.endianness`, which is `"big"`), a BAR0 wishbone
 master, `LitePCIeDMA`, and `LitePCIeMSI` wired to `phy.msi`.
-`litepcie/gen.py` still refuses an ECP5 PHY. `soc_ecp5.py --litepcie`
-is a separate image: endpoint plus `HostDMAScratch`, no DMA table, no
-MSI.
+`litepcie/gen.py` still refuses an ECP5 PHY. This example is the
+LitePCIe image: endpoint, BAR0, one DMA channel, and MSI.
 
 Config space is a Type 0 header. The capability chain is PCI PM at
 `0x40`, MSI at `0x48`, PCIe capability at `0x60`. The MSI transmitter

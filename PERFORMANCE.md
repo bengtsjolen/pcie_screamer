@@ -23,7 +23,7 @@ reads, UART console). The Squirrel section is the FT601/PCILeech path.
   the raw benchmark. The link is the limit at that stride.
 * The VESA option ROM at `0x3f000` completed as a 64-byte read and as a
   4 KiB read, and a scan of that 4 KiB matched at `0x3f000`.
-* The LitePCIe example (`soc_ecp5_example.py`, one DMA channel, on-chip
+* The LitePCIe example (`soc_ecp5_litepcie.py`, one DMA channel, on-chip
   loopback) measured **0.38 Gbps** of reader payload on 2026-11-23, about
   47.5 MB/s, with the writer sending the same buffers back and zero data
   errors. That is not this ReadBench number. The example posts one TLP at
@@ -109,7 +109,7 @@ Correctness checks on the same image, before the 1 GiB runs:
 Printed high byte first, the header is
 `56 45 53 41 00 03 00 f1 00 30 01 00 00 00 22 f0`.
 
-An earlier ChunkDMA-only image (`soc_ecp5_v4.py`, one outstanding 4 KiB
+An earlier ChunkDMA-only image (one outstanding 4 KiB
 read) also dumped `0x3f000` for `0x40` and `0x1000` and matched this ROM.
 That image was not timed.
 

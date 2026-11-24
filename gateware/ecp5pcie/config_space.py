@@ -21,6 +21,11 @@ class ConfigSpace(Module):
     `reg` is the dword index (offset >> 2, 10 bits). `rd_data` is valid the cycle after `reg`
     changes. A write with `we` applies `wr_data` to the bytes in `wr_be` that are writable.
     Byte i of `rd_data`/`wr_data` is config space byte offset*4 + i.
+
+    Vendor `0x10ee` is the Xilinx id, the same one the Squirrel uses. Device
+    `0x0667` is a second id so a Squirrel (`10ee:0666`) and this endpoint can
+    both sit in one host. A rescan reuses an id the host has already seen, so
+    this id stays. It is not a Lattice id.
     """
     def __init__(self, vendor_id=0x10ee, device_id=0x0667, revision=0, class_code=0x020000,
                  subsystem_vendor_id=None, subsystem_id=None, bar0_size=4096, gen=1):
@@ -52,6 +57,9 @@ class ConfigSpace(Module):
 
         subsystem_vendor_id = vendor_id if subsystem_vendor_id is None else subsystem_vendor_id
         subsystem_id        = device_id if subsystem_id is None else subsystem_id
+        self.vendor_id = vendor_id
+        self.device_id = device_id
+        self.revision  = revision
 
         dev_cap  = (1 << 15) | (7 << 9) | (7 << 6) | 1       # role-based errors, no L0s/L1 limit, MPS 256
         link_cap = (1 << 4) | gen                            # x1, max speed

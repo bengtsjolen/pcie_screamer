@@ -176,7 +176,7 @@ TLP symbol path.
   (enabled by `refclk_en`/`refclk_rst_n`), not by the slot refclk:
   measured on 2026-11-21 as a 97.66 MHz DCU word clock with the 25x
   multiplier (156.25 × 25 / 40). Gen1 therefore uses the 16x multiplier
-  (`--refclk-mhz 156.25`, the `soc_ecp5.py` default). This is a separate
+  (`--refclk-mhz 156.25`, the Versa Gen1 default). This is a separate
   reference from the host: fine at Gen1 within ±300 ppm, but not with a
   host that enables spread-spectrum clocking.
 - SW4 must select SPI flash configuration; in JTAG-only mode the flash is
@@ -431,9 +431,10 @@ code is unchanged.
 - `platforms/pcie_versa.py`: wraps `litex_boards.platforms.lattice_versa_ecp5`
   with a required `device` argument (`LFE5UM` or `LFE5UM5G`) and the PCIe
   constraints. Shared with the vendor spec.
-- `soc_ecp5.py`: a top that builds V2 or V4/V5 with
-  `ECP5PCIEPHY`, reusing the existing SoC cores, with
-  `--device LFE5UM|LFE5UM5G` and `--variant v2|v4|v5`. The existing
+- The bring-up top `soc_ecp5.py` was later removed. One-dword reads
+  are `soc_ecp5_tlpdma.py`. ChunkDMA and ReadBench are
+  `soc_ecp5_search.py` (`cscan`, `scan`, `bench`). The LitePCIe image
+  is `soc_ecp5_litepcie.py`. The existing
   Squirrel tops are not modified.
 - Toolchain: Yosys, nextpnr-ecp5 and ecppack from
   `tools/ensure_fpga_toolchain.sh` (OSS CAD Suite; Yosys 0.70 and
@@ -489,7 +490,7 @@ Each milestone has a gate; do not start the next one until it passes.
   problem, not ours.
 - **M1 Environment and builds.** Submodule, `requirements.txt`, generator,
   `ECP5PCIeCore` black box, `platforms/pcie_versa.py`, a minimal
-  `soc_ecp5.py` with UARTBone and status CSRs only. Gate: both `um-45k`
+  `soc_ecp5.py` (later removed) with UARTBone and status CSRs only. Gate: both `um-45k`
   and `um5g-45k` bitstreams build and meet timing on `rx`, `tx`, `pcie`
   and `sys`.
 
@@ -501,7 +502,7 @@ Each milestone has a gate; do not start the next one until it passes.
   unconstrained Fmax of the `rx` domain is 89 MHz against 62.5 MHz
   required; all other domains exceed 220 MHz.
 
-  Gate result (2026-11-01, fork `6d92448`, `soc_ecp5.py --build`, all
+  Gate result (2026-11-01, fork `6d92448`, `soc_ecp5.py --build`, later removed, all
   four SerDes clocks constrained, `fabric_clk=False`, no transaction
   layer): all three variants route and pass timing. Post-route Fmax in
   MHz:
@@ -563,7 +564,7 @@ Each milestone has a gate; do not start the next one until it passes.
   10-minute soak.
 
   LitePCIe wiring result (2026-11-22, parent `48b6af0`, same board,
-  flash-loaded, seed 1, clk100 105.20 MHz): `soc_ecp5.py --litepcie`
+  flash-loaded, seed 1, clk100 105.20 MHz): `soc_ecp5.py --litepcie` (later removed; the LitePCIe image is now `soc_ecp5_litepcie.py`)
   builds the core with `external_tl` and moves all TLP handling to `sys`.
   `TLPStreamAdapter` crosses the 32-bit `pcie_rx` ports to 64-bit `sys`
   beats; `TLPSysRouter` answers CfgRd0/CfgWr0 from `ConfigSpace`,
@@ -587,7 +588,7 @@ Each milestone has a gate; do not start the next one until it passes.
   capture log shows some config requests from the rescan burst split
   into fragments; the counters match, cause not investigated.
 - **M5 V2.** `CreditGate`, `CompletionBudget`, remaining DLL fixes,
-  `soc_ecp5.py --variant v2`. Gate as in the table.
+  one-dword reads, now `soc_ecp5_tlpdma.py`. Gate as in the table.
 - **M6 V4/V5 and throughput.** Gate as in the table; update
   `PERFORMANCE.md` and `VARIANTS.md`.
 - **M7 Migen port.** See below. Gate: the Migen core passes the same
@@ -670,7 +671,7 @@ months dominated by DLL corner cases.
 | `gateware/ecp5pcie/phy.py` | `ECP5PCIEPHY` |
 | `gateware/ecp5pcie/README.md` | LTSSM state table, CSR map, build notes |
 | `platforms/pcie_versa.py` | Versa platform with required `device` |
-| `soc_ecp5.py` | ECP5 top for V2/V4/V5 |
+| `soc_ecp5_tlpdma.py`, `soc_ecp5_search.py`, `soc_ecp5_litepcie.py` | ECP5 tops. The earlier `soc_ecp5.py` bring-up top was removed |
 | `test/test_ecp5pcie_*.py` | Unit and host-model simulations |
 
 ## References

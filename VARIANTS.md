@@ -3,8 +3,8 @@
 Date: 2026-10-31 (ECP5 results added 2026-11-22)
 Status: Five variants are functional on the PCIe Screamer Squirrel
 (Xilinx Artix-7). On the ECP5 Versa (LFE5UM-45F, Gen1 x1), V2, V4, and
-the V5 search path run from `soc_ecp5_v2.py`, `soc_ecp5_v4.py`, and
-`soc_ecp5_search.py`. The Gen1 1 GiB measurement is in
+the one-dword path runs from `soc_ecp5_tlpdma.py`, and the V4/V5
+search path runs from `soc_ecp5_search.py`. The Gen1 1 GiB measurement is in
 [PERFORMANCE.md](PERFORMANCE.md).
 
 ## Purpose
@@ -112,13 +112,11 @@ words: 0x41534556 0xf1000300 0x00013000 0xf0220000
 The originally requested four variants are V1, V2, V4, and V5. V3 is the
 intermediate CPU-fed PCILeech variant described above.
 
-V4 and V5 share the `soc_squirrel_search.py` top level and one bitstream. The
-`bench_select` CSR muxes the PCIe TX/RX between `ChunkDMA` and
-`ReadBench`. The current console runs its `scan` and `bench` commands on
-`ReadBench` (V5); its `peek` command reads the `ChunkDMA` buffers (V4).
-The legacy 2-buffer `scan` console is the source at
-`e2ba260:software/soc_search_console/main.c`; rebuilding the image with
-that console gives a full V4 scan.
+V4 and V5 share one bitstream, `soc_squirrel_search.py` on the Squirrel
+and `soc_ecp5_search.py` on the Versa. The `bench_select` CSR muxes the
+PCIe TX/RX between `ChunkDMA` and `ReadBench`. `scan` and `bench` use
+`ReadBench`. `cscan` is the one-outstanding two-buffer scan on
+`ChunkDMA`, and `peek` reads the first ChunkDMA buffer.
 
 ## V1 - PCILeech over FT601
 
@@ -178,12 +176,11 @@ reference image is `bitstreams/pcie_squirrel-cleanup-rx128.bin`
   performance configuration, while `medium` and `mini` trade throughput
   for BRAM.
 
-### ECP5 implication
+### ECP5
 
-This is the last variant to port, not the first. It requires an FT601
-shield, an ECP5-compatible FT601 controller port, and a ECP5 PCIe endpoint
-that behaves like the Squirrel's S7 hard IP. It should follow, not precede,
-the SoC bring-up.
+The SoC images have run. V1 still needs an FT601 shield and an ECP5 port
+of the FT601 controller. `soc_ecp5_udp.py` is the Versa image that speaks
+this FIFO to stock `pcileech`, over Ethernet.
 
 ## V2 - SoC with single-word reads
 
@@ -247,13 +244,12 @@ The verified saved image is `bitstreams/soc_squirrel-console.bin`
 - The 8-bit request tag wraps after 256 requests.
 - No independent ISSUE-state timeout.
 
-### ECP5 implication
+### ECP5
 
-This is the recommended first ECP5 target. It needs only the ECP5 PCIe
-endpoint, a small CPU/SoC, and the FT2232 UART. The slow FT2232 does not
-matter because the data path is PCIe; the UART carries only commands and
-the final dump. Success here establishes the ECP5 PCIe PHY, BME, MRd32,
-MRd64, completion parsing, and console before adding DMA complexity.
+V2 has run on the non-5G Versa as `soc_ecp5_tlpdma.py`, with the same
+`software/soc_console` as the Squirrel. The FT2232 carries commands and
+the dump. The reads are PCIe. Later images keep this PHY and add
+ChunkDMA and ReadBench.
 
 ## V3 - CPU-fed PCILeech FIFO SoC
 
@@ -262,8 +258,7 @@ MRd64, completion parsing, and console before adding DMA complexity.
 The PCILeech wire protocol and mux framing can be reused without FT601.
 The VexRiscv CPU writes TLP data/flag words into `PCILeechFIFO` and parses
 the mux response frames. This isolates the PCILeech protocol from the USB
-transport and is useful if the ECP5 port wants to preserve PCILeech
-compatibility before an FT601 shield exists.
+transport.
 
 ### Architecture
 
@@ -314,12 +309,11 @@ The verified saved image is `bitstreams/soc_pcileech-console.bin`
 - The mux/frame parser expects the PCILeech response framing and is more
   complex than the raw LitePCIe path used by V4/V5.
 
-### ECP5 implication
+### ECP5
 
-This is an optional ECP5 step after V2. It answers the question "can the
-ECP5 run the PCILeech protocol without FT601?" It does not need the FT601
-shield, but it also does not provide the PCILeech host's throughput. Use
-it to validate protocol reuse; use V4/V5 for search throughput.
+V3 was not ported. On the Versa, `soc_ecp5_udp.py` is the image that
+speaks the PCILeech FIFO to stock `pcileech`. The Squirrel bitstream
+remains `soc_pcileech.py`.
 
 ## V4 - SoC with double-buffer DMA
 
@@ -345,17 +339,17 @@ CPU reads buffer 0/1 through the read-only window at 0x20000000
 ### Components
 
 - Engine: `gateware/chunk_dma.py`.
-- Top level: `soc_squirrel_search.py` (the same top level also contains V5).
-- Legacy console: `e2ba260:software/soc_search_console/main.c`.
+- Top level: `soc_squirrel_search.py` on the Squirrel and
+  `soc_ecp5_search.py` on the Versa. The same bitstream contains V5.
+- Console: `software/soc_search_console/main.c`, command `cscan`.
 - CPU window: `0x20000000`, size `0x2000` (two buffers).
 
 ### Build and run
 
-The current `soc_squirrel_search.py --build` image contains both V4 and V5.
+`soc_squirrel_search.py` and `soc_ecp5_search.py` each contain V4 and V5.
 `bench_select=0` selects `ChunkDMA`; `bench_select=1` selects `ReadBench`.
-The current console's `scan` uses `ReadBench`, so a full V4 scan needs the
-legacy console above. The current console's `peek` command reads the
-ChunkDMA buffers, which is enough for a buffer sanity check.
+`cscan` runs the two-buffer scan with one 4 KiB read in flight and the
+CPU scanning the other buffer. `peek` reads the first ChunkDMA buffer.
 
 ```sh
 source env.sh
@@ -378,16 +372,15 @@ venv/bin/python soc_squirrel_search.py --build
 ### Limitations
 
 - One outstanding request; no tag pipelining.
-- The current unified console does not run a full scan through ChunkDMA;
-  use the legacy console or V5.
+- `cscan` is that path. `scan` and `bench` use the four-outstanding engine.
 - The CPU is the bottleneck at dense strides.
 
-### ECP5 implication
+### ECP5
 
-After V2, V4 is the natural second DMA step. It needs a correct 4 KiB
-MRd64 path, split-completion handling, and a CPU-visible buffer. It does
-not need FT601. If the ECP5 PCIe block cannot support four outstanding
-tags reliably, V4 is the fallback search engine.
+The separate ChunkDMA bitstream has been retired. `cscan` on
+`soc_ecp5_search.py` is the one-outstanding scan, with `bench_select`
+held at 0 and the two buffers at `0x20000000`. `scan` and `bench` use
+ReadBench. Four outstanding reads are in service on this PHY.
 
 ## V5 - SoC with 4-outstanding search
 
@@ -437,7 +430,8 @@ venv/bin/python soc_squirrel_search.py --build
 
 Console commands:
 
-- `scan <addr64> <len64> <w0> <w1> <w2> <w3> [stride]`
+- `scan <addr64> <len64> <w0> <w1> <w2> <w3> [stride]` (4-outstanding)
+- `cscan <addr64> <len64> <w0> <w1> <w2> <w3> [stride]` (one-outstanding ChunkDMA)
 - `bench <addr64> <len64>` (raw 4-outstanding read benchmark)
 - `wtest` / `rpeek` (direct buffer write/readback diagnostics)
 - `peek` (ChunkDMA/V4 buffer diagnostics)
@@ -492,84 +486,51 @@ tables are in [PERFORMANCE.md](PERFORMANCE.md).
 - The 4-outstanding path depends on the PCIe hard IP tolerating four
   tagged 4 KiB reads with split completions.
 
-### ECP5 implication
+### ECP5
 
 V5 is running on the non-5G Versa. A 1 GiB read with four 4 KiB requests
 in flight measured 196.7 MiB/s (206 MB/s), on the Gen1 payload ceiling.
 The serial console reports progress and matches while PCIe carries the
 data. The 5G board and an FT601 shield are still unmeasured.
 
-## ECP5 stepping-stone roadmap
+## ECP5 images that have run
 
-This section is the 2026-10-31 plan, written before the port. V2, V4, and
-the V5 search path have since run on the non-5G Versa; the Gen1 numbers
-are in [PERFORMANCE.md](PERFORMANCE.md). The notes below are the original
-stepping-stone list.
+V2, V4, and the V5 search path have run on the non-5G Versa. The Gen1
+numbers are in [PERFORMANCE.md](PERFORMANCE.md). Checkouts and the
+LiteX patches are in [DEPENDENCIES.md](DEPENDENCIES.md).
 
-### Step 0 - ECP5 platform and PCIe PHY
+### Platform and PHY
 
-Required before any variant can run:
+`platforms/pcie_versa.py` is the Versa pinout, the PCIe reference clock,
+and the FT2232 JTAG/UART pins. `gateware/ecp5pcie/` is the Gen1 endpoint.
+The measured link is Gen1 x1, `10ee:0667`, BAR0 4 KiB. LitePCIe upstream
+has S7, UltraScale+, Cyclone V, Gowin GW5A, and CertusPro-NX PHYs. This
+endpoint stays in this repo. The 5G part, with `PCIE2_core` and 5 Gbps
+SERDES, has not been measured.
 
-- an ECP5 platform file with the Versa pinout, PCIe reference clock, and
-  the FT2232 JTAG/UART pins;
-- an ECP5 PCIe endpoint integration. The vendored LitePCIe in this tree
-  supports S7, UltraScale+, Cyclone V, Gowin GW5A, and Lattice
-  CertusPro-NX PHYs, but not ECP5. ECP5 PCIe is SERDES plus Lattice's soft
-  endpoint IP (`PCIE_core` on the non-5G Versa, `PCIE2_core` on the
-  ECP5-5G board), so this needs a new ECP5 PHY/integration or another
-  proven endpoint core;
-- a constraints/timing strategy for the ECP5 SERDES/PCIe endpoint and the
-  100 MHz system clock;
-- a host-visible device ID and BAR layout, ideally matching the Squirrel
-  (`10ee:0666`, BAR0 `0x40000`) so the existing console software and
-  scripts need minimal changes.
+### Images
 
-This is the largest unknown. The SoC variants are only as portable as the
-ECP5 PCIe endpoint underneath them.
+- One-dword reads, `soc_ecp5_tlpdma.py`: `TLPDMA` and
+  `software/soc_console`. Enumeration, the bus-master write, completion
+  parsing, and the UART console ran on this image.
+- One-outstanding and four-outstanding reads, `soc_ecp5_search.py`:
+  `cscan` drives `ChunkDMA`. `scan` and `bench` drive `ReadBench`.
+  `software/soc_search_console`. A 1 GiB `bench` and a stride-`0x400`
+  `scan` both measured 196.7 MiB/s.
+- RawUDP, `soc_ecp5_udp.py`: the PCILeech FIFO over the gigabit jack.
+  The section below has the host commands.
+- LitePCIe, `soc_ecp5_litepcie.py`: BAR0, one DMA channel, and
+  one MSI vector. Build and host steps are in
+  [LITEPCIE_EXAMPLES.md](LITEPCIE_EXAMPLES.md).
 
-### Step 1 - V2 single-word SoC
+V3 has no ECP5 image. The Squirrel V3 bitstream remains `soc_pcileech.py`.
 
-First functional target. It validates:
+### Still open
 
-- PCIe enumeration and auto-BME on ECP5;
-- MRd32 below 4 GiB and MRd64 above 4 GiB;
-- completion parsing and byte order;
-- the FT2232 UART console;
-- the VexRiscv/ROM/SRAM/CSR integration.
-
-No FT601 is involved. The slow FT2232 UART is sufficient because the data
-path is PCIe.
-
-### Step 2 - V3 and V4
-
-Once V2 works:
-
-- V3 tests whether the PCILeech FIFO/mux protocol can be reused without
-  FT601. It is useful if the ECP5 port wants protocol compatibility before
-  the FT601 shield exists.
-- V4 adds 4 KiB MRd64 bursts, split-completion handling, two buffers, and
-  the CPU-visible window. This is the first real search engine on ECP5.
-
-Success criteria are the same as on the Squirrel: VESA match, high-address
-match, no completion errors, and a stable 4 KiB chunk stream.
-
-### Step 3 - V5 and the FT601 shield
-
-V5 (4 outstanding) depends on the ECP5 PCIe endpoint's tag/outstanding
-behavior. Test V4 first; move to V5 only if the endpoint can keep multiple
-tagged 4 KiB reads in flight without completion loss.
-
-The FT601 shield is a separate track:
-
-- it enables V1 and PCILeech-host compatibility on ECP5;
-- it provides a high-speed host data path if the search SoC later needs to
-  stream more than progress/results over USB;
-- it is not required for V2-V5, whose data path is PCIe and whose UART
-  only carries control and results.
-
-The shield work includes the FT601 FIFO pinout and clock, USB 3.0
-connector and power, signal integrity, and an ECP5 port of the FT601
-controller. It should not block the SoC bring-up.
+The FT601 shield would carry V1 on the Versa: FIFO pinout and clock, USB
+3.0 connector and power, and an ECP5 port of the FT601 controller. RawUDP
+is the host path that runs today. The 5G Versa is unmeasured. Search
+closed clk100 at nextpnr seed 24.
 
 ### PCIeLeech over UDP
 

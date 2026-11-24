@@ -184,6 +184,9 @@ static void print_help(void)
 	uart_puts("  help                show this help\r\n");
 	uart_puts("  status              show PCIe/DMA status\r\n");
 	uart_puts("  scan <addr64> <len64> <w0> <w1> <w2> <w3> [stride]\r\n");
+	uart_puts("                      4-outstanding ReadBench scan\r\n");
+	uart_puts("  cscan <addr64> <len64> <w0> <w1> <w2> <w3> [stride]\r\n");
+	uart_puts("                      one-outstanding ChunkDMA scan, two buffers\r\n");
 	uart_puts("                      stride defaults to 16 and is a 16-byte multiple\r\n");
 	uart_puts("  bench <addr64> <len64>  raw 4-outstanding PCIe read benchmark\r\n");
 	uart_puts("  peek                show first 16 bytes of DMA buffer 0\r\n");
@@ -230,13 +233,12 @@ static uint32_t bswap32(uint32_t v)
 	       ((v & 0xff000000u) >> 24);
 }
 
-static int scan_buffer(uint32_t buffer, uint64_t addr, uint32_t len,
-		       const uint32_t pattern[4], uint32_t stride,
-		       uint64_t *match)
+static int scan_buffer(uint32_t base, uint32_t buffer, uint64_t addr,
+		       uint32_t len, const uint32_t pattern[4],
+		       uint32_t stride, uint64_t *match)
 {
 	const volatile uint32_t *buf =
-		(const volatile uint32_t *)(READ_BUF_BASE +
-					    (buffer * 0x1000u));
+		(const volatile uint32_t *)(base + (buffer * 0x1000u));
 	uint32_t off;
 
 	for (off = 0; off + 16u <= len; off += stride) {
@@ -418,7 +420,7 @@ static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4],
 		for (settle = 0; settle < 16; settle++)
 			asm volatile("nop;" ::: "memory");
 
-		if (scan_buffer(tag, addr + scanned, current_len,
+		if (scan_buffer(READ_BUF_BASE, tag, addr + scanned, current_len,
 				pattern, stride, &match)) {
 			read_bench_stop_write(1);
 			while (!(read_bench_status_read() & (STATUS_DONE | STATUS_ERROR)))
@@ -446,6 +448,145 @@ static void scan_memory(uint64_t addr, uint64_t len, const uint32_t pattern[4],
 		;
 	main_bench_select_write(0);
 	uart_puts("no match\r\n");
+}
+
+static void chunk_scan_memory(uint64_t addr, uint64_t len,
+			      const uint32_t pattern[4], uint32_t stride)
+{
+	uint64_t scanned = 0;
+	uint64_t next_progress = 256ull * 1024 * 1024;
+	uint64_t match;
+	uint32_t current_len;
+	uint32_t next_len = 0;
+	uint32_t current_buf = 0;
+	uint32_t next_buf = 0;
+	uint32_t wait_count = 0;
+	int have_next;
+
+	main_bench_select_write(0);
+	if (!(chunk_dma_status_read() & STATUS_LINK_READY))
+		uart_puts("waiting for PCIe link...\r\n");
+	while (!(chunk_dma_status_read() & STATUS_LINK_READY)) {
+		if ((wait_count++ & 0xfffff) == 0)
+			print_status();
+	}
+
+	current_len = (len > 4096) ? 4096 : (uint32_t)len;
+	if (start_chunk(addr, current_len, current_buf) != 0) {
+		uart_puts("error: bad chunk\r\n");
+		return;
+	}
+
+	for (;;) {
+		uint64_t current_addr;
+
+		if (wait_chunk() != 0)
+			return;
+
+		current_addr = addr + scanned;
+		scanned += current_len;
+		have_next = scanned < len;
+		if (have_next) {
+			next_len = ((len - scanned) > 4096) ? 4096
+				: (uint32_t)(len - scanned);
+			next_buf = current_buf ^ 1;
+			if (start_chunk(addr + scanned, next_len, next_buf) != 0) {
+				uart_puts("error: bad chunk\r\n");
+				return;
+			}
+		}
+
+		if (scan_buffer(DMA_BUF_BASE, current_buf, current_addr,
+				current_len, pattern, stride, &match)) {
+			if (have_next)
+				(void)wait_chunk();
+			uart_puts("match 0x");
+			put_hex64(match);
+			uart_puts("\r\n");
+			return;
+		}
+
+		if (!have_next)
+			break;
+
+		if (scanned >= next_progress) {
+			uart_puts("scan ");
+			put_hex64(scanned);
+			uart_puts("\r\n");
+			next_progress += 256ull * 1024 * 1024;
+		}
+
+		current_buf = next_buf;
+		current_len = next_len;
+	}
+
+	uart_puts("no match\r\n");
+}
+
+static int parse_scan_args(int argc, char **argv, const char *cmd,
+			   uint64_t *addr_out, uint64_t *len_out,
+			   uint32_t pattern[4], uint32_t *stride_out)
+{
+	uint32_t addr_hi;
+	uint32_t addr_lo;
+	uint32_t len_hi;
+	uint32_t len_lo;
+	uint64_t addr;
+	uint64_t len;
+	uint32_t stride = 16;
+	int i;
+
+	if (argc != 7 && argc != 8) {
+		uart_puts("error: ");
+		uart_puts(cmd);
+		uart_puts(" needs addr, len, four pattern words, and optional stride\r\n");
+		return -1;
+	}
+	if (parse_hex64(argv[1], &addr_hi, &addr_lo) != 0 ||
+	    parse_hex64(argv[2], &len_hi, &len_lo) != 0) {
+		uart_puts("error: invalid address or length\r\n");
+		return -1;
+	}
+	addr = ((uint64_t)addr_hi << 32) | addr_lo;
+	len = ((uint64_t)len_hi << 32) | len_lo;
+	for (i = 0; i < 4; i++) {
+		uint32_t hi;
+		uint32_t lo;
+
+		if (parse_hex64(argv[3 + i], &hi, &lo) != 0 || hi != 0) {
+			uart_puts("error: invalid pattern word\r\n");
+			return -1;
+		}
+		pattern[i] = lo;
+	}
+	if (addr & 15ull) {
+		uart_puts("error: address must be 16-byte aligned\r\n");
+		return -1;
+	}
+	if (len == 0 || (len & 15ull)) {
+		uart_puts("error: length must be nonzero and 16-byte aligned\r\n");
+		return -1;
+	}
+	if (addr + len < addr) {
+		uart_puts("error: address range overflow\r\n");
+		return -1;
+	}
+	if (argc == 8) {
+		uint32_t stride_hi;
+		uint32_t stride_lo;
+
+		if (parse_hex64(argv[7], &stride_hi, &stride_lo) != 0 ||
+		    stride_hi != 0 || stride_lo == 0 || (stride_lo & 15u) ||
+		    stride_lo > 4096u || stride_lo > len) {
+			uart_puts("error: invalid stride\r\n");
+			return -1;
+		}
+		stride = stride_lo;
+	}
+	*addr_out = addr;
+	*len_out = len;
+	*stride_out = stride;
+	return 0;
 }
 
 int main(void)
@@ -481,70 +622,19 @@ int main(void)
 				continue;
 			}
 			print_help();
-		} else if (str_eq(argv[0], "scan")) {
-			uint32_t addr_hi;
-			uint32_t addr_lo;
-			uint32_t len_hi;
-			uint32_t len_lo;
+		} else if (str_eq(argv[0], "scan") || str_eq(argv[0], "cscan")) {
 			uint64_t addr;
 			uint64_t len;
 			uint32_t pattern[4];
-			uint32_t stride = 16;
-			int bad = 0;
-			int i;
+			uint32_t stride;
 
-			if (argc != 7 && argc != 8) {
-				uart_puts("error: scan needs addr, len, four pattern words, and optional stride\r\n");
+			if (parse_scan_args(argc, argv, argv[0], &addr, &len,
+					    pattern, &stride) != 0)
 				continue;
-			}
-			if (parse_hex64(argv[1], &addr_hi, &addr_lo) != 0 ||
-			    parse_hex64(argv[2], &len_hi, &len_lo) != 0) {
-				uart_puts("error: invalid address or length\r\n");
-				continue;
-			}
-			addr = ((uint64_t)addr_hi << 32) | addr_lo;
-			len = ((uint64_t)len_hi << 32) | len_lo;
-			for (i = 0; i < 4; i++) {
-				uint32_t hi;
-				uint32_t lo;
-
-				if (parse_hex64(argv[3 + i], &hi, &lo) != 0 || hi != 0) {
-					bad = 1;
-					break;
-				}
-				pattern[i] = lo;
-			}
-			if (bad) {
-				uart_puts("error: invalid pattern word\r\n");
-				continue;
-			}
-			if (addr & 15ull) {
-				uart_puts("error: address must be 16-byte aligned\r\n");
-				continue;
-			}
-			if (len == 0 || (len & 15ull)) {
-				uart_puts("error: length must be nonzero and 16-byte aligned\r\n");
-				continue;
-			}
-			if (addr + len < addr) {
-				uart_puts("error: address range overflow\r\n");
-				continue;
-			}
-			if (argc == 8) {
-				uint32_t stride_hi;
-				uint32_t stride_lo;
-
-				if (parse_hex64(argv[7], &stride_hi,
-						&stride_lo) != 0 ||
-				    stride_hi != 0 || stride_lo == 0 ||
-				    (stride_lo & 15u) || stride_lo > 4096u ||
-				    stride_lo > len) {
-					uart_puts("error: invalid stride\r\n");
-					continue;
-				}
-				stride = stride_lo;
-			}
-			scan_memory(addr, len, pattern, stride);
+			if (str_eq(argv[0], "cscan"))
+				chunk_scan_memory(addr, len, pattern, stride);
+			else
+				scan_memory(addr, len, pattern, stride);
 		} else if (str_eq(argv[0], "bench")) {
 			uint32_t addr_hi;
 			uint32_t addr_lo;

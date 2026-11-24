@@ -582,9 +582,11 @@ The existing SoC variants should need only a PHY/platform swap:
   exists.
 
 To avoid duplicating top-level code, introduce a build-time selector
-(e.g. `--phy s7|ecp5` plus `--device LFE5UM|LFE5UM5G`) or a small
-`soc_ecp5.py` that imports the same SoC cores with the ECP5 PHY. The
-same SoC cores run on both ECP5 variants; the device and vendor TLP
+(e.g. `--phy s7|ecp5` plus `--device LFE5UM|LFE5UM5G`) or separate tops
+with the ECP5 PHY. Those tops are now `soc_ecp5_tlpdma.py`,
+`soc_ecp5_search.py`, and `soc_ecp5_litepcie.py`. The bring-up file
+`soc_ecp5.py` was removed. The same SoC cores run on both ECP5
+variants; the device and vendor TLP
 width are build-time selections. The implementation plan will choose
 the least invasive option after Phase 0.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ECP5 Versa LitePCIe example: one DMA channel and one MSI vector.
+"""ECP5 Versa LitePCIe image: one DMA channel and one MSI vector.
 
 Same clock and pin setup as the Gen1 search image. `SoC.add_pcie` supplies the
 CSR window, the DMA reader and writer, and `LitePCIeMSI` on `phy.msi`.
@@ -41,11 +41,11 @@ class _CRG(Module):
         self.specials += AsyncResetSynchronizer(self.cd_sys, ~rst_n)
 
 
-class SoCECP5Example(SoCMini):
+class SoCECP5LitePCIe(SoCMini):
     def __init__(self, platform, refclk_freq, ignore_perst=False, uart_baudrate=115200):
         sys_clk_freq = int(100e6)
         SoCMini.__init__(self, platform, sys_clk_freq,
-            ident         = "pcie_screamer ECP5 LitePCIe example",
+            ident         = "pcie_screamer ECP5 LitePCIe",
             ident_version = True,
         )
 
@@ -83,10 +83,18 @@ class SoCECP5Example(SoCMini):
         self.comb += platform.request_all("user_led").eq(~leds if LED_ACTIVE_LOW else leds)
 
 
+def _print_pcie_id(phy):
+    vendor = phy.vendor_id
+    device = phy.device_id
+    print(f"PCIe ID {vendor:04x}:{device:04x} revision {phy.revision:02x}")
+    print("After insmod, bind this id with:")
+    print(f"  echo {vendor:04x} {device:04x} | sudo tee /sys/bus/pci/drivers/litepcie/new_id")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", choices=DEVICES, required=True,
-                        help="LFE5UM (Versa). The example is Gen1 on the non-5G part")
+                        help="LFE5UM (Versa). This image is Gen1 on the non-5G part")
     parser.add_argument("--refclk-mhz", type=float, default=156.25,
                         help="EXTREF0 frequency (default 156.25, the Versa's onboard synthesizer)")
     parser.add_argument("--ignore-perst", action="store_true", help="Treat PERST# as always released")
@@ -98,7 +106,7 @@ def main():
     args = parser.parse_args()
 
     if args.device != "LFE5UM":
-        parser.error("this example is the non-5G Versa (LFE5UM), Gen1")
+        parser.error("this image is the non-5G Versa (LFE5UM), Gen1")
 
     tools_bin = ROOT / "tools" / "bin"
     if tools_bin.is_dir():
@@ -106,16 +114,18 @@ def main():
 
     refclk_freq = args.refclk_mhz * 1e6
     platform = Platform(device=args.device)
-    build_name = f"soc_ecp5_example_{args.device.lower()}_gen1_ref{int(refclk_freq / 1e6)}"
+    build_name = f"soc_ecp5_litepcie_{args.device.lower()}_gen1_ref{int(refclk_freq / 1e6)}"
     output_dir = ROOT / "build" / build_name
 
-    soc = SoCECP5Example(platform,
+    soc = SoCECP5LitePCIe(platform,
         refclk_freq   = refclk_freq,
         ignore_perst  = args.ignore_perst,
         uart_baudrate = args.uart_baudrate,
     )
+    _print_pcie_id(soc.pcie_phy)
     builder = Builder(soc, output_dir=str(output_dir), csr_csv=str(output_dir / "csr.csv"))
     builder.build(run=args.build, build_name=build_name, seed=args.seed)
+    _print_pcie_id(soc.pcie_phy)
 
     software = output_dir / "litepcie_software"
     generate_litepcie_software(soc, str(software))
