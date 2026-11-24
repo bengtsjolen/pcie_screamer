@@ -352,7 +352,8 @@ class MuxSerializer(Module):
 # ---------------------------------------------------------------------------
 class PCILeechFIFO(Module):
     def __init__(self, mux_out_fifo_depth=2048, tlp_rx_fifo_depth=2048,
-                 inactivity_one_shot=False, inactivity_ticks=0):
+                 inactivity_one_shot=False, inactivity_ticks=0, device_id=0x04,
+                 inactivity_ticks_cap=0):
         # USB side — 32-bit word streams
         self.usb_rx = stream.Endpoint([("data", 32)])   # words arriving from host
         self.usb_tx = stream.Endpoint([("data", 32)])   # words going to host
@@ -954,10 +955,17 @@ class PCILeechFIFO(Module):
         inactivity_base    = Signal(64)
         timer_enable       = Signal()
         timer_ticks        = Signal(32)
+        # LeechCore writes 1 ms and then waits only for the keepalive marker.
+        # A non-zero cap shortens that idle gap. USB images leave the cap at 0
+        # and use the host value unchanged.
+        timer_limit        = Signal(32)
 
         self.comb += [
             timer_enable.eq(rw[16]),
             timer_ticks .eq(rw[64:96]),
+            timer_limit .eq(Mux(timer_ticks > inactivity_ticks_cap,
+                                inactivity_ticks_cap, timer_ticks)
+                             if inactivity_ticks_cap else timer_ticks),
         ]
 
         # Free-running 64-bit tick counter
@@ -988,7 +996,7 @@ class PCILeechFIFO(Module):
                 & ~in_cmd_write
                 & cmd_tx_fifo.sink.ready
                 & (tlp_tx_cooldown == 0)       # no pending MRd TLPs
-                & (inactivity_elapsed > timer_ticks)
+                & (inactivity_elapsed > timer_limit)
             ),
         ]
 
@@ -1045,7 +1053,9 @@ class PCILeechFIFO(Module):
 
         VERSION_MAJOR = 0x04   # match pcileech-fpga PCIeSquirrel major version
         VERSION_MINOR = 0x0e   # match pcileech-fpga PCIeSquirrel v4.14 minor version
-        DEVICE_ID     = 0x04   # Match ufrisk reference (DEVICE_ID=4 → small tags)
+        # 0x04 is ScreamerM2, which is what the USB images report. LeechCore
+        # picks its delay profile from this byte. RawUDP passes 0x05.
+        DEVICE_ID     = device_id
 
         rw_readback = Signal(16)
         ro_readback = Signal(16)

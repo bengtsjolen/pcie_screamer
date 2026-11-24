@@ -585,8 +585,9 @@ Request so a probe does not hang; completions of the FIFO's own reads are
 forwarded.
 
 `ping 192.168.1.50` works on the wire (0% loss). Getting there required a
-store-and-forward `PacketFIFO` in the `eth_tx` domain: the 50 MHz MAC stack
-cannot keep the 125 MHz gigabit TX datapath fed, so a plain TX FIFO underruns
+store-and-forward `PacketFIFO` in the `eth_tx` domain: the MAC stack
+runs slower than the 125 MHz gigabit TX clock and cannot keep that
+datapath fed, so a plain TX FIFO underruns
 and truncates every frame, giving it a bad FCS that the switch drops. The full
 investigation, the timing dead-end of running the stack at line rate, and the
 fix are in [ETHERNET.md](ETHERNET.md).
@@ -595,8 +596,9 @@ A stock `pcileech` 4.20 binary reads host memory through this image. On
 2026-11-23, `dump` of `0x3f000` for one page returned the VESA option ROM
 (`56 45 53 41` at the start, `NVIDIA` at offset `0x100`), with 1 page read
 and 0 failed. A later dump of `0x1003f000` for 256 MiB + 4 KiB printed
-**23 MB/s**, 65537/65537 pages, none failed. That rate is in
-[PERFORMANCE.md](PERFORMANCE.md). The command is `dump`, and `-device`
+**23 MB/s**, 65537/65537 pages, none failed. Later images, with device id 5,
+a 70 MHz stack, and a 100 µs keepalive cap, print **32–36 MB/s**. Those
+runs are in [PERFORMANCE.md](PERFORMANCE.md). The command is `dump`, and `-device`
 comes after it. `info` prints help and does not open the device.
 
 ```sh

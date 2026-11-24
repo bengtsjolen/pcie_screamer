@@ -1,7 +1,8 @@
 # PCIe read-throughput measurements
 
 Date: 2026-10-26 (Squirrel, updated 2026-10-27). ECP5 Versa added 2026-11-22.
-LitePCIe example loopback added 2026-11-23. RawUDP dump added 2026-11-23.
+LitePCIe example loopback added 2026-11-23. RawUDP dump added 2026-11-23,
+follow-up through 2026-11-24.
 
 This document collects memory-read throughput for two platforms. The ECP5
 section is the on-chip search engine (`ReadBench`, four outstanding 4 KiB
@@ -28,15 +29,14 @@ reads, UART console). The Squirrel section is the FT601/PCILeech path.
   errors. That is not this ReadBench number. The example posts one TLP at
   a time and splits each 8 KiB buffer into 512-byte requests. Build steps
   and the host commands are in [LITEPCIE_EXAMPLES.md](LITEPCIE_EXAMPLES.md).
-* Stock `pcileech` 4.20 over RawUDP (`soc_ecp5_udp.py`) dumped 256 MiB +
-  4 KiB at the speed the program printed, **23 MB/s**, with 65537/65537
-  pages read and none failed. Effective payload is about 10 MB/s on a
-  100 Mbit link and about 100 MB/s on gigabit. The MAC/IP/UDP stack runs
-  at 50 MHz while the gigabit byte clock is 125 MHz, so until that stack
-  meets timing at a higher clock the expected ceiling is
-  `50/125 × 100 MB/s = 40 MB/s`. 23 MB/s is under that, and in the same
-  range as an FT2232H-56Q FIFO on an Acorn CLE-215+. Host steps are in
-  [VARIANTS.md](VARIANTS.md).
+* Stock `pcileech` 4.20 over RawUDP (`soc_ecp5_udp.py`) first dumped
+  256 MiB + 4 KiB at **23 MB/s** with no failed pages. Reporting device
+  id 5, clocking the stack at 70 MHz, and capping the keepalive at
+  100 µs moved the printed speed to **32–36 MB/s**. A 512 KiB read batch
+  in a patched LeechCore, preloaded under the same binary, finished at
+  **36 MB/s** as well. The transfer itself is what sits there. Host steps
+  are in [VARIANTS.md](VARIANTS.md). The patch is
+  [contrib/leechcore-netv2-512kib.patch](contrib/leechcore-netv2-512kib.patch).
 
 ### Test setup
 
@@ -165,12 +165,92 @@ higher and still meet timing:
 | Stack at 50 MHz, PHY byte clock 125 MHz | 50/125 × 100 MB/s | **40 MB/s** |
 | Measured RawUDP `dump` | `pcileech` 4.20, 65537 pages, 0 failed | **23 MB/s** |
 
-23 MB/s is past the 10 MB/s 100 Mbit figure and short of the 40 MB/s stack
-ceiling. It matches the operator's FT2232H-56Q result on an Acorn
-CLE-215+, which was not re-measured for this note. The on-chip `bench`
-on this same Gen1 x1 slot is 206 MB/s, so the PCIe link is above the
-Ethernet ceiling. Each `FT_ReadPipe` still ends at the first inactivity
-keepalive, which is one reason the run sits under 40 MB/s.
+23 MB/s is past the 10 MB/s 100 Mbit figure. It matches the operator's
+FT2232H-56Q result on an Acorn CLE-215+, which was not re-measured for
+this note. The on-chip `bench` on this same Gen1 x1 slot is 206 MB/s, so
+the PCIe link is above the Ethernet path. That 23 MB/s run reported
+device id 4, so LeechCore used the ScreamerM2 profile (`DELAY_READ` 300 µs,
+`DELAY_WRITE` 25 µs) and the stock 1 ms keepalive.
+
+### RawUDP follow-up, 2026-11-23 and 2026-11-24
+
+Three host-visible changes, then one host-library change. Speeds are what
+`pcileech` printed. `1 MB = 1000*1000`.
+
+The image reports device id **5** (NeTV2 RawUDP). That profile has
+`DELAY_READ = 0`, `DELAY_WRITE = 0`, and `MAX_SIZE_RX = 0x1c000` (112 KiB).
+The connect line is `NeTV2 RawUDP ... [0,0,0]`. The MAC/IP/UDP stack clock
+is **70 MHz**. Post-route `crg_clkout` reached 73.7 MHz against that
+constraint. The gigabit RX clock on the same build reached 123.4 MHz
+against 125 MHz. LeechCore still writes a 1 ms inactivity timer and arms
+it on every `FT_ReadPipe`. The read returns when it sees the keepalive
+marker, so the Versa caps the idle gap at **100 µs** (10 000 ticks at
+100 MHz) and sends the same marker.
+
+| Change | Range | Speed | Pages failed |
+|--------|-------|-------|--------------|
+| id 4, stack 50 MHz, keepalive 1 ms | `0x1003f000` + 256 MiB + 4 KiB | 23 MB/s | 0 / 65537 |
+| id 5, stack 50 MHz, keepalive 1 ms | same class of dump | 28 MB/s | not recorded; meter often 32, sometimes higher |
+| id 5, stack 70 MHz, keepalive 1 ms | same class of dump | 26 MB/s | not recorded |
+| id 5, stack 70 MHz, keepalive 100 µs | `0x1003f000`–`0x30040000` | 36 MB/s | 822 / 131073 |
+| same image, repeat | `0x1003f000`–`0x30040000` | 34 MB/s | 926 / 131073 |
+| same image | `0x3003f000`–`0x50040000` | 34 MB/s | 886 / 131073 |
+| same image | `0x1003f000`–`0x20040000` | 32 MB/s | 432 / 65537 |
+| same image, LeechCore `MAX_SIZE_RX` 512 KiB | `0x1003f000`–`0x20040000`, `-out none` | 36 MB/s | 643 / 65537 |
+
+The 512 KiB row used LeechCore 2.23.5 (`23f1919`, 2026-11-02) with
+[contrib/leechcore-netv2-512kib.patch](contrib/leechcore-netv2-512kib.patch),
+built as `contrib/LeechCore/files/leechcore.so` and loaded with
+`LD_PRELOAD` in front of `pcileech` 4.20. The header matches the one
+shipped with that binary, so MemProcFS and PciLeech were left as they
+are. The connect line was `NeTV2 RawUDP PCIe gen1 x1 [0,0,0] [v4.14,ad00]
+[SYNC,NORM]`. The meter moved between 32 and 41 MB/s. That library also
+printed `protocol=403` for the run.
+
+Raising the stack from 50 MHz to 70 MHz, with the 1 ms keepalive still in
+place, went from 28 MB/s to 26 MB/s. The 8-bit stack clock was not what
+held the dump at the high 20s. Capping the keepalive at 100 µs is what
+moved the final number into the low-to-mid 30s. On a 112 KiB batch that
+1 ms had been about a quarter of the wall time. At 100 µs it is a few
+percent.
+
+The failed pages showed up with the short keepalive and stayed at roughly
+0.6–1% of pages. Two dumps of the same 512 MiB do not miss the same pages.
+The holes are single pages and pairs, spread evenly across the 28 pages
+of a 112 KiB batch. A keepalive that closed the read early would have
+piled them on the last page of the batch. A dropped datagram throws away
+the completions inside it, and the next datagram is a new TLP frame, so
+the rest of the batch survives. That matches the gigabit RX clock still
+missing 125 MHz. The speed figures above include those holes. The NeTV2
+profile does not retry them.
+
+A continuously busy 70 MHz stack would move about **54 MB/s** of memory.
+The stack emits one frame byte per cycle, 70 MB/s, and a 1024-byte
+datagram is 1066 of those bytes once the Ethernet, IP, and UDP headers
+are counted, about 67 MB/s of FT601 payload. A 256-byte completion is
+320 bytes on that pipe (status word plus header), and `67 / 1.25` is
+54 MB/s. 50 MB/s of memory needs that shifter busy almost the whole time.
+
+The 512 KiB batch was the test of the other suspect: stock LeechCore
+stops every 112 KiB, waits for the marker, parses, and only then sends
+the next reads. The tag field holds 128 pages, which is 512 KiB, and
+`readsize` can only lower `MAX_SIZE_RX`. Quadrupling the batch left the
+dump at 36 MB/s. The pause between batches is not the remaining gap. The
+transfer itself runs near 36 MB/s, short of the 54 MB/s a full shifter
+would do.
+
+To try the 512 KiB profile again, from a fresh LeechCore 2.23.5 tree:
+
+```sh
+git clone --depth 1 https://github.com/ufrisk/LeechCore.git contrib/LeechCore
+git -C contrib/LeechCore apply ../leechcore-netv2-512kib.patch
+make -C contrib/LeechCore/leechcore
+LD_PRELOAD=$PWD/contrib/LeechCore/files/leechcore.so \
+  pcileech dump -device RAWUDP://ip=192.168.1.50 ...
+```
+
+Run that from this repository. `git -C` makes the apply path relative to
+`contrib/LeechCore`. The patch is against commit `23f1919`.
 
 ## PCIe Squirrel read-throughput measurements
 

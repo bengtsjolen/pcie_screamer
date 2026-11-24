@@ -60,10 +60,10 @@ IP_ADDRESS  = "192.168.1.50"
 #
 # Running the whole stack at 125 MHz to match the drain does NOT close timing
 # on this -8 part: the LiteEth IP/ICMP depacketizer cloud tops out ~75 MHz
-# (crg_clkout post-route) next to the PCIe core. So the stack stays at a slow,
-# timing-closing clock and the underrun is fixed instead by buffering a full
-# frame in the eth_tx domain before it reaches the PHY (store-and-forward).
-ETH_CLK_FREQ = int(50e6)
+# (crg_clkout post-route) next to the PCIe core. 70 MHz is inside that result.
+# The underrun is still fixed by buffering a full frame in the eth_tx domain
+# before it reaches the PHY (store-and-forward).
+ETH_CLK_FREQ = int(70e6)
 
 
 class _CRG(Module):
@@ -126,7 +126,7 @@ class _TXStoreForwardPHY(Module):
     (125 MHz) domain before it reaches the wire.
 
     At gigabit the RGMII TX datapath drains one octet per eth_tx cycle for the
-    whole frame, but the MAC/IP/UDP stack runs at 50 MHz (it won't close timing
+    whole frame, but the MAC/IP/UDP stack runs at 70 MHz (it won't close timing
     at 125 MHz on this part). The MAC's own TX CDC is a plain async FIFO, so the
     slow producer cannot keep it full and it underruns mid-frame: RX_CTL drops
     inside the frame, the frame is truncated, and the appended FCS no longer
@@ -208,7 +208,7 @@ class SoCECP5UDP(SoCMini):
             dynamic_tx_delay = True,
         )
         self.submodules.eth_tx_skew = _EthTxSkew(self.ethphy.crg)
-        # Store-and-forward the formed TX frame in eth_tx so the 50 MHz stack
+        # Store-and-forward the formed TX frame in eth_tx so the 70 MHz stack
         # cannot underrun the 125 MHz gigabit TX datapath (see the class doc).
         self.submodules.eth_phy_sf = eth_phy_sf = _TXStoreForwardPHY(self.ethphy)
         # The MAC user side is renamed onto cd_eth after the UDP port exists,
@@ -235,7 +235,9 @@ class SoCECP5UDP(SoCMini):
 
         self.submodules.pcileech_fifo = fifo = PCILeechFIFO(
             inactivity_one_shot=True,
-            inactivity_ticks=0x000186a0,  # 1 ms at 100 MHz, RawUDP's read end
+            inactivity_ticks=0x000186a0,  # host writes this 1 ms value; the cap below wins
+            inactivity_ticks_cap=10_000,  # 100 µs at 100 MHz, then the same keepalive marker
+            device_id=0x05,               # NeTV2 RawUDP: LeechCore read/write delays are 0
         )
         # PCILeechFIFO ties usb_rx.ready high itself, so only valid/data are driven here.
         self.comb += [
